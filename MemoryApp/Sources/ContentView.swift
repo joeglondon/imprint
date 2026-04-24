@@ -1,0 +1,1213 @@
+import AppKit
+import SwiftUI
+import UniformTypeIdentifiers
+
+struct ContentView: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        ZStack {
+            VStack(spacing: 0) {
+                GraphiteTitleBar(pickFiles: pickFiles)
+                DividerLine()
+                HStack(spacing: 0) {
+                    GraphiteSidebar()
+                        .frame(width: 208)
+                    DividerLine(axis: .vertical)
+                    CenterWorkspace()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    DividerLine(axis: .vertical)
+                    GraphiteInspector()
+                        .frame(width: 320)
+                }
+            }
+            .background(theme.surfaces.surface1)
+            .foregroundStyle(theme.ink.primary)
+            .environment(\.memoryTheme, ThemeCatalog.graphite)
+            .background(WindowChromeConfigurator())
+            .ignoresSafeArea(.container, edges: .top)
+
+            if appState.isBusy {
+                BusyOverlay(progress: appState.operationProgress, message: appState.statusMessage)
+            }
+        }
+        .onDrop(of: [UTType.fileURL.identifier], isTargeted: nil, perform: handleDrop)
+    }
+
+    private func pickFiles() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        if panel.runModal() == .OK {
+            appState.importFiles(urls: panel.urls)
+        }
+    }
+
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        let collector = DropURLCollector()
+        let group = DispatchGroup()
+        for provider in providers where provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+            group.enter()
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                defer { group.leave() }
+                if let data = item as? Data,
+                   let raw = String(data: data, encoding: .utf8),
+                   let url = URL(string: raw) {
+                    collector.append(url)
+                } else if let url = item as? URL {
+                    collector.append(url)
+                }
+            }
+        }
+        group.notify(queue: .main) {
+            let urls = collector.values()
+            if !urls.isEmpty {
+                appState.importFiles(urls: urls)
+            }
+        }
+        return true
+    }
+}
+
+private final class DropURLCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [URL] = []
+
+    func append(_ url: URL) {
+        lock.lock()
+        stored.append(url)
+        lock.unlock()
+    }
+
+    func values() -> [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+}
+
+private struct GraphiteTitleBar: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+    let pickFiles: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 10) {
+                Text("imprint")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.ink.secondary)
+                Text("— \(theme.name.lowercased())")
+                    .font(.system(size: 12))
+                    .foregroundStyle(theme.ink.quaternary)
+            }
+
+            Spacer()
+
+            HStack(spacing: 8) {
+                Text("\(appState.summary.documents) docs · \(appState.summary.chunks) chunks")
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(theme.ink.tertiary)
+                    .lineLimit(1)
+                DividerLine(axis: .vertical)
+                    .frame(height: 14)
+                    .padding(.horizontal, 2)
+                ActorBadge(kind: .human)
+                ActorBadge(kind: .ai, label: "claude")
+                IconButton("Import Files", systemImage: "square.and.arrow.down", action: pickFiles)
+                    .disabled(appState.isBusy)
+                IconButton("Rebuild", systemImage: "arrow.triangle.2.circlepath", action: appState.rebuild)
+                    .disabled(appState.isBusy)
+                IconButton("Refresh Map", systemImage: "arrow.clockwise", action: appState.refreshSnapshot)
+                    .disabled(appState.isBusy)
+            }
+        }
+        .frame(height: 44)
+        .padding(.leading, 116)
+        .padding(.trailing, 14)
+        .background(theme.surfaces.chrome)
+    }
+}
+
+private struct WindowChromeConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async {
+            configure(window: view.window)
+        }
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            configure(window: view.window)
+        }
+    }
+
+    private func configure(window: NSWindow?) {
+        guard let window else { return }
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.styleMask.insert(.fullSizeContentView)
+        window.isMovableByWindowBackground = true
+    }
+}
+
+private struct GraphiteSidebar: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                SectionLabel("Store") {
+                    Text("~/Library")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(theme.ink.quaternary)
+                }
+                VStack(spacing: 2) {
+                    ForEach(SidebarSection.allCases) { section in
+                        SidebarSectionRow(
+                            section: section,
+                            count: count(for: section),
+                            selected: appState.selectedSection == section
+                        ) {
+                            appState.selectedSection = section
+                        }
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                SectionLabel("Regions") {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(theme.ink.quaternary)
+                }
+                VStack(spacing: 3) {
+                    if let entries = appState.snapshot?.map.entries, !entries.isEmpty {
+                        ForEach(Array(entries.prefix(8).enumerated()), id: \.element.id) { index, entry in
+                            RegionRow(entry: entry, count: regionCount(entry.regionId), tone: tone(for: index))
+                        }
+                    } else {
+                        EmptyHint("Import files to build regions.")
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                SectionLabel("Summary")
+                SummaryLine(title: "Documents", value: appState.summary.documents)
+                SummaryLine(title: "Chunks", value: appState.summary.chunks)
+                SummaryLine(title: "Regions", value: appState.summary.regions)
+                SummaryLine(title: "Links", value: appState.summary.links)
+            }
+
+            Spacer(minLength: 12)
+
+            VStack(alignment: .leading, spacing: 8) {
+                SectionLabel("Presence")
+                HStack(spacing: 8) {
+                    ActorBadge(kind: .human)
+                    Text("on \(currentRegionLabel)")
+                        .foregroundStyle(theme.ink.tertiary)
+                }
+                HStack(spacing: 8) {
+                    ActorBadge(kind: .ai, label: "claude")
+                    Text(appState.inspector.queryResult == nil ? "waiting" : "citing")
+                        .foregroundStyle(theme.ink.tertiary)
+                }
+            }
+            .font(.system(size: 11.5))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 14)
+        .background(theme.surfaces.surface2)
+    }
+
+    private var currentRegionLabel: String {
+        appState.inspector.selectedNode?.label ?? "map"
+    }
+
+    private func count(for section: SidebarSection) -> Int? {
+        switch section {
+        case .library: return appState.summary.documents
+        case .model: return nil
+        case .map: return appState.summary.regions
+        }
+    }
+
+    private func regionCount(_ regionID: String) -> Int {
+        appState.snapshot?.nodes.filter { $0.regionId == regionID }.count ?? 0
+    }
+
+    private func tone(for index: Int) -> ThemeTone {
+        [.human, .ai, .c, .d][index % 4]
+    }
+}
+
+private struct CenterWorkspace: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 13))
+                        .foregroundStyle(theme.ink.tertiary)
+                    TextField("How is rate limiting implemented across the gateway?", text: $appState.searchText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(theme.ink.secondary)
+                    Text("return to route")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(theme.ink.quaternary)
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 28)
+                .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
+
+                GraphiteButton("Route", style: .primary, action: appState.performSearch)
+                    .keyboardShortcut(.return, modifiers: [])
+                    .disabled(appState.isBusy || appState.searchText.isEmpty)
+                GraphiteButton("Backtrack", systemImage: "chevron.left", style: .ghost, action: appState.backtrack)
+                    .disabled(appState.isBusy)
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 48)
+            .background(theme.surfaces.surface1)
+
+            DividerLine()
+
+            SemanticCloudView(snapshot: appState.snapshot, selectedNode: appState.inspector.selectedNode) { node in
+                appState.selectNode(node)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            DividerLine()
+
+            HStack(spacing: 14) {
+                Text("2D map · click nodes to inspect")
+                    .font(.system(size: 11, design: .monospaced))
+                Spacer()
+                Text(appState.modelConfig.embeddingModel ?? "embedding model unset")
+                    .font(.system(size: 11, design: .monospaced))
+                DividerLine(axis: .vertical)
+                    .frame(height: 12)
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 6, height: 6)
+                    Text(appState.modelConfig.health?.status ?? "local")
+                }
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(statusColor)
+            }
+            .foregroundStyle(theme.ink.tertiary)
+            .padding(.horizontal, 14)
+            .frame(height: 30)
+            .background(theme.surfaces.surface2)
+        }
+    }
+
+    private var statusColor: Color {
+        appState.modelConfig.health?.status == "connected" ? theme.accents.success : theme.ink.tertiary
+    }
+}
+
+private struct GraphiteInspector: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        VStack(spacing: 0) {
+            switch appState.selectedSection {
+            case .library:
+                LibraryInspector()
+            case .model:
+                ModelInspector()
+            case .map:
+                MapInspector()
+            }
+        }
+        .background(theme.surfaces.surface1)
+    }
+}
+
+private struct MapInspector: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                InspectorBlock {
+                    SectionLabel("Selection") {
+                        if let selected = appState.inspector.selectedNode {
+                            Tag(selected.kind.rawValue, tone: tone(for: selected))
+                        }
+                    }
+                    if let selected = appState.inspector.selectedNode {
+                        Text(selected.label)
+                            .font(.system(size: 19, weight: .medium))
+                            .lineLimit(2)
+                            .foregroundStyle(theme.ink.primary)
+                        Text(selectionMeta(selected))
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(theme.ink.quaternary)
+                            .padding(.top, 1)
+                        Text(selected.detail)
+                            .font(.system(size: 12.5))
+                            .lineSpacing(3)
+                            .foregroundStyle(theme.ink.secondary)
+                            .padding(.top, 8)
+                    } else {
+                        EmptyHint("Select a region, chunk, or document in the cloud to inspect it.")
+                    }
+                }
+
+                InspectorDivider()
+
+                InspectorBlock {
+                    SectionLabel("Excerpt")
+                    if let excerpt = appState.inspector.excerpt, !excerpt.isEmpty {
+                        HighlightedText(excerpt)
+                            .textSelection(.enabled)
+                    } else {
+                        EmptyHint("No excerpt loaded yet.")
+                    }
+                    if let anchor = appState.inspector.sourceAnchor {
+                        Text(anchorLine(anchor))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(theme.ink.quaternary)
+                            .lineLimit(3)
+                            .padding(.top, 6)
+                    }
+                    HStack(spacing: 8) {
+                        TextField("Grep or search selection", text: $appState.grepText)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 12))
+                            .padding(.horizontal, 8)
+                            .frame(height: 26)
+                            .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
+                        GraphiteButton("Grep", style: .ghost, action: appState.grepSelectedDocument)
+                        GraphiteButton("Semantic", style: .ghost, action: appState.semanticSearchSelectedDocument)
+                    }
+                    .padding(.top, 8)
+                    if let selected = appState.inspector.selectedNode, selected.kind == .chunk {
+                        HStack(spacing: 8) {
+                            GraphiteButton("Window", style: .ghost) { appState.expandSelectedChunk(mode: .window) }
+                            GraphiteButton("Page", style: .ghost) { appState.expandSelectedChunk(mode: .page) }
+                            GraphiteButton("Section", style: .ghost) { appState.expandSelectedChunk(mode: .section) }
+                            GraphiteButton("Document", style: .ghost) { appState.expandSelectedChunk(mode: .document) }
+                        }
+                        .padding(.top, 6)
+                    }
+                }
+
+                InspectorDivider()
+
+                InspectorBlock {
+                    SectionLabel("Chunks") {
+                        if !appState.inspector.passages.isEmpty {
+                            Text("\(appState.inspector.passages.count)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(theme.ink.quaternary)
+                        }
+                    }
+                    if appState.inspector.passages.isEmpty {
+                        EmptyHint("No chunks loaded for this selection.")
+                    } else {
+                        VStack(spacing: 6) {
+                            ForEach(appState.inspector.passages.prefix(8)) { passage in
+                                PassageRow(passage: passage)
+                            }
+                        }
+                    }
+                }
+
+                InspectorDivider()
+
+                InspectorBlock {
+                    SectionLabel("Trails") {
+                        Text("last \(min(appState.inspector.breadcrumbs.count, 10))")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(theme.ink.quaternary)
+                    }
+                    TrailView(labels: Array(appState.inspector.breadcrumbs.suffix(5)), color: theme.accents.human)
+                    if let query = appState.inspector.queryResult {
+                        Text(query.routed.rationale)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(theme.ink.secondary)
+                            .lineLimit(4)
+                            .padding(.top, 8)
+                    }
+                }
+
+                InspectorDivider()
+
+                InspectorBlock {
+                    SectionLabel("Nearby")
+                    if appState.inspector.neighbors.isEmpty {
+                        EmptyHint("No neighbors loaded.")
+                    } else {
+                        VStack(spacing: 4) {
+                            ForEach(appState.inspector.neighbors.prefix(8)) { neighbor in
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack {
+                                        Text(neighbor.label)
+                                            .font(.system(size: 11.5, weight: .medium))
+                                            .foregroundStyle(theme.ink.primary)
+                                            .lineLimit(1)
+                                        Spacer()
+                                        Text(String(format: "%.2f", neighbor.score))
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .foregroundStyle(theme.ink.quaternary)
+                                    }
+                                    Text(neighbor.excerpt)
+                                        .font(.system(size: 10.5))
+                                        .foregroundStyle(theme.ink.tertiary)
+                                        .lineLimit(2)
+                                }
+                                .padding(8)
+                                .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            }
+                        }
+                    }
+                }
+
+                InspectorDivider()
+
+                InspectorBlock {
+                    SectionLabel("Links from here")
+                    if appState.inspector.links.isEmpty {
+                        EmptyHint("No links loaded.")
+                    } else {
+                        VStack(spacing: 4) {
+                            ForEach(appState.inspector.links.prefix(8)) { link in
+                                LinkRow(link: link)
+                            }
+                        }
+                    }
+                }
+
+                InspectorDivider()
+
+                InspectorBlock {
+                    SectionLabel("Passage Hits")
+                    if appState.inspector.grepHits.isEmpty {
+                        EmptyHint("Run grep or semantic search to inspect precise passages.")
+                    } else {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(appState.inspector.grepHits.prefix(6)) { hit in
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(hit.excerpt)
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(theme.ink.primary)
+                                        .lineLimit(4)
+                                    Text("\(hit.start)-\(hit.end)")
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundStyle(theme.ink.quaternary)
+                                }
+                                .padding(8)
+                                .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func selectionMeta(_ selected: GraphNode) -> String {
+        "\(selected.id) · score \(String(format: "%.2f", selected.score))"
+    }
+
+    private func tone(for node: GraphNode) -> ThemeTone {
+        switch node.kind {
+        case .region: return .ai
+        case .document: return .human
+        case .chunk: return .d
+        }
+    }
+
+    private func anchorLine(_ anchor: SourceAnchor) -> String {
+        var parts = [anchor.path]
+        if let page = anchor.page {
+            parts.append("p.\(page)")
+        }
+        if let section = anchor.section {
+            parts.append(section)
+        }
+        parts.append("\(anchor.start)-\(anchor.end)")
+        return parts.joined(separator: " · ")
+    }
+}
+
+private struct LibraryInspector: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                InspectorBlock {
+                    SectionLabel("Library")
+                    SummaryLine(title: "Documents", value: appState.summary.documents)
+                    SummaryLine(title: "Chunks", value: appState.summary.chunks)
+                    SummaryLine(title: "Regions", value: appState.summary.regions)
+                    SummaryLine(title: "Links", value: appState.summary.links)
+                    SummaryLine(title: "Map Bytes", value: appState.summary.mapBytes)
+                }
+                if let importResult = appState.importResult {
+                    InspectorDivider()
+                    InspectorBlock {
+                        SectionLabel("Recent Import")
+                        Text("\(importResult.importedCount) new, \(importResult.replacedCount) replaced, \(importResult.skippedCount) skipped")
+                            .font(.system(size: 12))
+                            .foregroundStyle(theme.ink.secondary)
+                        Text("\(importResult.reusedEmbeddingCount) reused, \(importResult.embeddedCount) embedded")
+                            .font(.system(size: 12))
+                            .foregroundStyle(theme.ink.secondary)
+                        ForEach((importResult.importedPaths + importResult.replacedPaths).prefix(5), id: \.self) { path in
+                            Text(path)
+                                .font(.system(size: 11))
+                                .foregroundStyle(theme.ink.tertiary)
+                                .lineLimit(2)
+                        }
+                    }
+                }
+                InspectorDivider()
+                InspectorBlock {
+                    SectionLabel("Navigation Trail")
+                    if appState.inspector.breadcrumbs.isEmpty {
+                        EmptyHint("No trail yet.")
+                    } else {
+                        TrailView(labels: Array(appState.inspector.breadcrumbs.suffix(6)), color: theme.accents.human)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct ModelInspector: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                InspectorBlock {
+                    SectionLabel("Model") {
+                        Tag(appState.modelConfig.mode.rawValue, tone: .ink)
+                    }
+                    Picker("Mode", selection: $appState.modelConfig.mode) {
+                        ForEach(ModelConnectionMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+
+                    LabeledField("Endpoint", text: $appState.modelConfig.endpoint)
+                    LabeledField("Chat Model", text: stringBinding($appState.modelConfig.chatModel))
+                    LabeledField("Embedding Model", text: stringBinding($appState.modelConfig.embeddingModel))
+                    if appState.modelConfig.mode == .api {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("API Key")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(theme.ink.tertiary)
+                            SecureField("API Key", text: $appState.apiKey)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 12))
+                                .padding(.horizontal, 8)
+                                .frame(height: 28)
+                                .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
+                        }
+                    }
+
+                    HStack {
+                        GraphiteButton("Save", style: .ghost, action: appState.saveModelConfig)
+                        GraphiteButton("Test Connection", style: .primary, action: appState.testModelConnection)
+                    }
+
+                    if let health = appState.modelConfig.health {
+                        Label(health.message, systemImage: health.status == "connected" ? "checkmark.circle.fill" : "bolt.horizontal.circle")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(health.status == "connected" ? theme.accents.success : theme.ink.tertiary)
+                            .padding(.top, 4)
+                    }
+                }
+
+                InspectorDivider()
+
+                InspectorBlock {
+                    SectionLabel("Connection")
+                    Text("Keep model setup lightweight here, then spend most of your time exploring the cloud.")
+                        .font(.system(size: 12.5))
+                        .lineSpacing(3)
+                        .foregroundStyle(theme.ink.secondary)
+                }
+            }
+        }
+    }
+}
+
+private struct BusyOverlay: View {
+    @Environment(\.memoryTheme) private var theme
+    let progress: OperationProgress?
+    let message: String
+
+    var body: some View {
+        let fraction = min(max((progress?.percent ?? 0) / 100, 0), 1)
+        VStack(spacing: 12) {
+            ProgressView(value: fraction, total: 1)
+                .progressViewStyle(.linear)
+                .tint(theme.accents.ai)
+            Text("\(Int((progress?.percent ?? 0).rounded()))%")
+                .font(.system(size: 28, weight: .semibold, design: .rounded))
+                .foregroundStyle(theme.ink.primary)
+            Text(message)
+                .font(.headline)
+                .foregroundStyle(theme.ink.primary)
+            if let progress {
+                Text("\(progress.completed)/\(progress.total) · \(progress.phase.capitalized)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(theme.ink.tertiary)
+            }
+            Text("Embedding and rebuilding the memory graph can take a few minutes for large imports.")
+                .font(.caption)
+                .foregroundStyle(theme.ink.tertiary)
+        }
+        .multilineTextAlignment(.center)
+        .padding(22)
+        .frame(maxWidth: 360)
+        .background(theme.surfaces.surface1.opacity(0.96), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.18), radius: 34, y: 18)
+    }
+}
+
+private enum ActorKind {
+    case human
+    case ai
+}
+
+private struct ActorBadge: View {
+    @Environment(\.memoryTheme) private var theme
+    let kind: ActorKind
+    var label: String?
+
+    var body: some View {
+        let color = kind == .human ? theme.accents.human : theme.accents.ai
+        HStack(spacing: 6) {
+            Circle()
+                .fill(color)
+                .frame(width: 8, height: 8)
+                .background(Circle().fill(theme.surfaces.surface1).frame(width: 12, height: 12))
+                .overlay(Circle().stroke(color.opacity(0.35), lineWidth: 3))
+            Text(label ?? (kind == .human ? "you" : "claude"))
+        }
+        .font(.system(size: 10.5, design: .monospaced))
+        .foregroundStyle(theme.ink.secondary)
+    }
+}
+
+private enum ThemeTone {
+    case ink
+    case human
+    case ai
+    case c
+    case d
+}
+
+private struct Tag: View {
+    @Environment(\.memoryTheme) private var theme
+    let text: String
+    let tone: ThemeTone
+
+    init(_ text: String, tone: ThemeTone = .ink) {
+        self.text = text
+        self.tone = tone
+    }
+
+    var body: some View {
+        Text(text.uppercased())
+            .font(.system(size: 10, weight: .medium, design: .monospaced))
+            .foregroundStyle(foreground)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(background, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+    }
+
+    private var background: Color {
+        switch tone {
+        case .ink: return theme.tags.ink
+        case .human: return theme.tags.human
+        case .ai: return theme.tags.ai
+        case .c: return theme.tags.c
+        case .d: return theme.tags.d
+        }
+    }
+
+    private var foreground: Color {
+        switch tone {
+        case .ink: return theme.ink.secondary
+        case .human: return theme.accents.humanInk
+        case .ai: return theme.accents.aiInk
+        case .c: return theme.accents.cInk
+        case .d: return theme.accents.dInk
+        }
+    }
+}
+
+private struct GraphiteButton: View {
+    @Environment(\.memoryTheme) private var theme
+    enum ButtonFlavor { case primary, ghost }
+
+    let title: String
+    var systemImage: String?
+    let style: ButtonFlavor
+    let action: () -> Void
+
+    init(_ title: String, systemImage: String? = nil, style: ButtonFlavor, action: @escaping () -> Void) {
+        self.title = title
+        self.systemImage = systemImage
+        self.style = style
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 10.5, weight: .medium))
+                }
+                Text(title)
+            }
+            .font(.system(size: 12, weight: style == .primary ? .medium : .regular))
+            .frame(height: 28)
+            .padding(.horizontal, style == .primary ? 12 : 10)
+            .foregroundStyle(style == .primary ? theme.buttons.foreground : theme.ink.secondary)
+            .background(style == .primary ? theme.buttons.background : .clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(style == .primary ? .clear : theme.surfaces.rule, lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct IconButton: View {
+    @Environment(\.memoryTheme) private var theme
+    let title: String
+    let systemImage: String
+    let action: () -> Void
+
+    init(_ title: String, systemImage: String, action: @escaping () -> Void) {
+        self.title = title
+        self.systemImage = systemImage
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(theme.ink.secondary)
+                .frame(width: 24, height: 24)
+                .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+        .help(title)
+    }
+}
+
+private struct SidebarSectionRow: View {
+    @Environment(\.memoryTheme) private var theme
+    let section: SidebarSection
+    let count: Int?
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 13))
+                    .frame(width: 14)
+                    .foregroundStyle(selected ? theme.ink.primary : theme.ink.tertiary)
+                Text(section.rawValue)
+                    .font(.system(size: 12.5, weight: selected ? .medium : .regular))
+                Spacer()
+                if let count {
+                    Text("\(count)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(theme.ink.quaternary)
+                }
+            }
+            .foregroundStyle(selected ? theme.ink.primary : theme.ink.secondary)
+            .padding(.horizontal, 8)
+            .frame(height: 26)
+            .background(selected ? theme.surfaces.selection : .clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var icon: String {
+        switch section {
+        case .library: return "tray.full"
+        case .model: return "cpu"
+        case .map: return "globe.americas"
+        }
+    }
+}
+
+private struct RegionRow: View {
+    @Environment(\.memoryTheme) private var theme
+    let entry: MapEntry
+    let count: Int
+    let tone: ThemeTone
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(toneColor)
+                .frame(width: 8, height: 8)
+            Text(entry.label)
+                .font(.system(size: 12))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer()
+            Text("\(count)")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(theme.ink.quaternary)
+        }
+        .foregroundStyle(theme.ink.secondary)
+        .padding(.horizontal, 4)
+        .frame(height: 22)
+        .help(entry.summary)
+    }
+
+    private var toneColor: Color {
+        switch tone {
+        case .ink: return theme.ink.tertiary
+        case .human: return theme.accents.human
+        case .ai: return theme.accents.ai
+        case .c: return theme.accents.c
+        case .d: return theme.accents.d
+        }
+    }
+}
+
+private struct SectionLabel<Right: View>: View {
+    @Environment(\.memoryTheme) private var theme
+    let text: String
+    let right: Right
+
+    init(_ text: String, @ViewBuilder right: () -> Right) {
+        self.text = text
+        self.right = right()
+    }
+
+    var body: some View {
+        HStack {
+            Text(text.uppercased())
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(theme.ink.tertiary)
+            Spacer()
+            right
+        }
+    }
+}
+
+private extension SectionLabel where Right == EmptyView {
+    init(_ text: String) {
+        self.text = text
+        self.right = EmptyView()
+    }
+}
+
+private struct SummaryLine: View {
+    @Environment(\.memoryTheme) private var theme
+    let title: String
+    let value: Int
+
+    var body: some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text("\(value)")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(theme.ink.tertiary)
+        }
+        .font(.system(size: 12))
+        .foregroundStyle(theme.ink.secondary)
+    }
+}
+
+private struct EmptyHint: View {
+    @Environment(\.memoryTheme) private var theme
+    let message: String
+
+    init(_ message: String) {
+        self.message = message
+    }
+
+    var body: some View {
+        Text(message)
+            .font(.system(size: 12))
+            .foregroundStyle(theme.ink.tertiary)
+            .lineSpacing(3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct InspectorBlock<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+}
+
+private struct InspectorDivider: View {
+    var body: some View {
+        DividerLine()
+    }
+}
+
+private struct DividerLine: View {
+    @Environment(\.memoryTheme) private var theme
+    enum Axis { case horizontal, vertical }
+    var axis: Axis = .horizontal
+
+    var body: some View {
+        Rectangle()
+            .fill(theme.surfaces.rule)
+            .frame(
+                width: axis == .vertical ? 0.5 : nil,
+                height: axis == .horizontal ? 0.5 : nil
+            )
+    }
+}
+
+private struct HighlightedText: View {
+    @Environment(\.memoryTheme) private var theme
+    let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 13))
+            .lineSpacing(4)
+            .foregroundStyle(theme.ink.primary)
+            .padding(8)
+            .background(theme.accents.highlight.opacity(0.32), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+    }
+}
+
+private struct PassageRow: View {
+    @Environment(\.memoryTheme) private var theme
+    let passage: SurfPassage
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 7) {
+                Tag(roleTitle, tone: tone)
+                Text(passage.label)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(theme.ink.primary)
+                    .lineLimit(1)
+                Spacer()
+                if passage.role == .representativeChunk {
+                    Text(String(format: "%.2f", passage.score))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(theme.ink.quaternary)
+                }
+            }
+            Text(sourceLine)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(theme.ink.quaternary)
+                .lineLimit(2)
+            Text(passage.excerpt)
+                .font(.system(size: 12))
+                .lineSpacing(3)
+                .foregroundStyle(theme.ink.secondary)
+                .textSelection(.enabled)
+        }
+        .padding(8)
+        .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(theme.surfaces.rule.opacity(0.7), lineWidth: 0.5))
+    }
+
+    private var roleTitle: String {
+        switch passage.role {
+        case .selectedChunk: return "Selected"
+        case .representativeChunk: return "Related"
+        case .documentChunk: return "Chunk"
+        }
+    }
+
+    private var tone: ThemeTone {
+        switch passage.role {
+        case .selectedChunk: return .d
+        case .representativeChunk: return .ai
+        case .documentChunk: return .human
+        }
+    }
+
+    private var sourceLine: String {
+        var parts = [String]()
+        if let anchor = passage.sourceAnchor {
+            parts.append(anchor.path)
+            if let page = anchor.page {
+                parts.append("p.\(page)")
+            }
+            if let section = anchor.section {
+                parts.append(section)
+            }
+        }
+        parts.append("\(passage.start)-\(passage.end)")
+        return parts.joined(separator: " · ")
+    }
+}
+
+private struct TrailView: View {
+    @Environment(\.memoryTheme) private var theme
+    let labels: [String]
+    let color: Color
+
+    var body: some View {
+        if labels.isEmpty {
+            EmptyHint("No trail yet.")
+        } else {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(labels.enumerated()), id: \.offset) { index, label in
+                    HStack(alignment: .top, spacing: 8) {
+                        VStack(spacing: 2) {
+                            Circle()
+                                .fill(index == labels.count - 1 ? color : .clear)
+                                .overlay(Circle().stroke(color, lineWidth: 1.5))
+                                .frame(width: 7, height: 7)
+                            if index != labels.count - 1 {
+                                Rectangle()
+                                    .fill(color.opacity(0.4))
+                                    .frame(width: 1, height: 14)
+                            }
+                        }
+                        .padding(.top, 4)
+                        Text(label)
+                            .font(.system(size: 11.5, weight: index == labels.count - 1 ? .medium : .regular))
+                            .foregroundStyle(index == labels.count - 1 ? theme.ink.primary : theme.ink.secondary)
+                            .lineLimit(1)
+                    }
+                    .padding(.bottom, index == labels.count - 1 ? 0 : 4)
+                }
+            }
+        }
+    }
+}
+
+private struct LinkRow: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+    let link: LinkRecord
+
+    var body: some View {
+        Button {
+            appState.followLink(link)
+        } label: {
+            HStack(spacing: 8) {
+                Tag(shortType, tone: tone)
+                    .frame(minWidth: 54)
+                Text(link.label)
+                    .font(.system(size: 12))
+                    .lineLimit(1)
+                    .foregroundStyle(theme.ink.primary)
+                Spacer()
+                Text(String(format: "%.2f", link.score))
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(theme.ink.tertiary)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 30)
+            .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var shortType: String {
+        switch link.linkType {
+        case .semanticNeighbor: return "semantic"
+        case .sameDocument: return "same-doc"
+        case .citationReference: return "citation"
+        case .entityOverlap: return "entity"
+        case .regionMembership: return "region"
+        }
+    }
+
+    private var tone: ThemeTone {
+        switch link.linkType {
+        case .semanticNeighbor: return .ai
+        case .sameDocument: return .ink
+        case .citationReference: return .c
+        case .entityOverlap: return .d
+        case .regionMembership: return .human
+        }
+    }
+}
+
+private struct LabeledField: View {
+    @Environment(\.memoryTheme) private var theme
+    let label: String
+    @Binding var text: String
+
+    init(_ label: String, text: Binding<String>) {
+        self.label = label
+        self._text = text
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(label)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(theme.ink.tertiary)
+            TextField(label, text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .padding(.horizontal, 8)
+                .frame(height: 28)
+                .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
+        }
+    }
+}
+
+private func stringBinding(_ source: Binding<String?>) -> Binding<String> {
+    Binding<String>(
+        get: { source.wrappedValue ?? "" },
+        set: { source.wrappedValue = $0.isEmpty ? nil : $0 }
+    )
+}

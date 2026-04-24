@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>imprint — 5 concepts</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f0eee9; font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif; }
+  /* Shared tokens */
+  :root {
+    --ink: oklch(18% 0.008 80);
+    --ink-2: oklch(30% 0.008 80);
+    --ink-3: oklch(46% 0.008 80);
+    --ink-4: oklch(62% 0.008 80);
+    --paper: oklch(96% 0.006 85);
+    --paper-2: oklch(92% 0.008 85);
+    --paper-3: oklch(88% 0.010 85);
+    --rule: oklch(82% 0.010 85);
+    --amber: oklch(72% 0.13 70);
+    --amber-ink: oklch(42% 0.12 60);
+    --teal: oklch(68% 0.10 200);
+    --magenta: oklch(62% 0.14 340);
+    --green: oklch(66% 0.12 150);
+  }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; }
+  .serif { font-family: "IBM Plex Serif", Georgia, serif; }
+  /* stripe placeholder (use sparingly) */
+  .stripe-bg {
+    background-image: repeating-linear-gradient(45deg, transparent 0 8px, rgba(0,0,0,0.04) 8px 9px);
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="macos-window.jsx"></script>
+<script type="text/babel" src="concepts/shared.jsx"></script>
+<script type="text/babel" src="concepts/c1-themes.jsx"></script>
+<script type="text/babel" src="concepts/c1-dual-cursor.jsx"></script>
+<script type="text/babel" src="concepts/c2-atlas.jsx"></script>
+<script type="text/babel" src="concepts/c3-conversation.jsx"></script>
+<script type="text/babel" src="concepts/c4-stratigraphy.jsx"></script>
+<script type="text/babel" src="concepts/c5-command.jsx"></script>
+<script type="text/babel" src="app.jsx"></script>
+
+</body>
+</html>

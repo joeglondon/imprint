@@ -1,0 +1,16 @@
+.DS_Store
+
+# Rust and Swift build output
+/target/
+/.build/
+
+# Generated FFI library copied by scripts/build-rust-ffi.sh
+/.ffi/lib/
+
+# Packaged app bundles and distribution artifacts
+/dist/
+
+# Local editor and OS noise
+.idea/
+.vscode/
+*.swp

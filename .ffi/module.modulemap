@@ -1,0 +1,6 @@
+module AIMemoryFFI [system] {
+    header "include/ai_memory_ffi.h"
+    link "ai_memory"
+    export *
+}
+
