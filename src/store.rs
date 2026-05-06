@@ -381,6 +381,64 @@ impl FileMemoryStore {
         }
     }
 
+    pub fn insert_memory_access(&self, access: &MemoryAccess) -> Result<()> {
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT OR REPLACE INTO memory_accesses (
+                id, target_id, target_kind_json, access_kind_json, reason, actor, accessed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                access.id,
+                access.target_id,
+                to_json(&access.target_kind)?,
+                to_json(&access.access_kind)?,
+                access.reason,
+                access.actor,
+                access.accessed_at as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_memory_accesses(
+        &self,
+        target_id: Option<&str>,
+        since: Option<u64>,
+    ) -> Result<Vec<MemoryAccess>> {
+        let connection = self.connection()?;
+        let sql = "SELECT id, target_id, target_kind_json, access_kind_json, reason, actor, accessed_at FROM memory_accesses";
+        match (target_id, since) {
+            (Some(target_id), Some(since)) => {
+                let mut statement = connection.prepare(&format!(
+                    "{sql} WHERE target_id = ?1 AND accessed_at >= ?2 ORDER BY accessed_at DESC, id"
+                ))?;
+                let rows = statement
+                    .query_map(params![target_id, since as i64], memory_access_from_row)?;
+                collect_rows(rows)
+            }
+            (Some(target_id), None) => {
+                let mut statement = connection.prepare(&format!(
+                    "{sql} WHERE target_id = ?1 ORDER BY accessed_at DESC, id"
+                ))?;
+                let rows = statement.query_map(params![target_id], memory_access_from_row)?;
+                collect_rows(rows)
+            }
+            (None, Some(since)) => {
+                let mut statement = connection.prepare(&format!(
+                    "{sql} WHERE accessed_at >= ?1 ORDER BY accessed_at DESC, id"
+                ))?;
+                let rows = statement.query_map(params![since as i64], memory_access_from_row)?;
+                collect_rows(rows)
+            }
+            (None, None) => {
+                let mut statement =
+                    connection.prepare(&format!("{sql} ORDER BY accessed_at DESC, id"))?;
+                let rows = statement.query_map([], memory_access_from_row)?;
+                collect_rows(rows)
+            }
+        }
+    }
+
     pub fn insert_audit_event(&self, event: &AuditEvent) -> Result<()> {
         let connection = self.connection()?;
         connection.execute(
@@ -666,6 +724,17 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             reverted_at INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_attention_marks_target ON attention_marks(target_id, created_at);
+        CREATE TABLE IF NOT EXISTS memory_accesses (
+            id TEXT PRIMARY KEY,
+            target_id TEXT NOT NULL,
+            target_kind_json TEXT NOT NULL,
+            access_kind_json TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            accessed_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_accesses_target ON memory_accesses(target_id, accessed_at);
+        CREATE INDEX IF NOT EXISTS idx_memory_accesses_accessed ON memory_accesses(accessed_at);
         CREATE TABLE IF NOT EXISTS audit_events (
             id TEXT PRIMARY KEY,
             session_id TEXT,
@@ -1053,6 +1122,18 @@ fn attention_mark_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Attentio
         actor: row.get(5)?,
         created_at: row.get::<_, i64>(6)? as u64,
         reverted_at: row.get::<_, Option<i64>>(7)?.map(|value| value as u64),
+    })
+}
+
+fn memory_access_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryAccess> {
+    Ok(MemoryAccess {
+        id: row.get(0)?,
+        target_id: row.get(1)?,
+        target_kind: from_json(row.get::<_, String>(2)?)?,
+        access_kind: from_json(row.get::<_, String>(3)?)?,
+        reason: row.get(4)?,
+        actor: row.get(5)?,
+        accessed_at: row.get::<_, i64>(6)? as u64,
     })
 }
 

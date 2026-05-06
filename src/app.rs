@@ -36,6 +36,7 @@ const MAX_RESPONSE_CONTEXT_SNIPPETS: usize = 8;
 const MAX_CONTEXT_SNIPPET_CHARS: usize = 2200;
 const WEB_SEARCH_MAX_RESULTS: usize = 4;
 const WEB_SEARCH_MIN_LOCAL_SCORE: f32 = 0.45;
+const MEMORY_ACCESS_HORIZON_MILLIS: u64 = 30 * 24 * 60 * 60 * 1000;
 #[cfg(not(test))]
 const MAX_WEB_BODY_CHARS: usize = 12_000;
 const MAX_WEB_SUMMARY_CHARS: usize = 16_000;
@@ -521,10 +522,24 @@ pub fn run_query(store_root: &Path, request: QueryRequest) -> anyhow::Result<Que
     let store = FileMemoryStore::new(store_root);
     let memory = load_ready_memory(store_root)?;
     let attention_marks = store.list_attention_marks(None).unwrap_or_default();
+    let now = now_millis();
+    let memory_accesses = store
+        .list_memory_accesses(None, Some(now.saturating_sub(MEMORY_ACCESS_HORIZON_MILLIS)))
+        .unwrap_or_default();
     let config = load_model_config(store_root)?;
     let embedder = embedder_for_config(&config)?;
     let ann = RegionIndexer.rebuild(&memory.chunks, &memory.regions);
-    MemoryQueryEngine.execute_with_attention(&embedder, &memory, &ann, request, &attention_marks)
+    let result = MemoryQueryEngine.execute_with_signals(
+        &embedder,
+        &memory,
+        &ann,
+        request,
+        &attention_marks,
+        &memory_accesses,
+        now,
+    )?;
+    record_query_hit_accesses(&store, &result);
+    Ok(result)
 }
 
 pub fn grep_region(
@@ -548,7 +563,7 @@ pub fn open_document_excerpt(store_root: &Path, chunk_id: &str) -> anyhow::Resul
         .iter()
         .find(|document| document.id == chunk.document_id)
         .context("document not found")?;
-    Ok(DocumentExcerpt {
+    let excerpt = DocumentExcerpt {
         document_id: document.id.clone(),
         title: document.title.clone(),
         chunk_id: chunk.id.clone(),
@@ -556,7 +571,17 @@ pub fn open_document_excerpt(store_root: &Path, chunk_id: &str) -> anyhow::Resul
         start: chunk.start,
         end: chunk.end,
         source_anchor: chunk.source_anchor.clone(),
-    })
+    };
+    let store = FileMemoryStore::new(store_root);
+    record_memory_access(
+        &store,
+        AttentionTargetKind::Chunk,
+        chunk.id.clone(),
+        MemoryAccessKind::Open,
+        "Opened exact document excerpt for source recall.",
+        "memory-runtime",
+    );
+    Ok(excerpt)
 }
 
 pub fn grep_document(
@@ -581,7 +606,18 @@ pub fn semantic_document_search(
 
 pub fn surf_open(store_root: &Path, node: &NodeRef) -> anyhow::Result<SurfOpenResult> {
     let memory = load_ready_memory(store_root)?;
-    surf::open(&memory, node).context("node not found")
+    let opened = surf::open(&memory, node).context("node not found")?;
+    let store = FileMemoryStore::new(store_root);
+    let (target_kind, target_id) = access_target_from_node_ref(node);
+    record_memory_access(
+        &store,
+        target_kind,
+        target_id,
+        MemoryAccessKind::Open,
+        "Opened memory node for agent surf/source recall.",
+        "memory-runtime",
+    );
+    Ok(opened)
 }
 
 pub fn surf_neighbors(
@@ -600,7 +636,18 @@ pub fn surf_expand(
     window: usize,
 ) -> anyhow::Result<SurfExpansion> {
     let memory = load_ready_memory(store_root)?;
-    surf::expand_chunk(&memory, chunk_id, mode, window).context("chunk not found")
+    let expanded =
+        surf::expand_chunk(&memory, chunk_id, mode, window).context("chunk not found")?;
+    let store = FileMemoryStore::new(store_root);
+    record_memory_access(
+        &store,
+        AttentionTargetKind::Chunk,
+        expanded.chunk_id.clone(),
+        MemoryAccessKind::Expand,
+        "Expanded source context around chunk.",
+        "memory-runtime",
+    );
+    Ok(expanded)
 }
 
 pub fn surf_jump_to_anchor(
@@ -609,7 +656,17 @@ pub fn surf_jump_to_anchor(
     window: usize,
 ) -> anyhow::Result<SurfExpansion> {
     let memory = load_ready_memory(store_root)?;
-    surf::jump_to_anchor(&memory, anchor_id, window).context("anchor not found")
+    let expanded = surf::jump_to_anchor(&memory, anchor_id, window).context("anchor not found")?;
+    let store = FileMemoryStore::new(store_root);
+    record_memory_access(
+        &store,
+        AttentionTargetKind::Chunk,
+        expanded.chunk_id.clone(),
+        MemoryAccessKind::JumpToAnchor,
+        "Jumped from source anchor to exact context.",
+        "memory-runtime",
+    );
+    Ok(expanded)
 }
 
 pub fn surf_session_step(
@@ -2150,6 +2207,10 @@ fn build_chat_context_trace_with_searcher<S: WebSearcher>(
     let query_embedding = embedder.embed(&user_message.content)?;
     let memory = FileMemoryStore::new(store_root).load().ok();
     let attention_marks = store.list_attention_marks(None).unwrap_or_default();
+    let now = now_millis();
+    let memory_accesses = store
+        .list_memory_accesses(None, Some(now.saturating_sub(MEMORY_ACCESS_HORIZON_MILLIS)))
+        .unwrap_or_default();
     let hot_snippets = memory
         .as_ref()
         .map(|memory| {
@@ -2182,6 +2243,7 @@ fn build_chat_context_trace_with_searcher<S: WebSearcher>(
         embedder,
         memory.as_ref(),
         &attention_marks,
+        &memory_accesses,
         &user_message.content,
         6,
         5,
@@ -2224,6 +2286,7 @@ fn build_chat_context_trace_with_searcher<S: WebSearcher>(
                     embedder,
                     memory.as_ref(),
                     &attention_marks,
+                    &memory_accesses,
                     &query,
                     max_chunks,
                     max_regions,
@@ -2695,6 +2758,7 @@ fn execute_memory_search(
     embedder: &RuntimeEmbedder,
     memory: Option<&PersistedMemory>,
     attention_marks: &[AttentionMark],
+    memory_accesses: &[MemoryAccess],
     query: &str,
     max_chunks: usize,
     max_regions: usize,
@@ -2709,7 +2773,7 @@ fn execute_memory_search(
     }
     let ann = RegionIndexer.rebuild(&memory.chunks, &memory.regions);
     MemoryQueryEngine
-        .execute_with_attention(
+        .execute_with_signals(
             embedder,
             memory,
             &ann,
@@ -2720,6 +2784,8 @@ fn execute_memory_search(
                 max_chunks: max_chunks.max(1),
             },
             attention_marks,
+            memory_accesses,
+            now_millis(),
         )
         .map(|result| {
             result
@@ -2823,10 +2889,15 @@ fn search_web_into_memory<S: WebSearcher>(
     }
     let refreshed = store.load()?;
     let attention_marks = store.list_attention_marks(None).unwrap_or_default();
+    let now = now_millis();
+    let memory_accesses = store
+        .list_memory_accesses(None, Some(now.saturating_sub(MEMORY_ACCESS_HORIZON_MILLIS)))
+        .unwrap_or_default();
     let mut snippets = execute_memory_search(
         embedder,
         Some(&refreshed),
         &attention_marks,
+        &memory_accesses,
         query,
         6,
         6,
@@ -3599,6 +3670,57 @@ fn audit_write<T: Serialize>(
         payload_json: serde_json::to_string(payload)?,
         created_at: now_millis(),
     })
+}
+
+fn record_query_hit_accesses(store: &FileMemoryStore, result: &QueryResult) {
+    for hit in result.hits.iter().take(3) {
+        record_memory_access(
+            store,
+            AttentionTargetKind::Chunk,
+            hit.chunk_id.clone(),
+            MemoryAccessKind::QueryHit,
+            "Returned as a top source recall hit.",
+            "memory-runtime",
+        );
+    }
+    for region_id in result.routed.region_ids.iter().take(3) {
+        record_memory_access(
+            store,
+            AttentionTargetKind::Region,
+            region_id.clone(),
+            MemoryAccessKind::QueryHit,
+            "Selected as a query route candidate.",
+            "memory-runtime",
+        );
+    }
+}
+
+fn record_memory_access(
+    store: &FileMemoryStore,
+    target_kind: AttentionTargetKind,
+    target_id: String,
+    access_kind: MemoryAccessKind,
+    reason: &str,
+    actor: &str,
+) {
+    let access = MemoryAccess {
+        id: unique_id("access"),
+        target_id,
+        target_kind,
+        access_kind,
+        reason: reason.into(),
+        actor: actor.into(),
+        accessed_at: now_millis(),
+    };
+    let _ = store.insert_memory_access(&access);
+}
+
+fn access_target_from_node_ref(node: &NodeRef) -> (AttentionTargetKind, String) {
+    match node {
+        NodeRef::Document(id) => (AttentionTargetKind::Document, id.clone()),
+        NodeRef::Chunk(id) => (AttentionTargetKind::Chunk, id.clone()),
+        NodeRef::Region(id) => (AttentionTargetKind::Region, id.clone()),
+    }
 }
 
 fn attention_target_session_id(

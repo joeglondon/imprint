@@ -14,6 +14,7 @@ pub type TranscriptChunkId = String;
 pub type DerivedMemoryId = String;
 pub type WebFindingId = String;
 pub type AttentionMarkId = String;
+pub type MemoryAccessId = String;
 pub type AuditEventId = String;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -400,6 +401,26 @@ pub struct AttentionMarkWrite {
     pub action: AttentionAction,
     pub reason: String,
     pub actor: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MemoryAccessKind {
+    QueryHit,
+    Open,
+    Expand,
+    JumpToAnchor,
+    Cite,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryAccess {
+    pub id: MemoryAccessId,
+    pub target_id: String,
+    pub target_kind: AttentionTargetKind,
+    pub access_kind: MemoryAccessKind,
+    pub reason: String,
+    pub actor: String,
+    pub accessed_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

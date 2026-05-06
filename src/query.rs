@@ -130,8 +130,30 @@ impl MemoryQueryEngine {
         request: QueryRequest,
         attention_marks: &[AttentionMark],
     ) -> anyhow::Result<QueryResult> {
+        self.execute_with_signals(
+            embedder,
+            memory,
+            ann_index,
+            request,
+            attention_marks,
+            &[],
+            0,
+        )
+    }
+
+    pub fn execute_with_signals<E: Embedder>(
+        &self,
+        embedder: &E,
+        memory: &PersistedMemory,
+        ann_index: &RegionAnnIndex,
+        request: QueryRequest,
+        attention_marks: &[AttentionMark],
+        memory_accesses: &[MemoryAccess],
+        now: u64,
+    ) -> anyhow::Result<QueryResult> {
         let query_embedding = embedder.embed(&request.text)?;
-        let attention_scores = attention_scores(attention_marks);
+        let mut attention_scores = attention_scores(attention_marks);
+        merge_access_scores(&mut attention_scores, memory_accesses, now);
         let region_attention_scores = attention_scores
             .iter()
             .filter_map(|(key, score)| {
@@ -324,6 +346,31 @@ fn attention_scores(marks: &[AttentionMark]) -> HashMap<String, f32> {
             .or_insert(0.0) += delta;
     }
     scores
+}
+
+fn merge_access_scores(scores: &mut HashMap<String, f32>, accesses: &[MemoryAccess], now: u64) {
+    for access in accesses {
+        let mut score = match access.access_kind {
+            MemoryAccessKind::QueryHit => 0.03,
+            MemoryAccessKind::Open => 0.08,
+            MemoryAccessKind::Expand | MemoryAccessKind::JumpToAnchor => 0.12,
+            MemoryAccessKind::Cite => 0.18,
+        };
+        if now > 0 {
+            let age = now.saturating_sub(access.accessed_at);
+            let week = 7 * 24 * 60 * 60 * 1000;
+            if age >= week {
+                score *= 0.25;
+            } else {
+                let freshness = 1.0 - (age as f32 / week as f32);
+                score *= 0.45 + freshness * 0.55;
+            }
+        }
+        scores
+            .entry(attention_key(&access.target_kind, &access.target_id))
+            .and_modify(|current| *current = (*current + score).clamp(-0.6, 0.6))
+            .or_insert(score);
+    }
 }
 
 fn attention_key(kind: &AttentionTargetKind, target_id: &str) -> String {
@@ -642,6 +689,103 @@ mod tests {
                     max_chunks: 2,
                 },
                 &marks,
+            )
+            .expect("query");
+
+        assert_eq!(
+            result.hits.first().map(|hit| hit.chunk_id.as_str()),
+            Some("chunk-b")
+        );
+        assert!(result.hits[0].score > result.hits[1].score);
+    }
+
+    #[test]
+    fn execute_uses_recent_access_history_as_weak_attention() {
+        let embedder = crate::index::HashEmbedder::default();
+        let text = "shared routing memory";
+        let embedding = embedder.embed(text).expect("embedding");
+        let document = |id: &str| Document {
+            id: id.into(),
+            title: id.into(),
+            text: text.into(),
+            metadata: BTreeMap::new(),
+            source_anchor: None,
+            content_hash: None,
+            parser_version: None,
+        };
+        let chunk = |id: &str, document_id: &str, ordinal: usize| Chunk {
+            id: id.into(),
+            document_id: document_id.into(),
+            region_id: "region".into(),
+            ordinal,
+            start: 0,
+            end: text.chars().count(),
+            text: text.into(),
+            metadata: BTreeMap::new(),
+            source_anchor: None,
+            embedding: embedding.clone(),
+            embedding_text_hash: None,
+            embedding_provider: None,
+            embedding_model: None,
+            embedding_endpoint: None,
+            embedding_dimension: None,
+            chunking_version: None,
+        };
+        let memory = PersistedMemory {
+            documents: vec![document("doc-a"), document("doc-b")],
+            chunks: vec![chunk("chunk-a", "doc-a", 0), chunk("chunk-b", "doc-b", 1)],
+            regions: vec![Region {
+                id: "region".into(),
+                label: "Region".into(),
+                summary: text.into(),
+                filters: BTreeMap::new(),
+                chunk_ids: vec!["chunk-a".into(), "chunk-b".into()],
+                centroid: embedding,
+                neighbors: Vec::new(),
+            }],
+            links: Vec::new(),
+            memory_map: Some(MemoryMap {
+                budget_bytes: 2048,
+                serialized: String::new(),
+                entries: vec![entry("region", "Region", text)],
+            }),
+        };
+        let ann = crate::index::RegionIndexer.rebuild(&memory.chunks, &memory.regions);
+        let accesses = vec![
+            MemoryAccess {
+                id: "access-1".into(),
+                target_id: "chunk-b".into(),
+                target_kind: AttentionTargetKind::Chunk,
+                access_kind: MemoryAccessKind::Expand,
+                reason: "Previously expanded as source truth.".into(),
+                actor: "test".into(),
+                accessed_at: 1_000,
+            },
+            MemoryAccess {
+                id: "access-2".into(),
+                target_id: "chunk-b".into(),
+                target_kind: AttentionTargetKind::Chunk,
+                access_kind: MemoryAccessKind::Open,
+                reason: "Previously opened by the agent.".into(),
+                actor: "test".into(),
+                accessed_at: 1_100,
+            },
+        ];
+
+        let result = MemoryQueryEngine
+            .execute_with_signals(
+                &embedder,
+                &memory,
+                &ann,
+                QueryRequest {
+                    text: text.into(),
+                    filters: BTreeMap::new(),
+                    max_regions: 1,
+                    max_chunks: 2,
+                },
+                &[],
+                &accesses,
+                1_200,
             )
             .expect("query");
 
