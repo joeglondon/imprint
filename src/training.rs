@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const TRAINING_SCHEMA_VERSION: u32 = 1;
+const DEFAULT_ADAPTER_ITERS: usize = 100;
 
 pub fn write_training_exports(
     store_root: &Path,
@@ -60,6 +61,55 @@ pub fn training_source_hash(training_dir: &Path) -> anyhow::Result<String> {
         }
     }
     Ok(format!("{:x}", digest.finalize()))
+}
+
+pub fn prepare_cortex_adapter_dataset(
+    store_root: &Path,
+    base_model: &str,
+    source_dataset_hash: &str,
+) -> anyhow::Result<Option<PathBuf>> {
+    let training_dir = store_root.join("training");
+    let adapter_dir = store_root.join("adapters").join(format!(
+        "prepared-{}",
+        &source_dataset_hash[..12.min(source_dataset_hash.len())]
+    ));
+    let data_dir = adapter_dir.join("mlx-data");
+    fs::create_dir_all(&data_dir)
+        .with_context(|| format!("creating adapter data directory {}", data_dir.display()))?;
+
+    let train_records = mlx_records_for_split(&training_dir, "train")?;
+    if train_records.is_empty() {
+        return Ok(None);
+    }
+    let mut valid_records = mlx_records_for_split(&training_dir, "eval")?;
+    if valid_records.is_empty() {
+        valid_records = train_records.clone();
+    }
+
+    write_jsonl(&data_dir.join("train.jsonl"), &train_records)?;
+    write_jsonl(&data_dir.join("valid.jsonl"), &valid_records)?;
+    write_jsonl(&data_dir.join("test.jsonl"), &valid_records)?;
+    let prepared_dataset_hash = training_source_hash(&data_dir)?;
+    let manifest_path = adapter_dir.join("adapter_manifest.json");
+    let manifest = json!({
+        "status": "prepared",
+        "base_model": base_model,
+        "dataset": data_dir.display().to_string(),
+        "dataset_hash": prepared_dataset_hash,
+        "source_dataset": training_dir.display().to_string(),
+        "source_dataset_hash": source_dataset_hash,
+        "adapter_path": adapter_dir.display().to_string(),
+        "iters": DEFAULT_ADAPTER_ITERS,
+        "train_records": train_records.len(),
+        "valid_records": valid_records.len(),
+        "test_records": valid_records.len(),
+    });
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).context("serializing adapter manifest")?,
+    )
+    .with_context(|| format!("writing {}", manifest_path.display()))?;
+    Ok(Some(manifest_path))
 }
 
 pub fn read_cortex_adapter_state(
@@ -135,6 +185,55 @@ fn write_split(
     }
     fs::write(&path, lines.join("\n")).with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
+}
+
+fn mlx_records_for_split(
+    training_dir: &Path,
+    split: &str,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let suffix = format!(".{split}.jsonl");
+    let mut files = jsonl_files(training_dir)?
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(&suffix))
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+
+    let mut records = Vec::new();
+    for path in files {
+        for line in fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+        {
+            let record: serde_json::Value = serde_json::from_str(line)
+                .with_context(|| format!("parsing {}", path.display()))?;
+            records.push(json!({
+                "prompt": format!(
+                    "You are imprint's tiny-model memory cortex. Task: {}\n\n{}",
+                    record.get("task").and_then(|value| value.as_str()).unwrap_or("memory"),
+                    record.get("input").and_then(|value| value.as_str()).unwrap_or("")
+                ),
+                "completion": record
+                    .get("target")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(""),
+            }));
+        }
+    }
+    Ok(records)
+}
+
+fn write_jsonl(path: &Path, records: &[serde_json::Value]) -> anyhow::Result<()> {
+    let lines = records
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .context("serializing prepared JSONL")?;
+    fs::write(path, lines.join("\n")).with_context(|| format!("writing {}", path.display()))
 }
 
 fn jsonl_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {

@@ -893,6 +893,23 @@ pub fn compile_memory_brain(store_root: &Path) -> anyhow::Result<BrainCompileRes
     std::fs::write(&training_records_path, training_records.join("\n"))?;
     let export_files = crate::training::write_training_exports(store_root, &artifacts)?;
     let source_dataset_hash = crate::training::training_source_hash(&store_root.join("training"))?;
+    let initial_adapter_state = crate::training::read_cortex_adapter_state(
+        store_root,
+        source_dataset_hash.clone(),
+        created_at,
+    )?;
+    if initial_adapter_state.freshness != "fresh" {
+        let compiler_model = config
+            .compiler_model
+            .as_deref()
+            .or(config.response_model.as_deref())
+            .unwrap_or(DEFAULT_RESPONSE_MODEL);
+        crate::training::prepare_cortex_adapter_dataset(
+            store_root,
+            compiler_model,
+            &source_dataset_hash,
+        )?;
+    }
     let adapter_state =
         crate::training::read_cortex_adapter_state(store_root, source_dataset_hash, created_at)?;
     store.save_cortex_adapter_state(&adapter_state)?;
@@ -4412,8 +4429,21 @@ mod tests {
             .export_files
             .iter()
             .any(|file| file.ends_with("route_region.eval.jsonl")));
-        let missing_adapter = first.adapter_state.as_ref().expect("adapter state");
-        assert_eq!(missing_adapter.freshness, "missing");
+        let prepared_adapter = first.adapter_state.as_ref().expect("adapter state");
+        assert_eq!(prepared_adapter.freshness, "fresh");
+        assert_eq!(prepared_adapter.status, "prepared");
+        assert_eq!(
+            prepared_adapter.base_model.as_deref(),
+            Some(HASH_EMBEDDING_MODEL)
+        );
+        assert!(prepared_adapter
+            .manifest_path
+            .as_deref()
+            .is_some_and(|path| path.contains("/adapters/prepared-")));
+        assert_eq!(
+            prepared_adapter.train_records,
+            Some(first.artifacts_written * 4)
+        );
         assert!(std::fs::read_to_string(&first.training_records_path)
             .expect("training records")
             .contains("\"task\":\"memory_routing\""));
@@ -4442,7 +4472,7 @@ mod tests {
                 "base_model": "tiny-memory-model",
                 "adapter_path": adapter_dir.display().to_string(),
                 "dataset_hash": "prepared-hash",
-                "source_dataset_hash": missing_adapter.current_source_dataset_hash,
+                "source_dataset_hash": prepared_adapter.current_source_dataset_hash,
                 "train_records": 1,
                 "valid_records": 1,
                 "test_records": 1,
