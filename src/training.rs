@@ -1,12 +1,43 @@
-use crate::types::{BrainArtifact, BrainArtifactKind, CortexAdapterState};
+use crate::store::FileMemoryStore;
+use crate::types::{BrainArtifact, BrainArtifactKind, CortexAdapterJob, CortexAdapterState};
 use anyhow::Context;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const TRAINING_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_ADAPTER_ITERS: usize = 100;
+const DEFAULT_ADAPTER_TRAINING_TIMEOUT_MILLIS: u64 = 30 * 60 * 1000;
+
+#[derive(Debug, Clone)]
+pub struct CortexAdapterTrainingOptions {
+    pub dry_run: bool,
+    pub timeout_millis: u64,
+    pub iters: usize,
+    pub python: Option<String>,
+    pub script_path: Option<PathBuf>,
+    pub output_dir: Option<PathBuf>,
+    pub log_path: Option<PathBuf>,
+}
+
+impl Default for CortexAdapterTrainingOptions {
+    fn default() -> Self {
+        Self {
+            dry_run: false,
+            timeout_millis: DEFAULT_ADAPTER_TRAINING_TIMEOUT_MILLIS,
+            iters: DEFAULT_ADAPTER_ITERS,
+            python: None,
+            script_path: None,
+            output_dir: None,
+            log_path: None,
+        }
+    }
+}
 
 pub fn write_training_exports(
     store_root: &Path,
@@ -110,6 +141,144 @@ pub fn prepare_cortex_adapter_dataset(
     )
     .with_context(|| format!("writing {}", manifest_path.display()))?;
     Ok(Some(manifest_path))
+}
+
+pub fn run_cortex_adapter_training_job(
+    store_root: &Path,
+    base_model: &str,
+    source_dataset_hash: &str,
+    options: CortexAdapterTrainingOptions,
+) -> anyhow::Result<CortexAdapterJob> {
+    let store = FileMemoryStore::new(store_root);
+    let queued_at = now_millis();
+    let hash_prefix = &source_dataset_hash[..12.min(source_dataset_hash.len())];
+    let output_dir = options.output_dir.clone().unwrap_or_else(|| {
+        store_root
+            .join("adapters")
+            .join(format!("trained-{hash_prefix}"))
+    });
+    let log_path = options.log_path.clone().unwrap_or_else(|| {
+        store_root
+            .join("adapters")
+            .join(format!("train-{hash_prefix}.log"))
+    });
+    fs::create_dir_all(output_dir.parent().unwrap_or(store_root))
+        .with_context(|| format!("creating adapter directory {}", output_dir.display()))?;
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating adapter log directory {}", parent.display()))?;
+    }
+
+    let training_dir = store_root.join("training");
+    let current_state =
+        read_cortex_adapter_state(store_root, source_dataset_hash.to_string(), queued_at)?;
+    let script_path = options
+        .script_path
+        .clone()
+        .unwrap_or_else(default_trainer_script);
+    let python = options
+        .python
+        .clone()
+        .or_else(|| std::env::var("PYTHON").ok())
+        .unwrap_or_else(|| "python3".into());
+    let mut command = vec![
+        python,
+        script_path.display().to_string(),
+        "--model".into(),
+        base_model.into(),
+        "--dataset".into(),
+        training_dir.display().to_string(),
+        "--output".into(),
+        output_dir.display().to_string(),
+        "--iters".into(),
+        options.iters.to_string(),
+    ];
+    if options.dry_run {
+        command.push("--dry-run".into());
+    }
+
+    let mut payload = BTreeMap::new();
+    payload.insert("dataset_dir".into(), training_dir.display().to_string());
+    payload.insert("dry_run".into(), options.dry_run.to_string());
+    payload.insert("timeout_millis".into(), options.timeout_millis.to_string());
+
+    let mut job = CortexAdapterJob {
+        id: format!("adapter-job:{hash_prefix}:{queued_at}"),
+        status: "queued".into(),
+        source_dataset_hash: source_dataset_hash.into(),
+        prepared_dataset_hash: current_state.prepared_dataset_hash.clone(),
+        base_model: Some(base_model.into()),
+        adapter_output_path: output_dir.display().to_string(),
+        manifest_path: None,
+        train_records: current_state.train_records,
+        valid_records: current_state.valid_records,
+        test_records: current_state.test_records,
+        iters: Some(options.iters),
+        command,
+        log_path: Some(log_path.display().to_string()),
+        failure_reason: None,
+        payload,
+        created_at: queued_at,
+        updated_at: queued_at,
+        started_at: None,
+        finished_at: None,
+    };
+    store.upsert_cortex_adapter_job(&job)?;
+
+    let started_at = now_millis();
+    job.status = "training".into();
+    job.updated_at = started_at;
+    job.started_at = Some(started_at);
+    store.upsert_cortex_adapter_job(&job)?;
+
+    let result = execute_training_command(&job.command, options.timeout_millis);
+    let finished_at = now_millis();
+    write_training_log(&log_path, &job.command, started_at, finished_at, &result)?;
+    job.finished_at = Some(finished_at);
+    job.updated_at = finished_at;
+
+    match result {
+        TrainingCommandResult::Completed {
+            code: 0,
+            stdout: _,
+            stderr: _,
+        } => {
+            let manifest_path = output_dir.join("adapter_manifest.json");
+            let manifest = read_manifest(&manifest_path)?;
+            job.status = string_field(&manifest, "status").unwrap_or_else(|| "trained".into());
+            job.manifest_path = Some(manifest_path.display().to_string());
+            job.prepared_dataset_hash = string_field(&manifest, "dataset_hash");
+            job.train_records = usize_field(&manifest, "train_records");
+            job.valid_records = usize_field(&manifest, "valid_records");
+            job.test_records = usize_field(&manifest, "test_records");
+            job.iters = usize_field(&manifest, "iters").or(job.iters);
+            let adapter_state = read_cortex_adapter_state(
+                store_root,
+                source_dataset_hash.to_string(),
+                finished_at,
+            )?;
+            store.save_cortex_adapter_state(&adapter_state)?;
+        }
+        TrainingCommandResult::Completed { code, stderr, .. } => {
+            job.status = "failed".into();
+            job.failure_reason = Some(format!(
+                "trainer exited with status {code}: {}",
+                stderr.trim()
+            ));
+        }
+        TrainingCommandResult::TimedOut { timeout_millis, .. } => {
+            job.status = "failed".into();
+            job.failure_reason = Some(format!(
+                "trainer exceeded timeout of {timeout_millis}ms and was stopped"
+            ));
+        }
+        TrainingCommandResult::SpawnFailed { error } => {
+            job.status = "failed".into();
+            job.failure_reason = Some(error);
+        }
+    }
+    store.upsert_cortex_adapter_job(&job)?;
+    Ok(job)
 }
 
 pub fn read_cortex_adapter_state(
@@ -272,6 +441,143 @@ fn jsonl_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn default_trainer_script() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("training")
+        .join("train_mlx_lora.py")
+}
+
+#[derive(Debug)]
+enum TrainingCommandResult {
+    Completed {
+        code: i32,
+        stdout: String,
+        stderr: String,
+    },
+    TimedOut {
+        timeout_millis: u64,
+        stdout: String,
+        stderr: String,
+    },
+    SpawnFailed {
+        error: String,
+    },
+}
+
+fn execute_training_command(command: &[String], timeout_millis: u64) -> TrainingCommandResult {
+    if command.is_empty() {
+        return TrainingCommandResult::SpawnFailed {
+            error: "empty trainer command".into(),
+        };
+    }
+    let mut child = match Command::new(&command[0])
+        .args(&command[1..])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            return TrainingCommandResult::SpawnFailed {
+                error: error.to_string(),
+            };
+        }
+    };
+
+    let timeout = Duration::from_millis(timeout_millis);
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => match child.wait_with_output() {
+                Ok(output) => {
+                    return TrainingCommandResult::Completed {
+                        code: output.status.code().unwrap_or(-1),
+                        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                    };
+                }
+                Err(error) => {
+                    return TrainingCommandResult::SpawnFailed {
+                        error: error.to_string(),
+                    };
+                }
+            },
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                return match child.wait_with_output() {
+                    Ok(output) => TrainingCommandResult::TimedOut {
+                        timeout_millis,
+                        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                    },
+                    Err(error) => TrainingCommandResult::SpawnFailed {
+                        error: error.to_string(),
+                    },
+                };
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Err(error) => {
+                return TrainingCommandResult::SpawnFailed {
+                    error: error.to_string(),
+                };
+            }
+        }
+    }
+}
+
+fn write_training_log(
+    path: &Path,
+    command: &[String],
+    started_at: u64,
+    finished_at: u64,
+    result: &TrainingCommandResult,
+) -> anyhow::Result<()> {
+    let payload = match result {
+        TrainingCommandResult::Completed {
+            code,
+            stdout,
+            stderr,
+        } => json!({
+            "status": "completed",
+            "exit_code": code,
+            "command": command,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "stdout": stdout,
+            "stderr": stderr,
+        }),
+        TrainingCommandResult::TimedOut {
+            timeout_millis,
+            stdout,
+            stderr,
+        } => json!({
+            "status": "timed_out",
+            "timeout_millis": timeout_millis,
+            "command": command,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "stdout": stdout,
+            "stderr": stderr,
+        }),
+        TrainingCommandResult::SpawnFailed { error } => json!({
+            "status": "spawn_failed",
+            "command": command,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "error": error,
+        }),
+    };
+    fs::write(path, serde_json::to_string_pretty(&payload)?)
+        .with_context(|| format!("writing trainer log {}", path.display()))
+}
+
+fn read_manifest(path: &Path) -> anyhow::Result<serde_json::Value> {
+    let raw = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_str(&raw)
+        .with_context(|| format!("parsing adapter manifest {}", path.display()))
+}
+
 fn newest_adapter_manifest(adapters_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
     let mut manifests = Vec::new();
     collect_adapter_manifests(adapters_dir, &mut manifests)?;
@@ -311,6 +617,13 @@ fn usize_field(value: &serde_json::Value, key: &str) -> Option<usize> {
 
 fn f64_field(value: &serde_json::Value, key: &str) -> Option<f64> {
     value.get(key)?.as_f64()
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 fn adapter_training_status(status: &str) -> String {

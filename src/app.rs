@@ -4843,6 +4843,101 @@ mod tests {
     }
 
     #[test]
+    fn cortex_adapter_training_runner_invokes_script_and_persists_outcome() {
+        let root = temp_store_root("adapter-runner");
+        let input = root.join("source.txt");
+        fs::write(
+            &input,
+            "Adapter runner memory should turn compact cortex training exports into MLX LoRA data.",
+        )
+        .expect("write source");
+        ingest_paths(&root, std::slice::from_ref(&input)).expect("ingest");
+        let compile = compile_memory_brain(&root).expect("compile");
+        let source_hash = compile
+            .adapter_state
+            .as_ref()
+            .expect("adapter state")
+            .current_source_dataset_hash
+            .clone();
+        let output_dir = root.join("adapters").join("runner-check");
+        let log_path = root.join("adapters").join("runner-check.log");
+
+        let job = crate::training::run_cortex_adapter_training_job(
+            &root,
+            "tiny-memory-model",
+            &source_hash,
+            crate::training::CortexAdapterTrainingOptions {
+                dry_run: true,
+                timeout_millis: 120_000,
+                output_dir: Some(output_dir.clone()),
+                log_path: Some(log_path.clone()),
+                ..Default::default()
+            },
+        )
+        .expect("run dry-run trainer");
+
+        assert_eq!(job.status, "prepared");
+        assert_eq!(job.source_dataset_hash, source_hash);
+        assert!(job
+            .command
+            .iter()
+            .any(|part| part.ends_with("training/train_mlx_lora.py")));
+        assert_eq!(
+            FileMemoryStore::new(&root)
+                .load_cortex_adapter_job(&job.id)
+                .expect("load persisted job"),
+            Some(job.clone())
+        );
+        let log: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(log_path).expect("read runner log"))
+                .expect("parse runner log");
+        assert_eq!(
+            log.get("status").and_then(|value| value.as_str()),
+            Some("completed")
+        );
+        assert!(log
+            .get("stdout")
+            .and_then(|value| value.as_str())
+            .is_some_and(|stdout| stdout.contains("\"status\": \"ready\"")));
+        let manifest = fs::read_to_string(output_dir.join("adapter_manifest.json"))
+            .expect("read adapter manifest");
+        assert!(manifest.contains("\"status\": \"prepared\""));
+        let snapshot = load_cortex_adapter_snapshot(&root).expect("load adapter snapshot");
+        assert_eq!(
+            snapshot
+                .adapter_state
+                .as_ref()
+                .map(|state| state.status.as_str()),
+            Some("prepared")
+        );
+
+        let failed = crate::training::run_cortex_adapter_training_job(
+            &root,
+            "tiny-memory-model",
+            &source_hash,
+            crate::training::CortexAdapterTrainingOptions {
+                dry_run: true,
+                python: Some("python-binary-that-should-not-exist".into()),
+                output_dir: Some(root.join("adapters").join("runner-failed")),
+                log_path: Some(root.join("adapters").join("runner-failed.log")),
+                ..Default::default()
+            },
+        )
+        .expect("persist failed trainer job");
+        assert_eq!(failed.status, "failed");
+        assert!(failed.failure_reason.is_some());
+        assert_eq!(
+            FileMemoryStore::new(&root)
+                .load_cortex_adapter_job(&failed.id)
+                .expect("load failed job")
+                .as_ref()
+                .and_then(|job| job.failure_reason.as_ref())
+                .is_some(),
+            true
+        );
+    }
+
+    #[test]
     fn chat_turns_are_persisted_indexed_hot_and_survive_rebuilds() {
         let root = temp_store_root("chat-memory");
         let session = create_chat_session(&root, Some("Milestone A".into())).expect("create chat");

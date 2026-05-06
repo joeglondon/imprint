@@ -67,10 +67,10 @@ Goal: cross from "better cortex-aware retrieval" into "some semantic memory is i
   - [x] `adapter_path`
   - [x] `eval_score`
   - [x] `failure_reason`
-- [ ] Wire a Rust-side trainer runner that invokes `training/train_mlx_lora.py` or `mlx_lm` directly.
+- [x] Wire a Rust-side trainer runner that invokes `training/train_mlx_lora.py` or `mlx_lm` directly.
 - [ ] Run training asynchronously after import/rebuild so source recall stays usable.
 - [ ] Add cancel/retry behavior for adapter jobs.
-- [ ] Add timeout, log capture, and failed-state persistence for training runs.
+- [x] Add timeout, log capture, and failed-state persistence for training runs.
 - [ ] Keep the previously active adapter when a new training job fails.
 - [ ] Record trained adapter manifests with:
   - [ ] base model
