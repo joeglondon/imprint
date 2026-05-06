@@ -72,15 +72,15 @@ Goal: cross from "better cortex-aware retrieval" into "some semantic memory is i
 - [ ] Add cancel/retry behavior for adapter jobs.
 - [x] Add timeout, log capture, and failed-state persistence for training runs.
 - [ ] Keep the previously active adapter when a new training job fails.
-- [ ] Record trained adapter manifests with:
-  - [ ] base model
-  - [ ] source dataset hash
-  - [ ] prepared dataset hash
-  - [ ] adapter file hash
-  - [ ] record counts
-  - [ ] training iters
-  - [ ] command/version metadata
-  - [ ] created/finished timestamps
+- [x] Record trained adapter manifests with:
+  - [x] base model
+  - [x] source dataset hash
+  - [x] prepared dataset hash
+  - [x] adapter file hash
+  - [x] record counts
+  - [x] training iters
+  - [x] command/version metadata
+  - [x] created/finished timestamps
 - [ ] Add a small adapter evaluation suite before activation.
 - [ ] Define minimum activation gates:
   - [ ] route-region accuracy above baseline

@@ -126,7 +126,8 @@ pub fn prepare_cortex_adapter_dataset(
         "status": "prepared",
         "base_model": base_model,
         "dataset": data_dir.display().to_string(),
-        "dataset_hash": prepared_dataset_hash,
+        "dataset_hash": prepared_dataset_hash.clone(),
+        "prepared_dataset_hash": prepared_dataset_hash,
         "source_dataset": training_dir.display().to_string(),
         "source_dataset_hash": source_dataset_hash,
         "adapter_path": adapter_dir.display().to_string(),
@@ -352,7 +353,8 @@ pub fn read_cortex_adapter_state(
         trained_source_dataset_hash,
         active_adapter_hash: string_field(&manifest, "active_adapter_hash")
             .or_else(|| string_field(&manifest, "adapter_hash")),
-        prepared_dataset_hash: string_field(&manifest, "dataset_hash"),
+        prepared_dataset_hash: string_field(&manifest, "prepared_dataset_hash")
+            .or_else(|| string_field(&manifest, "dataset_hash")),
         eval_score: f64_field(&manifest, "eval_score"),
         failure_reason: string_field(&manifest, "failure_reason"),
         train_records: usize_field(&manifest, "train_records"),

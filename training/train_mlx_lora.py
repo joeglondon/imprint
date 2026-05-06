@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import importlib.util
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -73,6 +75,39 @@ def dataset_hash(dataset: Path) -> str:
     return digest.hexdigest()
 
 
+def now_millis() -> int:
+    return int(time.time() * 1000)
+
+
+def adapter_file_hash(output: Path) -> str | None:
+    digest = hashlib.sha256()
+    files: list[Path] = []
+    for path in output.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.name == "adapter_manifest.json":
+            continue
+        if "mlx-data" in path.relative_to(output).parts:
+            continue
+        files.append(path)
+    if not files:
+        return None
+    for path in sorted(files):
+        relative = path.relative_to(output).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def package_version(package: str) -> str | None:
+    try:
+        return importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
 def write_adapter_manifest(
     *,
     model: str,
@@ -81,14 +116,27 @@ def write_adapter_manifest(
     output: Path,
     iters: int,
     status: str,
+    command: list[str] | None = None,
+    created_at: int | None = None,
+    finished_at: int | None = None,
 ) -> dict:
+    prepared_dataset_hash = dataset_hash(dataset)
     manifest = {
         "status": status,
         "base_model": model,
         "dataset": str(dataset),
-        "dataset_hash": dataset_hash(dataset),
+        "dataset_hash": prepared_dataset_hash,
+        "prepared_dataset_hash": prepared_dataset_hash,
         "adapter_path": str(output),
+        "adapter_file_hash": adapter_file_hash(output),
         "iters": iters,
+        "command": command or [],
+        "versions": {
+            "python": sys.version.split()[0],
+            "mlx_lm": package_version("mlx-lm") or package_version("mlx_lm"),
+        },
+        "created_at": created_at if created_at is not None else now_millis(),
+        "finished_at": finished_at if finished_at is not None else now_millis(),
         **load_prepared_counts(dataset),
     }
     if source_dataset is not None:
@@ -110,6 +158,7 @@ def main() -> None:
     dataset = Path(args.dataset)
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
+    started_at = now_millis()
     mlx_data = prepare_mlx_dataset(dataset, output)
     command = [
         sys.executable,
@@ -134,6 +183,9 @@ def main() -> None:
             output=output,
             iters=args.iters,
             status="prepared",
+            command=command,
+            created_at=started_at,
+            finished_at=now_millis(),
         )
         print(json.dumps({
             "status": "ready",
@@ -146,6 +198,7 @@ def main() -> None:
     if importlib.util.find_spec("mlx_lm") is None:
         raise SystemExit("mlx_lm is not installed. Install optional dependency mlx-lm to train adapters.")
     subprocess.run(command, check=True)
+    finished_at = now_millis()
     manifest = write_adapter_manifest(
         model=args.model,
         dataset=mlx_data,
@@ -153,6 +206,9 @@ def main() -> None:
         output=output,
         iters=args.iters,
         status="trained",
+        command=command,
+        created_at=started_at,
+        finished_at=finished_at,
     )
     print(json.dumps({"status": "trained", **manifest}, indent=2, sort_keys=True))
 
