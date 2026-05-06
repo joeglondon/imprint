@@ -5011,6 +5011,55 @@ mod tests {
     }
 
     #[test]
+    fn cortex_adapter_jobs_can_be_cancelled_and_retried() {
+        let root = temp_store_root("adapter-job-cancel-retry");
+        let output_dir = root.join("adapters").join("cancel-check");
+        let log_path = root.join("adapters").join("cancel-check.log");
+        let queued = crate::training::queue_cortex_adapter_training_job(
+            &root,
+            "tiny-memory-model",
+            "source-hash-for-cancel",
+            crate::training::CortexAdapterTrainingOptions {
+                dry_run: true,
+                output_dir: Some(output_dir.clone()),
+                log_path: Some(log_path),
+                ..Default::default()
+            },
+        )
+        .expect("queue adapter training job");
+
+        let cancelled = crate::training::cancel_cortex_adapter_training_job(&root, &queued.id)
+            .expect("cancel queued adapter training job");
+        assert_eq!(cancelled.status, "cancelled");
+        assert!(cancelled.finished_at.is_some());
+        assert_eq!(
+            crate::training::run_queued_cortex_adapter_training_job(&root, &queued.id)
+                .expect("cancelled job is a no-op")
+                .status,
+            "cancelled"
+        );
+
+        let retry = crate::training::retry_cortex_adapter_training_job(&root, &queued.id, false)
+            .expect("retry cancelled adapter training job");
+        assert_eq!(retry.status, "queued");
+        assert_eq!(retry.payload.get("retry_of"), Some(&queued.id));
+        assert_ne!(retry.id, queued.id);
+        assert_ne!(retry.adapter_output_path, output_dir.display().to_string());
+        assert!(retry
+            .command
+            .windows(2)
+            .any(|parts| parts[0] == "--output" && parts[1] == retry.adapter_output_path));
+        assert_eq!(
+            FileMemoryStore::new(&root)
+                .load_cortex_adapter_job(&retry.id)
+                .expect("load retry job")
+                .as_ref()
+                .map(|job| job.status.as_str()),
+            Some("queued")
+        );
+    }
+
+    #[test]
     fn cortex_adapter_eval_gates_activation() {
         let root = temp_store_root("adapter-activation");
         let input = root.join("source.txt");

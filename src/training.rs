@@ -273,6 +273,16 @@ pub fn run_queued_cortex_adapter_training_job(
     let mut job = store
         .load_cortex_adapter_job(job_id)?
         .with_context(|| format!("cortex adapter job {job_id} not found"))?;
+    if job.status == "cancelled" {
+        return Ok(job);
+    }
+    if job.status != "queued" {
+        return Err(anyhow!(
+            "cortex adapter job {} is {}, not queued",
+            job.id,
+            job.status
+        ));
+    }
     let output_dir = PathBuf::from(&job.adapter_output_path);
     let log_path = job
         .log_path
@@ -291,7 +301,10 @@ pub fn run_queued_cortex_adapter_training_job(
     job.started_at = Some(started_at);
     store.upsert_cortex_adapter_job(&job)?;
 
-    let result = execute_training_command(&job.command, timeout_millis);
+    let running_job_id = job.id.clone();
+    let result = execute_training_command(&job.command, timeout_millis, || {
+        cortex_adapter_job_is_cancelled(store_root, &running_job_id)
+    });
     let finished_at = now_millis();
     write_training_log(&log_path, &job.command, started_at, finished_at, &result)?;
     job.finished_at = Some(finished_at);
@@ -332,6 +345,10 @@ pub fn run_queued_cortex_adapter_training_job(
                 "trainer exceeded timeout of {timeout_millis}ms and was stopped"
             ));
         }
+        TrainingCommandResult::Cancelled { .. } => {
+            job.status = "cancelled".into();
+            job.failure_reason = Some("trainer cancellation requested".into());
+        }
         TrainingCommandResult::SpawnFailed { error } => {
             job.status = "failed".into();
             job.failure_reason = Some(error);
@@ -339,6 +356,111 @@ pub fn run_queued_cortex_adapter_training_job(
     }
     store.upsert_cortex_adapter_job(&job)?;
     Ok(job)
+}
+
+pub fn cancel_cortex_adapter_training_job(
+    store_root: &Path,
+    job_id: &str,
+) -> anyhow::Result<CortexAdapterJob> {
+    let store = FileMemoryStore::new(store_root);
+    let mut job = store
+        .load_cortex_adapter_job(job_id)?
+        .with_context(|| format!("cortex adapter job {job_id} not found"))?;
+    match job.status.as_str() {
+        "queued" | "training" => {
+            let cancelled_at = now_millis();
+            job.status = "cancelled".into();
+            job.failure_reason = Some("cancellation requested".into());
+            job.updated_at = cancelled_at;
+            if job.started_at.is_none() {
+                job.finished_at = Some(cancelled_at);
+            }
+            store.upsert_cortex_adapter_job(&job)?;
+            Ok(job)
+        }
+        "cancelled" => Ok(job),
+        status => Err(anyhow!(
+            "cortex adapter job {job_id} is {status}, not cancellable"
+        )),
+    }
+}
+
+pub fn retry_cortex_adapter_training_job(
+    store_root: &Path,
+    job_id: &str,
+    run_now: bool,
+) -> anyhow::Result<CortexAdapterJob> {
+    let store = FileMemoryStore::new(store_root);
+    let job = store
+        .load_cortex_adapter_job(job_id)?
+        .with_context(|| format!("cortex adapter job {job_id} not found"))?;
+    if !matches!(job.status.as_str(), "failed" | "cancelled" | "eval_failed") {
+        return Err(anyhow!(
+            "cortex adapter job {} is {}, not retryable",
+            job.id,
+            job.status
+        ));
+    }
+
+    let retried_at = now_millis();
+    let hash_prefix = &job.source_dataset_hash[..12.min(job.source_dataset_hash.len())];
+    let output_dir = PathBuf::from(&job.adapter_output_path)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| store_root.join("adapters"))
+        .join(format!("retry-{hash_prefix}-{retried_at}"));
+    let log_path = PathBuf::from(&job.log_path.clone().unwrap_or_else(|| {
+        store_root
+            .join("adapters")
+            .join(format!("retry-{hash_prefix}-{retried_at}.log"))
+            .display()
+            .to_string()
+    }))
+    .parent()
+    .map(Path::to_path_buf)
+    .unwrap_or_else(|| store_root.join("adapters"))
+    .join(format!("retry-{hash_prefix}-{retried_at}.log"));
+    fs::create_dir_all(output_dir.parent().unwrap_or(store_root))
+        .with_context(|| format!("creating adapter retry directory {}", output_dir.display()))?;
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!("creating adapter retry log directory {}", parent.display())
+        })?;
+    }
+
+    let mut payload = job.payload.clone();
+    payload.insert("retry_of".into(), job.id.clone());
+    payload.insert("retried_at".into(), retried_at.to_string());
+    let mut command = job.command.clone();
+    set_command_arg(&mut command, "--output", output_dir.display().to_string());
+
+    let retry = CortexAdapterJob {
+        id: format!("adapter-job:{hash_prefix}:{retried_at}"),
+        status: "queued".into(),
+        source_dataset_hash: job.source_dataset_hash,
+        prepared_dataset_hash: job.prepared_dataset_hash,
+        base_model: job.base_model,
+        adapter_output_path: output_dir.display().to_string(),
+        manifest_path: None,
+        train_records: job.train_records,
+        valid_records: job.valid_records,
+        test_records: job.test_records,
+        iters: job.iters,
+        command,
+        log_path: Some(log_path.display().to_string()),
+        failure_reason: None,
+        payload,
+        created_at: retried_at,
+        updated_at: retried_at,
+        started_at: None,
+        finished_at: None,
+    };
+    store.upsert_cortex_adapter_job(&retry)?;
+    if run_now {
+        run_queued_cortex_adapter_training_job(store_root, &retry.id)
+    } else {
+        Ok(retry)
+    }
 }
 
 pub fn evaluate_cortex_adapter(
@@ -772,12 +894,20 @@ enum TrainingCommandResult {
         stdout: String,
         stderr: String,
     },
+    Cancelled {
+        stdout: String,
+        stderr: String,
+    },
     SpawnFailed {
         error: String,
     },
 }
 
-fn execute_training_command(command: &[String], timeout_millis: u64) -> TrainingCommandResult {
+fn execute_training_command(
+    command: &[String],
+    timeout_millis: u64,
+    mut is_cancelled: impl FnMut() -> bool,
+) -> TrainingCommandResult {
     if command.is_empty() {
         return TrainingCommandResult::SpawnFailed {
             error: "empty trainer command".into(),
@@ -801,6 +931,18 @@ fn execute_training_command(command: &[String], timeout_millis: u64) -> Training
     let timeout = Duration::from_millis(timeout_millis);
     let started = Instant::now();
     loop {
+        if is_cancelled() {
+            let _ = child.kill();
+            return match child.wait_with_output() {
+                Ok(output) => TrainingCommandResult::Cancelled {
+                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                },
+                Err(error) => TrainingCommandResult::SpawnFailed {
+                    error: error.to_string(),
+                },
+            };
+        }
         match child.try_wait() {
             Ok(Some(_status)) => match child.wait_with_output() {
                 Ok(output) => {
@@ -873,6 +1015,14 @@ fn write_training_log(
             "stdout": stdout,
             "stderr": stderr,
         }),
+        TrainingCommandResult::Cancelled { stdout, stderr } => json!({
+            "status": "cancelled",
+            "command": command,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "stdout": stdout,
+            "stderr": stderr,
+        }),
         TrainingCommandResult::SpawnFailed { error } => json!({
             "status": "spawn_failed",
             "command": command,
@@ -883,6 +1033,27 @@ fn write_training_log(
     };
     fs::write(path, serde_json::to_string_pretty(&payload)?)
         .with_context(|| format!("writing trainer log {}", path.display()))
+}
+
+fn cortex_adapter_job_is_cancelled(store_root: &Path, job_id: &str) -> bool {
+    FileMemoryStore::new(store_root)
+        .load_cortex_adapter_job(job_id)
+        .ok()
+        .flatten()
+        .is_some_and(|job| job.status == "cancelled")
+}
+
+fn set_command_arg(command: &mut Vec<String>, name: &str, value: String) {
+    if let Some(index) = command.iter().position(|part| part == name) {
+        if let Some(slot) = command.get_mut(index + 1) {
+            *slot = value;
+        } else {
+            command.push(value);
+        }
+    } else {
+        command.push(name.into());
+        command.push(value);
+    }
 }
 
 fn read_manifest(path: &Path) -> anyhow::Result<serde_json::Value> {

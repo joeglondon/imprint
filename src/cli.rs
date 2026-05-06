@@ -139,6 +139,14 @@ enum CortexCommand {
         #[arg(long, default_value_t = crate::training::DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE)]
         minimum_score: f64,
     },
+    Cancel {
+        job_id: String,
+    },
+    Retry {
+        job_id: String,
+        #[arg(long)]
+        queue_only: bool,
+    },
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -260,6 +268,19 @@ pub fn run() -> anyhow::Result<()> {
                     "adapter_state": adapter_state,
                 });
                 println!("{}", serde_json::to_string_pretty(&payload)?);
+            }
+            CortexCommand::Cancel { job_id } => {
+                let job =
+                    crate::training::cancel_cortex_adapter_training_job(store.root(), &job_id)?;
+                println!("{}", serde_json::to_string_pretty(&job)?);
+            }
+            CortexCommand::Retry { job_id, queue_only } => {
+                let job = crate::training::retry_cortex_adapter_training_job(
+                    store.root(),
+                    &job_id,
+                    !queue_only,
+                )?;
+                println!("{}", serde_json::to_string_pretty(&job)?);
             }
         },
         Command::Compile => {
