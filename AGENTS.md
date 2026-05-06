@@ -153,7 +153,7 @@ Do not optimize for dumping whole corpora into prompt context. Optimize for surg
 - `CortexIndex` is not yet a first-class persisted schema; current compiler artifacts are scaffolding.
 - Adapter freshness state is not yet wired into import/rebuild, Swift UI, CLI, or MCP surfaces.
 - MLX cortex adapter training is not yet a core import/rebuild step.
-- MLX adapter preparation now writes an inspectable `adapter_manifest.json` with base model, dataset path, dataset hash, record counts, status, and iteration target, but the Rust app does not yet persist or read that manifest as adapter freshness state.
+- MLX adapter dry runs now prepare an inspectable `adapter_manifest.json` without requiring optional `mlx_lm` installation, but the Rust app does not yet persist or read that manifest as adapter freshness state.
 - True latent RecursiveLink-style planner/critic/retriever/solver loops are not implemented; current recursion is trace/text/tool mediated.
 - Routing now returns a structured `RoutePlan` with candidate regions, scores, matched terms, and suggested next tool steps. It is still lexical over `MemoryMap`; it needs embedding-aware routing and a stronger recursive-agent policy contract.
 - Vector search is in-memory and approximate, not yet a scalable ANN store.
@@ -170,6 +170,7 @@ Do not optimize for dumping whole corpora into prompt context. Optimize for surg
 ## Recent Incremental Improvements
 
 - 2026-05-05: Added a unit-tested MLX adapter preparation manifest in `training/train_mlx_lora.py`. Dry runs and completed training now share one manifest path, making prepared datasets inspectable before optional MLX dependencies are used for real training.
+- 2026-05-06: Fixed `training/train_mlx_lora.py --dry-run` so adapter dataset preparation and manifest writing work even when `mlx_lm` is not installed. Added a regression test that patches `mlx_lm` discovery absent and verifies the prepared manifest.
 
 ## Recent Improvements
 

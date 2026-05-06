@@ -100,9 +100,6 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Prepare MLX data and print the training command without running it")
     args = parser.parse_args()
 
-    if importlib.util.find_spec("mlx_lm") is None:
-        raise SystemExit("mlx_lm is not installed. Install optional dependency mlx-lm to train adapters.")
-
     dataset = Path(args.dataset)
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
@@ -138,6 +135,8 @@ def main() -> None:
             "command": command,
         }, indent=2))
         return
+    if importlib.util.find_spec("mlx_lm") is None:
+        raise SystemExit("mlx_lm is not installed. Install optional dependency mlx-lm to train adapters.")
     subprocess.run(command, check=True)
     manifest = write_adapter_manifest(
         model=args.model,
