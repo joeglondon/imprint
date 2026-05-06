@@ -11,7 +11,7 @@ pub struct MemoryQueryEngine;
 
 impl Router for MemoryQueryEngine {
     fn route(&self, memory_map: &MemoryMap, request: &QueryRequest) -> RoutedQuery {
-        self.route_with_region_scores(memory_map, request, &HashMap::new())
+        self.route_with_region_scores(memory_map, request, &HashMap::new(), &HashMap::new())
     }
 }
 
@@ -21,6 +21,7 @@ impl MemoryQueryEngine {
         memory_map: &MemoryMap,
         request: &QueryRequest,
         semantic_scores: &HashMap<RegionId, f32>,
+        attention_scores: &HashMap<RegionId, f32>,
     ) -> RoutedQuery {
         let tokens = tokenize(&request.text);
         let mut scored = memory_map
@@ -55,10 +56,15 @@ impl MemoryQueryEngine {
                     .copied()
                     .unwrap_or_default()
                     .max(0.0);
+                let attention = attention_scores
+                    .get(&entry.region_id)
+                    .copied()
+                    .unwrap_or_default();
                 score += semantic * 3.0;
-                let reason = if semantic > 0.0 {
+                score += attention;
+                let reason = if semantic > 0.0 || attention != 0.0 {
                     format!(
-                        "{} matched route score {score:.2} (semantic {semantic:.2})",
+                        "{} matched route score {score:.2} (semantic {semantic:.2}, attention {attention:.2})",
                         entry.label
                     )
                 } else {
@@ -113,7 +119,26 @@ impl MemoryQueryEngine {
         ann_index: &RegionAnnIndex,
         request: QueryRequest,
     ) -> anyhow::Result<QueryResult> {
+        self.execute_with_attention(embedder, memory, ann_index, request, &[])
+    }
+
+    pub fn execute_with_attention<E: Embedder>(
+        &self,
+        embedder: &E,
+        memory: &PersistedMemory,
+        ann_index: &RegionAnnIndex,
+        request: QueryRequest,
+        attention_marks: &[AttentionMark],
+    ) -> anyhow::Result<QueryResult> {
         let query_embedding = embedder.embed(&request.text)?;
+        let attention_scores = attention_scores(attention_marks);
+        let region_attention_scores = attention_scores
+            .iter()
+            .filter_map(|(key, score)| {
+                key.strip_prefix("region:")
+                    .map(|region_id| (region_id.to_string(), *score))
+            })
+            .collect::<HashMap<_, _>>();
         let semantic_scores = memory
             .regions
             .iter()
@@ -128,6 +153,7 @@ impl MemoryQueryEngine {
             memory.memory_map.as_ref().expect("memory map missing"),
             &request,
             &semantic_scores,
+            &region_attention_scores,
         );
         let chunks_by_id = memory
             .chunks
@@ -167,7 +193,11 @@ impl MemoryQueryEngine {
                         chunk.text
                     ),
                 );
-                let score = ann_score * 0.7 + lexical * 0.3;
+                let score = apply_attention_score(
+                    ann_score * 0.7 + lexical * 0.3,
+                    chunk,
+                    &attention_scores,
+                );
                 let excerpt = excerpt_window(&document.text, chunk.start, chunk.end, 60);
                 hits.push(ChunkHit {
                     hit_id: format!("hit:{chunk_id}"),
@@ -215,7 +245,7 @@ impl MemoryQueryEngine {
                     chunk_id: chunk.id.clone(),
                     document_id: chunk.document_id.clone(),
                     region_id: chunk.region_id.clone(),
-                    score: lexical.max(0.05),
+                    score: apply_attention_score(lexical.max(0.05), chunk, &attention_scores),
                     excerpt,
                     start: chunk.start,
                     end: chunk.end,
@@ -251,6 +281,64 @@ impl MemoryQueryEngine {
             reasons: vec![routed.rationale],
         }
     }
+}
+
+fn apply_attention_score(
+    base_score: f32,
+    chunk: &Chunk,
+    attention_scores: &HashMap<String, f32>,
+) -> f32 {
+    let boost = attention_scores
+        .get(&attention_key(&AttentionTargetKind::Chunk, &chunk.id))
+        .copied()
+        .unwrap_or_default()
+        + attention_scores
+            .get(&attention_key(
+                &AttentionTargetKind::Document,
+                &chunk.document_id,
+            ))
+            .copied()
+            .unwrap_or_default()
+        + attention_scores
+            .get(&attention_key(
+                &AttentionTargetKind::Region,
+                &chunk.region_id,
+            ))
+            .copied()
+            .unwrap_or_default();
+    (base_score + boost.clamp(-0.45, 0.55)).max(0.001)
+}
+
+fn attention_scores(marks: &[AttentionMark]) -> HashMap<String, f32> {
+    let mut scores = HashMap::new();
+    for mark in marks.iter().filter(|mark| mark.reverted_at.is_none()) {
+        let delta = match mark.action {
+            AttentionAction::Pin => 0.35,
+            AttentionAction::Promote => 0.22,
+            AttentionAction::Active => 0.14,
+            AttentionAction::Decay => -0.14,
+            AttentionAction::Suppress => -0.40,
+        };
+        *scores
+            .entry(attention_key(&mark.target_kind, &mark.target_id))
+            .or_insert(0.0) += delta;
+    }
+    scores
+}
+
+fn attention_key(kind: &AttentionTargetKind, target_id: &str) -> String {
+    let kind = match kind {
+        AttentionTargetKind::ChatSession => "chat_session",
+        AttentionTargetKind::ChatMessage => "chat_message",
+        AttentionTargetKind::TranscriptChunk => "transcript_chunk",
+        AttentionTargetKind::DerivedMemory => "derived_memory",
+        AttentionTargetKind::WebFinding => "web_finding",
+        AttentionTargetKind::Document => "document",
+        AttentionTargetKind::Chunk => "chunk",
+        AttentionTargetKind::Region => "region",
+        AttentionTargetKind::Link => "link",
+    };
+    format!("{kind}:{target_id}")
 }
 
 fn matches_filters(
@@ -477,5 +565,90 @@ mod tests {
             result.hits.first().map(|hit| hit.chunk_id.as_str()),
             Some("chunk-target")
         );
+    }
+
+    #[test]
+    fn execute_uses_attention_marks_to_rank_source_recall() {
+        let embedder = crate::index::HashEmbedder::default();
+        let text = "shared routing memory";
+        let embedding = embedder.embed(text).expect("embedding");
+        let document = |id: &str| Document {
+            id: id.into(),
+            title: id.into(),
+            text: text.into(),
+            metadata: BTreeMap::new(),
+            source_anchor: None,
+            content_hash: None,
+            parser_version: None,
+        };
+        let chunk = |id: &str, document_id: &str, ordinal: usize| Chunk {
+            id: id.into(),
+            document_id: document_id.into(),
+            region_id: "region".into(),
+            ordinal,
+            start: 0,
+            end: text.chars().count(),
+            text: text.into(),
+            metadata: BTreeMap::new(),
+            source_anchor: None,
+            embedding: embedding.clone(),
+            embedding_text_hash: None,
+            embedding_provider: None,
+            embedding_model: None,
+            embedding_endpoint: None,
+            embedding_dimension: None,
+            chunking_version: None,
+        };
+        let memory = PersistedMemory {
+            documents: vec![document("doc-a"), document("doc-b")],
+            chunks: vec![chunk("chunk-a", "doc-a", 0), chunk("chunk-b", "doc-b", 1)],
+            regions: vec![Region {
+                id: "region".into(),
+                label: "Region".into(),
+                summary: text.into(),
+                filters: BTreeMap::new(),
+                chunk_ids: vec!["chunk-a".into(), "chunk-b".into()],
+                centroid: embedding,
+                neighbors: Vec::new(),
+            }],
+            links: Vec::new(),
+            memory_map: Some(MemoryMap {
+                budget_bytes: 2048,
+                serialized: String::new(),
+                entries: vec![entry("region", "Region", text)],
+            }),
+        };
+        let ann = crate::index::RegionIndexer.rebuild(&memory.chunks, &memory.regions);
+        let marks = vec![AttentionMark {
+            id: "attention-1".into(),
+            target_id: "chunk-b".into(),
+            target_kind: AttentionTargetKind::Chunk,
+            action: AttentionAction::Pin,
+            reason: "User pinned this passage as the preferred routing address.".into(),
+            actor: "test".into(),
+            created_at: 1,
+            reverted_at: None,
+        }];
+
+        let result = MemoryQueryEngine
+            .execute_with_attention(
+                &embedder,
+                &memory,
+                &ann,
+                QueryRequest {
+                    text: text.into(),
+                    filters: BTreeMap::new(),
+                    max_regions: 1,
+                    max_chunks: 2,
+                },
+                &marks,
+            )
+            .expect("query");
+
+        assert_eq!(
+            result.hits.first().map(|hit| hit.chunk_id.as_str()),
+            Some("chunk-b")
+        );
+        assert!(result.hits[0].score > result.hits[1].score);
     }
 }

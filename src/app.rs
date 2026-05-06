@@ -518,11 +518,13 @@ pub fn get_visualization_snapshot(store_root: &Path) -> anyhow::Result<Visualiza
 pub fn run_query(store_root: &Path, request: QueryRequest) -> anyhow::Result<QueryResult> {
     sync_chat_documents(store_root)?;
     sync_web_findings(store_root)?;
+    let store = FileMemoryStore::new(store_root);
     let memory = load_ready_memory(store_root)?;
+    let attention_marks = store.list_attention_marks(None).unwrap_or_default();
     let config = load_model_config(store_root)?;
     let embedder = embedder_for_config(&config)?;
     let ann = RegionIndexer.rebuild(&memory.chunks, &memory.regions);
-    MemoryQueryEngine.execute(&embedder, &memory, &ann, request)
+    MemoryQueryEngine.execute_with_attention(&embedder, &memory, &ann, request, &attention_marks)
 }
 
 pub fn grep_region(
@@ -2147,6 +2149,7 @@ fn build_chat_context_trace_with_searcher<S: WebSearcher>(
 ) -> anyhow::Result<ChatContextTrace> {
     let query_embedding = embedder.embed(&user_message.content)?;
     let memory = FileMemoryStore::new(store_root).load().ok();
+    let attention_marks = store.list_attention_marks(None).unwrap_or_default();
     let hot_snippets = memory
         .as_ref()
         .map(|memory| {
@@ -2178,6 +2181,7 @@ fn build_chat_context_trace_with_searcher<S: WebSearcher>(
     let mandatory_hits = execute_memory_search(
         embedder,
         memory.as_ref(),
+        &attention_marks,
         &user_message.content,
         6,
         5,
@@ -2219,6 +2223,7 @@ fn build_chat_context_trace_with_searcher<S: WebSearcher>(
                 let hits = execute_memory_search(
                     embedder,
                     memory.as_ref(),
+                    &attention_marks,
                     &query,
                     max_chunks,
                     max_regions,
@@ -2689,6 +2694,7 @@ fn plan_memory_actions(
 fn execute_memory_search(
     embedder: &RuntimeEmbedder,
     memory: Option<&PersistedMemory>,
+    attention_marks: &[AttentionMark],
     query: &str,
     max_chunks: usize,
     max_regions: usize,
@@ -2703,7 +2709,7 @@ fn execute_memory_search(
     }
     let ann = RegionIndexer.rebuild(&memory.chunks, &memory.regions);
     MemoryQueryEngine
-        .execute(
+        .execute_with_attention(
             embedder,
             memory,
             &ann,
@@ -2713,6 +2719,7 @@ fn execute_memory_search(
                 max_regions: max_regions.max(1),
                 max_chunks: max_chunks.max(1),
             },
+            attention_marks,
         )
         .map(|result| {
             result
@@ -2815,9 +2822,11 @@ fn search_web_into_memory<S: WebSearcher>(
         return Ok(snippets);
     }
     let refreshed = store.load()?;
+    let attention_marks = store.list_attention_marks(None).unwrap_or_default();
     let mut snippets = execute_memory_search(
         embedder,
         Some(&refreshed),
+        &attention_marks,
         query,
         6,
         6,
