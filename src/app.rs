@@ -526,6 +526,7 @@ pub fn run_query(store_root: &Path, request: QueryRequest) -> anyhow::Result<Que
     let memory_accesses = store
         .list_memory_accesses(None, Some(now.saturating_sub(MEMORY_ACCESS_HORIZON_MILLIS)))
         .unwrap_or_default();
+    let cortex_index = store.load_current_cortex_index().unwrap_or_default();
     let config = load_model_config(store_root)?;
     let embedder = embedder_for_config(&config)?;
     let ann = RegionIndexer.rebuild(&memory.chunks, &memory.regions);
@@ -537,6 +538,7 @@ pub fn run_query(store_root: &Path, request: QueryRequest) -> anyhow::Result<Que
         &attention_marks,
         &memory_accesses,
         now,
+        cortex_index.as_ref(),
     )?;
     record_query_hit_accesses(&store, &result);
     Ok(result)
@@ -2209,6 +2211,7 @@ fn build_chat_context_trace_with_searcher<S: WebSearcher>(
 ) -> anyhow::Result<ChatContextTrace> {
     let query_embedding = embedder.embed(&user_message.content)?;
     let memory = FileMemoryStore::new(store_root).load().ok();
+    let cortex_index = store.load_current_cortex_index().unwrap_or_default();
     let attention_marks = store.list_attention_marks(None).unwrap_or_default();
     let now = now_millis();
     let memory_accesses = store
@@ -2241,12 +2244,16 @@ fn build_chat_context_trace_with_searcher<S: WebSearcher>(
         .unwrap_or_default();
     let mut snippets = hot_snippets.clone();
     let mut searched_web = false;
-    let mut tool_trace = vec!["planner: read compact map and active session hot memory".into()];
+    let mut tool_trace = vec![
+        "planner: read current cortex index, compact map fallback, and active session hot memory"
+            .into(),
+    ];
     let mandatory_hits = execute_memory_search(
         embedder,
         memory.as_ref(),
         &attention_marks,
         &memory_accesses,
+        cortex_index.as_ref(),
         &user_message.content,
         6,
         5,
@@ -2290,6 +2297,7 @@ fn build_chat_context_trace_with_searcher<S: WebSearcher>(
                     memory.as_ref(),
                     &attention_marks,
                     &memory_accesses,
+                    cortex_index.as_ref(),
                     &query,
                     max_chunks,
                     max_regions,
@@ -2762,6 +2770,7 @@ fn execute_memory_search(
     memory: Option<&PersistedMemory>,
     attention_marks: &[AttentionMark],
     memory_accesses: &[MemoryAccess],
+    cortex_index: Option<&CortexIndex>,
     query: &str,
     max_chunks: usize,
     max_regions: usize,
@@ -2771,7 +2780,7 @@ fn execute_memory_search(
     let Some(memory) = memory else {
         return Vec::new();
     };
-    if memory.memory_map.is_none() || memory.chunks.is_empty() {
+    if (memory.memory_map.is_none() && cortex_index.is_none()) || memory.chunks.is_empty() {
         return Vec::new();
     }
     let ann = RegionIndexer.rebuild(&memory.chunks, &memory.regions);
@@ -2789,6 +2798,7 @@ fn execute_memory_search(
             attention_marks,
             memory_accesses,
             now_millis(),
+            cortex_index,
         )
         .map(|result| {
             result
@@ -2891,6 +2901,7 @@ fn search_web_into_memory<S: WebSearcher>(
         return Ok(snippets);
     }
     let refreshed = store.load()?;
+    let cortex_index = store.load_current_cortex_index().unwrap_or_default();
     let attention_marks = store.list_attention_marks(None).unwrap_or_default();
     let now = now_millis();
     let memory_accesses = store
@@ -2901,6 +2912,7 @@ fn search_web_into_memory<S: WebSearcher>(
         Some(&refreshed),
         &attention_marks,
         &memory_accesses,
+        cortex_index.as_ref(),
         query,
         6,
         6,

@@ -16,6 +16,142 @@ impl Router for MemoryQueryEngine {
 }
 
 impl MemoryQueryEngine {
+    fn route_with_cortex_index_scores(
+        &self,
+        cortex_index: &CortexIndex,
+        fallback_memory_map: Option<&MemoryMap>,
+        request: &QueryRequest,
+        semantic_scores: &HashMap<RegionId, f32>,
+        attention_scores: &HashMap<RegionId, f32>,
+    ) -> RoutedQuery {
+        let tokens = tokenize(&request.text);
+        let mut scored = cortex_index
+            .regions
+            .iter()
+            .map(|region| {
+                let label = region.label.to_lowercase();
+                let summary = region.summary.to_lowercase();
+                let route_examples = region
+                    .route_examples
+                    .iter()
+                    .map(|example| example.to_lowercase())
+                    .collect::<Vec<_>>();
+                let source_refs = region
+                    .source_refs
+                    .iter()
+                    .map(|source| source.to_lowercase())
+                    .collect::<Vec<_>>();
+                let artifact_ids = region
+                    .artifact_ids
+                    .iter()
+                    .map(|artifact| artifact.to_lowercase())
+                    .collect::<Vec<_>>();
+                let mut score = 0.0f32;
+                let mut matched_terms = Vec::new();
+                for token in &tokens {
+                    let mut matched = false;
+                    if label.contains(token) || summary.contains(token) {
+                        score += 2.0;
+                        matched = true;
+                    }
+                    if route_examples.iter().any(|example| example.contains(token)) {
+                        score += 1.25;
+                        matched = true;
+                    }
+                    if source_refs.iter().any(|source| source.contains(token))
+                        || artifact_ids.iter().any(|artifact| artifact.contains(token))
+                    {
+                        score += 0.5;
+                        matched = true;
+                    }
+                    if matched {
+                        matched_terms.push(token.clone());
+                    }
+                }
+                let semantic = semantic_scores
+                    .get(&region.region_id)
+                    .copied()
+                    .unwrap_or_default()
+                    .max(0.0);
+                let attention = attention_scores
+                    .get(&region.region_id)
+                    .copied()
+                    .unwrap_or_default();
+                score += semantic * 3.0;
+                score += attention;
+                let reason = format!(
+                    "{} matched cortex-index route score {score:.2} (semantic {semantic:.2}, attention {attention:.2}, examples {}, sources {})",
+                    region.label,
+                    region.route_examples.len(),
+                    region.source_refs.len()
+                );
+                RouteCandidate {
+                    region_id: region.region_id.clone(),
+                    label: region.label.clone(),
+                    score,
+                    matched_terms,
+                    reason,
+                }
+            })
+            .collect::<Vec<_>>();
+        let cortex_region_ids = cortex_index
+            .regions
+            .iter()
+            .map(|region| region.region_id.clone())
+            .collect::<HashSet<_>>();
+        if let Some(memory_map) = fallback_memory_map {
+            let mut fallback_request = request.clone();
+            fallback_request.max_regions = memory_map.entries.len().max(request.max_regions);
+            scored.extend(
+                self.route_with_region_scores(
+                    memory_map,
+                    &fallback_request,
+                    semantic_scores,
+                    attention_scores,
+                )
+                .route_plan
+                .candidates
+                .into_iter()
+                .filter(|candidate| !cortex_region_ids.contains(&candidate.region_id))
+                .map(|mut candidate| {
+                    candidate.reason = format!("legacy fallback: {}", candidate.reason);
+                    candidate
+                }),
+            );
+        }
+        scored.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.region_id.cmp(&right.region_id))
+        });
+        let candidates = scored
+            .into_iter()
+            .take(request.max_regions.max(1))
+            .collect::<Vec<_>>();
+        let region_ids = candidates
+            .iter()
+            .map(|candidate| candidate.region_id.clone())
+            .collect::<Vec<_>>();
+        let rationale = candidates
+            .iter()
+            .map(|candidate| candidate.reason.clone())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let next_steps = route_next_steps(&candidates);
+        RoutedQuery {
+            query: request.text.clone(),
+            region_ids,
+            filters: request.filters.clone(),
+            rationale,
+            route_plan: RoutePlan {
+                candidates,
+                next_steps,
+            },
+        }
+    }
+
     fn route_with_region_scores(
         &self,
         memory_map: &MemoryMap,
@@ -138,6 +274,7 @@ impl MemoryQueryEngine {
             attention_marks,
             &[],
             0,
+            None,
         )
     }
 
@@ -150,6 +287,7 @@ impl MemoryQueryEngine {
         attention_marks: &[AttentionMark],
         memory_accesses: &[MemoryAccess],
         now: u64,
+        cortex_index: Option<&CortexIndex>,
     ) -> anyhow::Result<QueryResult> {
         let query_embedding = embedder.embed(&request.text)?;
         let mut attention_scores = attention_scores(attention_marks);
@@ -171,12 +309,22 @@ impl MemoryQueryEngine {
                 )
             })
             .collect::<HashMap<_, _>>();
-        let routed = self.route_with_region_scores(
-            memory.memory_map.as_ref().expect("memory map missing"),
-            &request,
-            &semantic_scores,
-            &region_attention_scores,
-        );
+        let routed = if let Some(cortex_index) = cortex_index {
+            self.route_with_cortex_index_scores(
+                cortex_index,
+                memory.memory_map.as_ref(),
+                &request,
+                &semantic_scores,
+                &region_attention_scores,
+            )
+        } else {
+            self.route_with_region_scores(
+                memory.memory_map.as_ref().expect("memory map missing"),
+                &request,
+                &semantic_scores,
+                &region_attention_scores,
+            )
+        };
         let chunks_by_id = memory
             .chunks
             .iter()
@@ -698,6 +846,74 @@ mod tests {
     }
 
     #[test]
+    fn route_can_use_cortex_index_sketches_instead_of_legacy_map_entries() {
+        let memory_map = MemoryMap {
+            budget_bytes: 2048,
+            serialized: String::new(),
+            entries: vec![
+                entry(
+                    "legacy-distractor",
+                    "Plantar Fascia",
+                    "Legacy projection points at the old bucket",
+                ),
+                entry("cortex-target", "Archive", "Opaque summary"),
+            ],
+        };
+        let cortex_index = CortexIndex {
+            id: "cortex-index:current".into(),
+            schema_version: 1,
+            corpus_hash: "hash".into(),
+            created_at: 1,
+            compiler: "test".into(),
+            source_refs: vec!["imprint://chunk/target".into()],
+            artifact_ids: vec!["artifact:target".into()],
+            regions: vec![
+                CortexRegionSketch {
+                    region_id: "cortex-target".into(),
+                    label: "Archive".into(),
+                    summary: "Opaque summary".into(),
+                    source_refs: vec!["imprint://chunk/target".into()],
+                    artifact_ids: vec!["artifact:target".into()],
+                    route_examples: vec!["plantar fascia rehabilitation source".into()],
+                },
+                CortexRegionSketch {
+                    region_id: "legacy-distractor".into(),
+                    label: "Old bucket".into(),
+                    summary: "Unrelated summary".into(),
+                    source_refs: Vec::new(),
+                    artifact_ids: Vec::new(),
+                    route_examples: Vec::new(),
+                },
+            ],
+            compatibility_map: memory_map.clone(),
+        };
+        let request = QueryRequest {
+            text: "plantar fascia".into(),
+            filters: BTreeMap::new(),
+            max_regions: 1,
+            max_chunks: 5,
+        };
+
+        let legacy = MemoryQueryEngine.route_with_region_scores(
+            &memory_map,
+            &request,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        let cortex = MemoryQueryEngine.route_with_cortex_index_scores(
+            &cortex_index,
+            None,
+            &request,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(legacy.region_ids, vec!["legacy-distractor"]);
+        assert_eq!(cortex.region_ids, vec!["cortex-target"]);
+        assert!(cortex.rationale.contains("cortex-index"));
+    }
+
+    #[test]
     fn execute_uses_attention_marks_to_rank_source_recall() {
         let embedder = crate::index::HashEmbedder::default();
         let text = "shared routing memory";
@@ -869,6 +1085,7 @@ mod tests {
                 &[],
                 &accesses,
                 1_200,
+                None,
             )
             .expect("query");
 
@@ -959,6 +1176,7 @@ mod tests {
                 &[],
                 &[],
                 1_777_311_476_000,
+                None,
             )
             .expect("query");
 
