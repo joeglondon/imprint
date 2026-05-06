@@ -958,6 +958,7 @@ pub fn compile_memory_brain(store_root: &Path) -> anyhow::Result<BrainCompileRes
     let compile_memory = memory_for_brain_compile(store_root, &memory, &config)?;
     let created_at = now_millis();
     let artifacts = crate::compiler::build_brain_artifacts(&compile_memory, created_at);
+    let cortex_index = crate::compiler::build_cortex_index(&compile_memory, &artifacts, created_at);
 
     let mut artifact_ids = Vec::new();
     for artifact in &artifacts {
@@ -973,6 +974,7 @@ pub fn compile_memory_brain(store_root: &Path) -> anyhow::Result<BrainCompileRes
         )?;
         artifact_ids.push(artifact.id.clone());
     }
+    store.save_cortex_index(&cortex_index)?;
     artifact_ids.sort();
     let training_records_path = store_root.join("brain-training.jsonl");
     let training_records = artifacts
@@ -1021,6 +1023,7 @@ pub fn compile_memory_brain(store_root: &Path) -> anyhow::Result<BrainCompileRes
         training_records_path: training_records_path.display().to_string(),
         export_files,
         adapter_state: Some(adapter_state),
+        cortex_index: Some(cortex_index),
     })
 }
 
@@ -4600,6 +4603,25 @@ mod tests {
             .export_files
             .iter()
             .any(|file| file.ends_with("route_region.eval.jsonl")));
+        let cortex_index = first.cortex_index.as_ref().expect("cortex index");
+        let second_cortex_index = second.cortex_index.as_ref().expect("second cortex index");
+        assert_eq!(cortex_index.schema_version, 1);
+        assert_eq!(cortex_index.id, "cortex-index:current");
+        assert_eq!(cortex_index.artifact_ids, first.artifact_ids);
+        assert_eq!(cortex_index.corpus_hash, second_cortex_index.corpus_hash);
+        assert_eq!(cortex_index.regions, second_cortex_index.regions);
+        assert!(!cortex_index.corpus_hash.is_empty());
+        assert!(!cortex_index.regions.is_empty());
+        assert!(cortex_index
+            .regions
+            .iter()
+            .all(|region| !region.source_refs.is_empty()));
+        assert!(!cortex_index.compatibility_map.entries.is_empty());
+        let persisted_cortex_index = FileMemoryStore::new(&root)
+            .load_current_cortex_index()
+            .expect("load cortex index")
+            .expect("persisted cortex index");
+        assert_eq!(persisted_cortex_index, *second_cortex_index);
         let prepared_adapter = first.adapter_state.as_ref().expect("adapter state");
         assert_eq!(prepared_adapter.freshness, "fresh");
         assert_eq!(prepared_adapter.status, "prepared");

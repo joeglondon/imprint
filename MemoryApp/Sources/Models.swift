@@ -386,6 +386,7 @@ struct BrainCompileResult: Codable, Equatable {
     var trainingRecordsPath: String
     var exportFiles: [String]
     var adapterState: CortexAdapterState?
+    var cortexIndex: CortexIndex?
 }
 
 struct CortexAdapterState: Codable, Equatable {
@@ -434,6 +435,27 @@ struct MemoryMap: Codable, Equatable {
     var budgetBytes: Int
     var serialized: String
     var entries: [MapEntry]
+}
+
+struct CortexRegionSketch: Codable, Equatable {
+    var regionId: String
+    var label: String
+    var summary: String
+    var sourceRefs: [String]
+    var artifactIds: [String]
+    var routeExamples: [String]
+}
+
+struct CortexIndex: Codable, Equatable {
+    var id: String
+    var schemaVersion: UInt32
+    var corpusHash: String
+    var createdAt: UInt64
+    var compiler: String
+    var sourceRefs: [String]
+    var artifactIds: [String]
+    var regions: [CortexRegionSketch]
+    var compatibilityMap: MemoryMap
 }
 
 enum NodeRef: Codable, Equatable, Hashable {

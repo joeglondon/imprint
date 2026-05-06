@@ -16,6 +16,7 @@ pub type WebFindingId = String;
 pub type AttentionMarkId = String;
 pub type MemoryAccessId = String;
 pub type AuditEventId = String;
+pub type CortexIndexId = String;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Document {
@@ -99,6 +100,29 @@ pub struct MemoryMap {
     pub budget_bytes: usize,
     pub serialized: String,
     pub entries: Vec<MapEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CortexRegionSketch {
+    pub region_id: RegionId,
+    pub label: String,
+    pub summary: String,
+    pub source_refs: Vec<String>,
+    pub artifact_ids: Vec<String>,
+    pub route_examples: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CortexIndex {
+    pub id: CortexIndexId,
+    pub schema_version: u32,
+    pub corpus_hash: String,
+    pub created_at: u64,
+    pub compiler: String,
+    pub source_refs: Vec<String>,
+    pub artifact_ids: Vec<String>,
+    pub regions: Vec<CortexRegionSketch>,
+    pub compatibility_map: MemoryMap,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -492,6 +516,8 @@ pub struct BrainCompileResult {
     pub export_files: Vec<String>,
     #[serde(default)]
     pub adapter_state: Option<CortexAdapterState>,
+    #[serde(default)]
+    pub cortex_index: Option<CortexIndex>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

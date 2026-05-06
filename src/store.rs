@@ -255,6 +255,36 @@ impl FileMemoryStore {
         }
     }
 
+    pub fn save_cortex_index(&self, index: &CortexIndex) -> Result<()> {
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT OR REPLACE INTO cortex_indexes (
+                id, schema_version, corpus_hash, created_at, compiler, index_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                index.id,
+                index.schema_version as i64,
+                index.corpus_hash,
+                index.created_at as i64,
+                index.compiler,
+                to_json(index)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_current_cortex_index(&self) -> Result<Option<CortexIndex>> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT index_json FROM cortex_indexes ORDER BY created_at DESC, id LIMIT 1",
+                [],
+                |row| from_json(row.get::<_, String>(0)?),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn save_cortex_adapter_state(&self, state: &CortexAdapterState) -> Result<()> {
         let connection = self.connection()?;
         connection.execute(
@@ -713,6 +743,15 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             state_json TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_cortex_adapter_state_checked ON cortex_adapter_state(checked_at);
+        CREATE TABLE IF NOT EXISTS cortex_indexes (
+            id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL,
+            corpus_hash TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            compiler TEXT NOT NULL,
+            index_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_cortex_indexes_created ON cortex_indexes(created_at);
         CREATE TABLE IF NOT EXISTS attention_marks (
             id TEXT PRIMARY KEY,
             target_id TEXT NOT NULL,

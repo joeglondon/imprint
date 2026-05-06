@@ -1,5 +1,8 @@
+use crate::map::MapBuilder;
 use crate::types::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+const CORTEX_INDEX_SCHEMA_VERSION: u32 = 1;
 
 pub fn build_brain_artifacts(memory: &PersistedMemory, created_at: u64) -> Vec<BrainArtifact> {
     let mut artifacts = Vec::new();
@@ -17,6 +20,51 @@ pub fn build_brain_artifacts(memory: &PersistedMemory, created_at: u64) -> Vec<B
         artifacts.push(routing_rule_artifact(region, created_at));
     }
     artifacts
+}
+
+pub fn build_cortex_index(
+    memory: &PersistedMemory,
+    artifacts: &[BrainArtifact],
+    created_at: u64,
+) -> CortexIndex {
+    let source_regions = memory
+        .regions
+        .iter()
+        .filter(|region| region_has_source_chunks(memory, region))
+        .collect::<Vec<_>>();
+    let compatibility_map = MapBuilder::default().build(
+        &source_regions
+            .iter()
+            .map(|region| (*region).clone())
+            .collect::<Vec<_>>(),
+    );
+    let mut artifact_ids = artifacts
+        .iter()
+        .map(|artifact| artifact.id.clone())
+        .collect::<Vec<_>>();
+    artifact_ids.sort();
+    let artifact_ids_by_region = artifacts_by_region(artifacts);
+    let regions = source_regions
+        .iter()
+        .map(|region| cortex_region_sketch(memory, region, &artifact_ids_by_region))
+        .collect::<Vec<_>>();
+    let source_refs = regions
+        .iter()
+        .flat_map(|region| region.source_refs.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    CortexIndex {
+        id: "cortex-index:current".into(),
+        schema_version: CORTEX_INDEX_SCHEMA_VERSION,
+        corpus_hash: cortex_corpus_hash(memory, &artifact_ids),
+        created_at,
+        compiler: "imprint-memory-compiler".into(),
+        source_refs,
+        artifact_ids,
+        regions,
+        compatibility_map,
+    }
 }
 
 fn library_map_artifact(regions: &[&Region], created_at: u64) -> BrainArtifact {
@@ -133,6 +181,120 @@ fn artifact(
         created_at,
         updated_at: created_at,
     }
+}
+
+fn cortex_region_sketch(
+    memory: &PersistedMemory,
+    region: &Region,
+    artifact_ids_by_region: &BTreeMap<String, Vec<String>>,
+) -> CortexRegionSketch {
+    let source_refs = region
+        .chunk_ids
+        .iter()
+        .filter_map(|chunk_id| source_chunk_ref(memory, chunk_id))
+        .take(12)
+        .collect::<Vec<_>>();
+    let route_examples = representative_terms(&region.summary)
+        .into_iter()
+        .take(4)
+        .map(|term| format!("{term} -> search region {}", region.id))
+        .collect::<Vec<_>>();
+    CortexRegionSketch {
+        region_id: region.id.clone(),
+        label: region.label.clone(),
+        summary: region.summary.clone(),
+        source_refs,
+        artifact_ids: artifact_ids_by_region
+            .get(&region.id)
+            .cloned()
+            .unwrap_or_default(),
+        route_examples,
+    }
+}
+
+fn artifacts_by_region(artifacts: &[BrainArtifact]) -> BTreeMap<String, Vec<String>> {
+    let mut by_region = BTreeMap::<String, Vec<String>>::new();
+    for artifact in artifacts {
+        let Some(region_id) = artifact
+            .id
+            .strip_prefix("brain-region:")
+            .or_else(|| artifact.id.strip_prefix("brain-routing:"))
+        else {
+            continue;
+        };
+        by_region
+            .entry(region_id.to_string())
+            .or_default()
+            .push(artifact.id.clone());
+    }
+    by_region
+}
+
+fn source_chunk_ref(memory: &PersistedMemory, chunk_id: &str) -> Option<String> {
+    let chunk = memory.chunks.iter().find(|chunk| chunk.id == chunk_id)?;
+    if matches!(
+        chunk.metadata.get("source_type").map(String::as_str),
+        Some("derived_memory") | Some("brain_artifact")
+    ) {
+        return None;
+    }
+    Some(format!("imprint://chunk/{chunk_id}"))
+}
+
+fn representative_terms(summary: &str) -> Vec<String> {
+    let mut terms = summary
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::trim)
+        .filter(|term| term.len() >= 4)
+        .map(|term| term.to_lowercase())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        terms.push("memory".into());
+    }
+    terms
+}
+
+fn cortex_corpus_hash(memory: &PersistedMemory, artifact_ids: &[String]) -> String {
+    let mut parts = Vec::new();
+    for document in &memory.documents {
+        if is_source_document(document) {
+            parts.push(format!(
+                "doc:{}:{}",
+                document.id,
+                document
+                    .content_hash
+                    .as_deref()
+                    .unwrap_or(document.text.as_str())
+            ));
+        }
+    }
+    for chunk in &memory.chunks {
+        if !matches!(
+            chunk.metadata.get("source_type").map(String::as_str),
+            Some("derived_memory") | Some("brain_artifact")
+        ) {
+            parts.push(format!(
+                "chunk:{}:{}:{}",
+                chunk.id,
+                chunk.region_id,
+                chunk.embedding_text_hash.as_deref().unwrap_or("")
+            ));
+        }
+    }
+    for artifact_id in artifact_ids {
+        parts.push(format!("artifact:{artifact_id}"));
+    }
+    parts.sort();
+    stable_hash(&parts.join("\n"))
+}
+
+fn is_source_document(document: &Document) -> bool {
+    !matches!(
+        document.metadata.get("source_type").map(String::as_str),
+        Some("derived_memory") | Some("brain_artifact")
+    )
 }
 
 fn region_has_source_chunks(memory: &PersistedMemory, region: &Region) -> bool {
