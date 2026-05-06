@@ -29,6 +29,10 @@ enum Command {
         input: PathBuf,
     },
     Rebuild,
+    Cortex {
+        #[command(subcommand)]
+        command: CortexCommand,
+    },
     Compile,
     Mcp,
     Map,
@@ -106,6 +110,29 @@ enum Command {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum CortexCommand {
+    Status {
+        #[arg(long, default_value_t = 10)]
+        max_jobs: usize,
+    },
+    Compile,
+    Train {
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long, default_value_t = 100)]
+        iters: usize,
+        #[arg(long, default_value_t = 30 * 60 * 1000)]
+        timeout_millis: u64,
+        #[arg(long)]
+        python: Option<String>,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        log: Option<PathBuf>,
+    },
+}
+
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let store = FileMemoryStore::new(cli.store);
@@ -124,6 +151,79 @@ pub fn run() -> anyhow::Result<()> {
             let result = crate::app::rebuild_memory(store.root())?;
             println!("{}", serde_json::to_string_pretty(&result.summary)?);
         }
+        Command::Cortex { command } => match command {
+            CortexCommand::Status { max_jobs } => {
+                let snapshot = crate::app::load_cortex_adapter_snapshot(store.root())?;
+                let cortex_index = store.load_current_cortex_index()?;
+                let jobs = store
+                    .list_cortex_adapter_jobs(None)?
+                    .into_iter()
+                    .take(max_jobs)
+                    .collect::<Vec<_>>();
+                let payload = serde_json::json!({
+                    "adapter_state": snapshot.adapter_state,
+                    "cortex_index": cortex_index.as_ref().map(|index| serde_json::json!({
+                        "id": index.id,
+                        "schema_version": index.schema_version,
+                        "created_at": index.created_at,
+                        "corpus_hash": index.corpus_hash,
+                        "source_refs": index.source_refs.len(),
+                        "artifact_ids": index.artifact_ids.len(),
+                        "regions": index.regions.len(),
+                        "route_examples": index
+                            .regions
+                            .iter()
+                            .map(|region| region.route_examples.len())
+                            .sum::<usize>(),
+                    })),
+                    "recent_jobs": jobs,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            }
+            CortexCommand::Compile => {
+                let result = crate::app::compile_memory_brain(store.root())?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            CortexCommand::Train {
+                dry_run,
+                iters,
+                timeout_millis,
+                python,
+                output,
+                log,
+            } => {
+                let compile = crate::app::compile_memory_brain(store.root())?;
+                let adapter_state = compile
+                    .adapter_state
+                    .as_ref()
+                    .context("compile did not return adapter state")?;
+                let config = crate::app::load_model_config(store.root())?;
+                let base_model = adapter_state
+                    .base_model
+                    .clone()
+                    .or(config.compiler_model)
+                    .or(config.response_model)
+                    .or(config.chat_model)
+                    .context(
+                        "no compiler, response, or chat model configured for cortex training",
+                    )?;
+                let job = crate::training::run_cortex_adapter_training_job(
+                    store.root(),
+                    &base_model,
+                    &adapter_state.current_source_dataset_hash,
+                    crate::training::CortexAdapterTrainingOptions {
+                        dry_run,
+                        timeout_millis,
+                        iters,
+                        python,
+                        output_dir: output,
+                        log_path: log,
+                        ..Default::default()
+                    },
+                )?;
+                println!("{}", serde_json::to_string_pretty(&job)?);
+            }
+        },
         Command::Compile => {
             let result = crate::app::compile_memory_brain(store.root())?;
             println!("{}", serde_json::to_string_pretty(&result)?);

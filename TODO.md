@@ -94,12 +94,12 @@ Goal: cross from "better cortex-aware retrieval" into "some semantic memory is i
   - [ ] last successful training time
   - [ ] failure reason and retry action
 - [ ] Add CLI commands:
-  - [ ] `cortex status`
-  - [ ] `cortex compile`
-  - [ ] `cortex train`
+  - [x] `cortex status`
+  - [x] `cortex compile`
+  - [x] `cortex train`
   - [ ] `cortex eval`
   - [ ] `cortex activate`
-- [ ] Keep old `compile`/`map` commands as compatibility aliases.
+- [x] Keep old `compile`/`map` commands as compatibility aliases.
 
 ## Phase 2: Load The Personal Adapter Into The Model Path
 
