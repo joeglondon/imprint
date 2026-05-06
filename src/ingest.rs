@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 pub const CHUNKING_VERSION: u32 = 2;
 pub const PARSER_VERSION: u32 = 1;
-const CHUNK_SIZE: usize = 900;
+const CHUNK_SIZE: usize = 600;
 const CHUNK_OVERLAP: usize = 120;
 const MAX_FILE_BYTES: u64 = 2_000_000;
 const MAX_PDF_BYTES: u64 = 25_000_000;
@@ -15,11 +15,11 @@ const MAX_DOCUMENT_CHARS: usize = 250_000;
 const MAX_CHUNKS_PER_DOCUMENT: usize = 600;
 const EMBEDDING_BATCH_SIZE: usize = 32;
 const STOPWORDS: &[&str] = &[
-    "about", "after", "again", "being", "could", "every", "from", "have", "into", "just",
-    "more", "most", "only", "other", "should", "some", "than", "that", "their", "there",
-    "these", "they", "this", "what", "when", "where", "which", "while", "with", "would",
-    "also", "because", "between", "those", "through", "under", "using", "within", "without",
-    "and", "the", "for", "our", "com", "http", "https", "www",
+    "about", "after", "again", "being", "could", "every", "from", "have", "into", "just", "more",
+    "most", "only", "other", "should", "some", "than", "that", "their", "there", "these", "they",
+    "this", "what", "when", "where", "which", "while", "with", "would", "also", "because",
+    "between", "those", "through", "under", "using", "within", "without", "and", "the", "for",
+    "our", "com", "http", "https", "www",
 ];
 const PAGE_SPANS_KEY: &str = "_page_spans";
 const SECTION_SPANS_KEY: &str = "_section_spans";
@@ -87,7 +87,8 @@ impl<E: Embedder> Ingester<E> {
         let region_specs = derive_region_specs(&documents);
         let mut chunk_inputs = Vec::new();
         for document in &documents {
-            for (ordinal, (start, end, text)) in chunk_text(&document.text).into_iter().enumerate() {
+            for (ordinal, (start, end, text)) in chunk_text(&document.text).into_iter().enumerate()
+            {
                 let region_id = assign_region(&text, &region_specs);
                 let chunk_id = format!("{}:chunk:{ordinal}", document.id);
                 let mut metadata = document.metadata.clone();
@@ -120,13 +121,24 @@ impl<E: Embedder> Ingester<E> {
         let identity = self.embedder.identity();
         let cache = reusable_chunks
             .iter()
-            .map(|chunk| ((chunk.document_id.clone(), chunk.ordinal, chunk_hash(chunk.text.as_str())), chunk))
+            .map(|chunk| {
+                (
+                    (
+                        chunk.document_id.clone(),
+                        chunk.ordinal,
+                        chunk_hash(chunk.text.as_str()),
+                    ),
+                    chunk,
+                )
+            })
             .collect::<HashMap<_, _>>();
         let mut embeddings = vec![None; chunk_inputs.len()];
         let mut reused = 0;
         for (index, chunk) in chunk_inputs.iter().enumerate() {
             let hash = chunk_hash(chunk.text.as_str());
-            if let Some(cached) = cache.get(&(chunk.document_id.clone(), chunk.ordinal, hash.clone())) {
+            if let Some(cached) =
+                cache.get(&(chunk.document_id.clone(), chunk.ordinal, hash.clone()))
+            {
                 if can_reuse_embedding(cached, &identity, &hash) {
                     embeddings[index] = Some(cached.embedding.clone());
                     reused += 1;
@@ -143,7 +155,10 @@ impl<E: Embedder> Ingester<E> {
             .collect::<Vec<_>>();
         let mut embedded = 0;
         for batch in to_embed.chunks_mut(EMBEDDING_BATCH_SIZE) {
-            let batch_texts = batch.iter().map(|(_, text)| text.clone()).collect::<Vec<_>>();
+            let batch_texts = batch
+                .iter()
+                .map(|(_, text)| text.clone())
+                .collect::<Vec<_>>();
             let batch_embeddings = self.embedder.embed_many(&batch_texts)?;
             for ((index, _), embedding) in batch.iter().zip(batch_embeddings) {
                 embeddings[*index] = Some(embedding);
@@ -160,38 +175,41 @@ impl<E: Embedder> Ingester<E> {
                 let dimension = embedding.len();
                 let hash = chunk_hash(chunk.text.as_str());
                 Chunk {
-                id: chunk.id,
-                document_id: chunk.document_id,
-                region_id: chunk.region_id,
-                ordinal: chunk.ordinal,
-                start: chunk.start,
-                end: chunk.end,
-                text: chunk.text,
-                metadata: chunk.metadata,
-                source_anchor: chunk.source_anchor,
-                embedding,
-                embedding_text_hash: Some(hash),
-                embedding_provider: Some(identity.provider.clone()),
-                embedding_model: Some(identity.model.clone()),
-                embedding_endpoint: Some(identity.endpoint.clone()),
-                embedding_dimension: Some(dimension),
-                chunking_version: Some(CHUNKING_VERSION),
-            }
+                    id: chunk.id,
+                    document_id: chunk.document_id,
+                    region_id: chunk.region_id,
+                    ordinal: chunk.ordinal,
+                    start: chunk.start,
+                    end: chunk.end,
+                    text: chunk.text,
+                    metadata: chunk.metadata,
+                    source_anchor: chunk.source_anchor,
+                    embedding,
+                    embedding_text_hash: Some(hash),
+                    embedding_provider: Some(identity.provider.clone()),
+                    embedding_model: Some(identity.model.clone()),
+                    embedding_endpoint: Some(identity.endpoint.clone()),
+                    embedding_dimension: Some(dimension),
+                    chunking_version: Some(CHUNKING_VERSION),
+                }
             })
             .collect::<Vec<_>>();
 
         let regions = derive_vector_regions(&mut chunks);
 
-        Ok((PersistedMemory {
-            documents,
-            chunks,
-            regions,
-            links: Vec::new(),
-            memory_map: None,
-        }, EmbeddingReuseStats {
-            embedded_count: embedded,
-            reused_embedding_count: reused,
-        }))
+        Ok((
+            PersistedMemory {
+                documents,
+                chunks,
+                regions,
+                links: Vec::new(),
+                memory_map: None,
+            },
+            EmbeddingReuseStats {
+                embedded_count: embedded,
+                reused_embedding_count: reused,
+            },
+        ))
     }
 }
 
@@ -232,7 +250,13 @@ pub fn extract_documents(inputs: &[PathBuf]) -> anyhow::Result<DocumentImportBat
                         continue;
                     }
                     imported_paths.push(path.display().to_string());
-                    documents.push(document_from_parsed(&path, text, parsed.content_hash, parsed.page_spans, parsed.section_spans));
+                    documents.push(document_from_parsed(
+                        &path,
+                        text,
+                        parsed.content_hash,
+                        parsed.page_spans,
+                        parsed.section_spans,
+                    ));
                 }
                 ReadOutcome::Skip(reason) => skipped_paths.push(skip(&path, reason)),
             }
@@ -335,8 +359,14 @@ fn document_from_parsed(
     metadata.insert("source".into(), "local".into());
     metadata.insert("content_hash".into(), content_hash.clone());
     metadata.insert("parser_version".into(), PARSER_VERSION.to_string());
-    metadata.insert(PAGE_SPANS_KEY.into(), serde_json::to_string(&page_spans).unwrap_or_else(|_| "[]".into()));
-    metadata.insert(SECTION_SPANS_KEY.into(), serde_json::to_string(&section_spans).unwrap_or_else(|_| "[]".into()));
+    metadata.insert(
+        PAGE_SPANS_KEY.into(),
+        serde_json::to_string(&page_spans).unwrap_or_else(|_| "[]".into()),
+    );
+    metadata.insert(
+        SECTION_SPANS_KEY.into(),
+        serde_json::to_string(&section_spans).unwrap_or_else(|_| "[]".into()),
+    );
     let anchor = SourceAnchor {
         id: format!("{doc_id}:document"),
         document_id: doc_id.clone(),
@@ -345,7 +375,9 @@ fn document_from_parsed(
         content_hash: content_hash.clone(),
         start: 0,
         end: text.chars().count(),
-        page: page_spans.first().and_then(|span| span.value.parse::<usize>().ok()),
+        page: page_spans
+            .first()
+            .and_then(|span| span.value.parse::<usize>().ok()),
         section: section_spans.first().map(|span| span.value.clone()),
         parser_version: PARSER_VERSION,
     };
@@ -382,7 +414,12 @@ fn chunk_text(text: &str) -> Vec<(usize, usize, String)> {
     chunks
 }
 
-fn source_anchor_for_chunk(document: &Document, chunk_id: &str, start: usize, end: usize) -> Option<SourceAnchor> {
+fn source_anchor_for_chunk(
+    document: &Document,
+    chunk_id: &str,
+    start: usize,
+    end: usize,
+) -> Option<SourceAnchor> {
     let path = document.metadata.get("path")?.clone();
     let content_hash = document
         .content_hash
@@ -391,7 +428,12 @@ fn source_anchor_for_chunk(document: &Document, chunk_id: &str, start: usize, en
         .unwrap_or_else(|| chunk_hash(&document.text));
     let parser_version = document
         .parser_version
-        .or_else(|| document.metadata.get("parser_version").and_then(|value| value.parse().ok()))
+        .or_else(|| {
+            document
+                .metadata
+                .get("parser_version")
+                .and_then(|value| value.parse().ok())
+        })
         .unwrap_or(PARSER_VERSION);
     Some(SourceAnchor {
         id: format!("{chunk_id}:anchor"),
@@ -502,7 +544,11 @@ fn derive_vector_regions(chunks: &mut [Chunk]) -> Vec<Region> {
                     cosine_similarity(&chunk.embedding, &chunks[*chunk_index].embedding),
                 )
             })
-            .max_by(|left, right| left.1.partial_cmp(&right.1).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|left, right| {
+                left.1
+                    .partial_cmp(&right.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(seed_index, _)| seed_index)
             .unwrap_or(0);
     }
@@ -563,7 +609,11 @@ fn choose_region_seeds(chunks: &[Chunk], cluster_count: usize) -> Vec<usize> {
                     .fold(f32::NEG_INFINITY, f32::max);
                 (index, nearest)
             })
-            .min_by(|left, right| left.1.partial_cmp(&right.1).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|left, right| {
+                left.1
+                    .partial_cmp(&right.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(index, _)| index);
         if let Some(index) = next {
             seeds.push(index);
@@ -617,7 +667,11 @@ pub fn meaningful_terms_for_chunks<'a>(
     }
     let mut ranked = counts.into_iter().collect::<Vec<_>>();
     ranked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    ranked.into_iter().take(limit).map(|(term, _)| term).collect()
+    ranked
+        .into_iter()
+        .take(limit)
+        .map(|(term, _)| term)
+        .collect()
 }
 
 pub fn format_region_label(terms: &[String]) -> String {
@@ -674,7 +728,11 @@ fn should_consider_file(path: &Path) -> bool {
         .and_then(|value| value.to_str())
         .map(|value| value.to_ascii_lowercase());
     match ext.as_deref() {
-        Some("txt" | "md" | "markdown" | "json" | "csv" | "tsv" | "log" | "rst" | "html" | "htm" | "xml" | "yaml" | "yml" | "toml" | "ini" | "swift" | "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "css" | "scss" | "pdf") => true,
+        Some(
+            "txt" | "md" | "markdown" | "json" | "csv" | "tsv" | "log" | "rst" | "html" | "htm"
+            | "xml" | "yaml" | "yml" | "toml" | "ini" | "swift" | "rs" | "py" | "js" | "ts" | "tsx"
+            | "jsx" | "css" | "scss" | "pdf",
+        ) => true,
         Some(_) => false,
         None => true,
     }
@@ -779,7 +837,16 @@ fn heading_label(line: &str) -> Option<String> {
             return Some(label.chars().take(96).collect());
         }
     }
-    for prefix in ["fn ", "struct ", "enum ", "impl ", "class ", "def ", "function ", "interface "] {
+    for prefix in [
+        "fn ",
+        "struct ",
+        "enum ",
+        "impl ",
+        "class ",
+        "def ",
+        "function ",
+        "interface ",
+    ] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
             let name = rest
                 .split(|ch: char| ch == '(' || ch == '{' || ch == ':' || ch.is_whitespace())
@@ -808,7 +875,9 @@ fn read_document_text(path: &Path) -> anyhow::Result<ReadOutcome> {
 fn read_text_file(path: &Path) -> anyhow::Result<ReadOutcome> {
     let metadata = fs::metadata(path)?;
     if metadata.len() > MAX_FILE_BYTES {
-        return Ok(ReadOutcome::Skip("file is larger than the text import limit".into()));
+        return Ok(ReadOutcome::Skip(
+            "file is larger than the text import limit".into(),
+        ));
     }
     let bytes = fs::read(path)?;
     let content_hash = content_hash(&bytes);
@@ -824,13 +893,17 @@ fn read_text_file(path: &Path) -> anyhow::Result<ReadOutcome> {
 fn read_pdf_file(path: &Path) -> anyhow::Result<ReadOutcome> {
     let metadata = fs::metadata(path)?;
     if metadata.len() > MAX_PDF_BYTES {
-        return Ok(ReadOutcome::Skip("PDF is larger than the import limit".into()));
+        return Ok(ReadOutcome::Skip(
+            "PDF is larger than the import limit".into(),
+        ));
     }
     let bytes = fs::read(path)?;
     let content_hash = content_hash(&bytes);
     match pdf_extract::extract_text(path) {
         Ok(text) => Ok(ReadOutcome::Text(parse_text(&text, content_hash, true))),
-        Err(error) => Ok(ReadOutcome::Skip(format!("PDF text extraction failed: {error}"))),
+        Err(error) => Ok(ReadOutcome::Skip(format!(
+            "PDF text extraction failed: {error}"
+        ))),
     }
 }
 

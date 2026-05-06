@@ -61,7 +61,7 @@ const C2Atlas = () => {
             <LegendRow swatch={<Star />} label="peak = region centroid" />
             <LegendRow swatch={<Route />} label="route = semantic path" />
             <LegendRow swatch={<Pin color={AMBER} />} label="you" />
-            <LegendRow swatch={<Pin color={TEAL} />} label="claude" />
+            <LegendRow swatch={<Pin color={TEAL} />} label="Agent" />
           </div>
         </div>
 
@@ -147,7 +147,7 @@ const C2Atlas = () => {
 
           {/* cursors */}
           <Cursor x={470} y={380} color={AMBER} label="you" />
-          <Cursor x={720} y={440} color={TEAL}  label="claude" offsetX={-70} />
+          <Cursor x={720} y={440} color={TEAL}  label="Agent" offsetX={-70} />
 
           {/* compass rose — bottom right */}
           <g transform="translate(830, 560)">

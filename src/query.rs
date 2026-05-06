@@ -57,7 +57,10 @@ impl MemoryQueryEngine {
         ann_index: &RegionAnnIndex,
         request: QueryRequest,
     ) -> anyhow::Result<QueryResult> {
-        let routed = self.route(memory.memory_map.as_ref().expect("memory map missing"), &request);
+        let routed = self.route(
+            memory.memory_map.as_ref().expect("memory map missing"),
+            &request,
+        );
         let query_embedding = embedder.embed(&request.text)?;
         let chunks_by_id = memory
             .chunks
@@ -72,7 +75,8 @@ impl MemoryQueryEngine {
 
         let mut hits = Vec::new();
         for region_id in &routed.region_ids {
-            let candidates = ann_index.search_region(region_id, &query_embedding, request.max_chunks.max(1));
+            let candidates =
+                ann_index.search_region(region_id, &query_embedding, request.max_chunks.max(1));
             for (chunk_id, ann_score) in candidates {
                 let Some(chunk) = chunks_by_id.get(&chunk_id) else {
                     continue;
@@ -83,7 +87,19 @@ impl MemoryQueryEngine {
                 let Some(document) = documents_by_id.get(&chunk.document_id) else {
                     continue;
                 };
-                let lexical = lexical_overlap_score(&request.text, &chunk.text);
+                let lexical = lexical_overlap_score(
+                    &request.text,
+                    &format!(
+                        "{} {} {}",
+                        document.title,
+                        chunk
+                            .metadata
+                            .get("document_title")
+                            .map(String::as_str)
+                            .unwrap_or_default(),
+                        chunk.text
+                    ),
+                );
                 let score = ann_score * 0.7 + lexical * 0.3;
                 let excerpt = excerpt_window(&document.text, chunk.start, chunk.end, 60);
                 hits.push(ChunkHit {
@@ -92,6 +108,47 @@ impl MemoryQueryEngine {
                     document_id: chunk.document_id.clone(),
                     region_id: chunk.region_id.clone(),
                     score,
+                    excerpt,
+                    start: chunk.start,
+                    end: chunk.end,
+                    source_anchor: chunk.source_anchor.clone(),
+                });
+            }
+
+            for chunk in memory
+                .chunks
+                .iter()
+                .filter(|chunk| &chunk.region_id == region_id)
+            {
+                if !matches_filters(&request.filters, &chunk.metadata) {
+                    continue;
+                }
+                let Some(document) = documents_by_id.get(&chunk.document_id) else {
+                    continue;
+                };
+                let lexical = lexical_overlap_score(
+                    &request.text,
+                    &format!(
+                        "{} {} {}",
+                        document.title,
+                        chunk
+                            .metadata
+                            .get("document_title")
+                            .map(String::as_str)
+                            .unwrap_or_default(),
+                        chunk.text
+                    ),
+                );
+                if lexical <= 0.0 {
+                    continue;
+                }
+                let excerpt = excerpt_window(&document.text, chunk.start, chunk.end, 60);
+                hits.push(ChunkHit {
+                    hit_id: format!("hit:{chunk_id}", chunk_id = chunk.id),
+                    chunk_id: chunk.id.clone(),
+                    document_id: chunk.document_id.clone(),
+                    region_id: chunk.region_id.clone(),
+                    score: lexical.max(0.05),
                     excerpt,
                     start: chunk.start,
                     end: chunk.end,
@@ -129,10 +186,16 @@ impl MemoryQueryEngine {
     }
 }
 
-fn matches_filters(filters: &BTreeMap<String, String>, metadata: &BTreeMap<String, String>) -> bool {
-    filters
-        .iter()
-        .all(|(key, value)| metadata.get(key).map(|candidate| candidate == value).unwrap_or(false))
+fn matches_filters(
+    filters: &BTreeMap<String, String>,
+    metadata: &BTreeMap<String, String>,
+) -> bool {
+    filters.iter().all(|(key, value)| {
+        metadata
+            .get(key)
+            .map(|candidate| candidate == value)
+            .unwrap_or(false)
+    })
 }
 
 fn lexical_overlap_score(left: &str, right: &str) -> f32 {

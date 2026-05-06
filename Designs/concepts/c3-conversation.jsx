@@ -99,7 +99,7 @@ const C3Conversation = () => {
               <button style={chipBtn}><Icon name="plus" size={12} color={INK3} /> Attach doc</button>
               <button style={chipBtn}><Icon name="mic" size={12} color={INK3} /> Voice</button>
               <span style={{ flex:1 }} />
-              <span className="mono" style={{ fontSize: 10, color: INK4 }}>claude-3 haiku · local</span>
+              <span className="mono" style={{ fontSize: 10, color: INK4 }}>Agent · local</span>
               <button style={btn3Primary}>Send ↵</button>
             </div>
           </div>
@@ -109,7 +109,7 @@ const C3Conversation = () => {
       {/* RIGHT — reactive graph + citations */}
       <aside style={{ width: 380, borderLeft:`0.5px solid ${RULE}`, background: PAPER, display:'flex', flexDirection:'column' }}>
         <div style={{ padding:'12px 16px', borderBottom:`0.5px solid ${RULE}` }}>
-          <SectionRow label="What claude is reading" right={<span className="mono" style={{ fontSize:10, color: INK4 }}>live</span>} />
+          <SectionRow label="What Agent is reading" right={<span className="mono" style={{ fontSize:10, color: INK4 }}>live</span>} />
         </div>
         {/* mini graph */}
         <div style={{ height: 240, position:'relative', background: `radial-gradient(400px 200px at 50% 40%, oklch(97% 0.008 85), ${PAPER})`, borderBottom:`0.5px solid ${RULE}` }}>

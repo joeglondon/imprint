@@ -238,6 +238,136 @@ pub extern "C" fn ai_memory_test_model_connection(config_json: *const c_char) ->
     })
 }
 
+#[no_mangle]
+pub extern "C" fn ai_memory_create_chat_session(
+    store_path: *const c_char,
+    title: *const c_char,
+) -> *mut c_char {
+    respond(|| {
+        let store = path_arg(store_path)?;
+        let title = string_arg(title)?;
+        app::create_chat_session(
+            &store,
+            if title.trim().is_empty() {
+                None
+            } else {
+                Some(title)
+            },
+        )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn ai_memory_list_chat_sessions(store_path: *const c_char) -> *mut c_char {
+    respond(|| app::list_chat_sessions(&path_arg(store_path)?))
+}
+
+#[no_mangle]
+pub extern "C" fn ai_memory_list_chat_messages(
+    store_path: *const c_char,
+    session_id: *const c_char,
+) -> *mut c_char {
+    respond(|| {
+        let store = path_arg(store_path)?;
+        app::list_chat_messages(&store, &string_arg(session_id)?)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn ai_memory_send_chat_turn(
+    store_path: *const c_char,
+    request_json: *const c_char,
+) -> *mut c_char {
+    respond(|| {
+        let store = path_arg(store_path)?;
+        let request: crate::types::ChatTurnRequest = json_arg(request_json)?;
+        app::send_chat_turn(&store, request)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn ai_memory_list_chat_context_traces(
+    store_path: *const c_char,
+    session_id: *const c_char,
+) -> *mut c_char {
+    respond(|| {
+        let store = path_arg(store_path)?;
+        app::list_chat_context_traces(&store, &string_arg(session_id)?)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn ai_memory_list_derived_memories(
+    store_path: *const c_char,
+    session_id: *const c_char,
+) -> *mut c_char {
+    respond(|| {
+        let store = path_arg(store_path)?;
+        let session = string_arg(session_id)?;
+        app::list_derived_memories(
+            &store,
+            if session.trim().is_empty() {
+                None
+            } else {
+                Some(session)
+            },
+        )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn ai_memory_write_derived_memory(
+    store_path: *const c_char,
+    write_json: *const c_char,
+) -> *mut c_char {
+    respond(|| {
+        let store = path_arg(store_path)?;
+        let write: crate::types::DerivedMemoryWrite = json_arg(write_json)?;
+        app::write_derived_memory(&store, write)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn ai_memory_write_web_finding(
+    store_path: *const c_char,
+    write_json: *const c_char,
+) -> *mut c_char {
+    respond(|| {
+        let store = path_arg(store_path)?;
+        let write: crate::types::WebFindingWrite = json_arg(write_json)?;
+        app::write_web_finding(&store, write)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn ai_memory_write_agent_link(
+    store_path: *const c_char,
+    write_json: *const c_char,
+) -> *mut c_char {
+    respond(|| {
+        let store = path_arg(store_path)?;
+        let write: crate::types::AgentLinkWrite = json_arg(write_json)?;
+        app::write_agent_link(&store, write)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn ai_memory_apply_attention_mark(
+    store_path: *const c_char,
+    write_json: *const c_char,
+) -> *mut c_char {
+    respond(|| {
+        let store = path_arg(store_path)?;
+        let write: crate::types::AttentionMarkWrite = json_arg(write_json)?;
+        app::apply_attention_mark(&store, write)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn ai_memory_compile_memory_brain(store_path: *const c_char) -> *mut c_char {
+    respond(|| app::compile_memory_brain(&path_arg(store_path)?))
+}
+
 fn respond<T: Serialize>(f: impl FnOnce() -> anyhow::Result<T>) -> *mut c_char {
     let payload: FfiResponse<Value> = match f() {
         Ok(data) => FfiResponse {
@@ -251,9 +381,12 @@ fn respond<T: Serialize>(f: impl FnOnce() -> anyhow::Result<T>) -> *mut c_char {
             error: Some(error.to_string()),
         },
     };
-    CString::new(serde_json::to_string(&payload).unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialization failure\"}".into()))
-        .unwrap()
-        .into_raw()
+    CString::new(
+        serde_json::to_string(&payload)
+            .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialization failure\"}".into()),
+    )
+    .unwrap()
+    .into_raw()
 }
 
 fn string_arg(ptr: *const c_char) -> anyhow::Result<String> {

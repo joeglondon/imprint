@@ -23,6 +23,17 @@ char *ai_memory_backtrack_navigation(const char *store_path, const char *session
 char *ai_memory_save_model_config(const char *store_path, const char *config_json);
 char *ai_memory_load_model_config(const char *store_path);
 char *ai_memory_test_model_connection(const char *config_json);
+char *ai_memory_create_chat_session(const char *store_path, const char *title);
+char *ai_memory_list_chat_sessions(const char *store_path);
+char *ai_memory_list_chat_messages(const char *store_path, const char *session_id);
+char *ai_memory_send_chat_turn(const char *store_path, const char *request_json);
+char *ai_memory_list_chat_context_traces(const char *store_path, const char *session_id);
+char *ai_memory_list_derived_memories(const char *store_path, const char *session_id);
+char *ai_memory_write_derived_memory(const char *store_path, const char *write_json);
+char *ai_memory_write_web_finding(const char *store_path, const char *write_json);
+char *ai_memory_write_agent_link(const char *store_path, const char *write_json);
+char *ai_memory_apply_attention_mark(const char *store_path, const char *write_json);
+char *ai_memory_compile_memory_brain(const char *store_path);
 void ai_memory_free_string(char *ptr);
 
 #endif

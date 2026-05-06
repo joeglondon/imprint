@@ -1,5 +1,6 @@
 pub mod app;
 pub mod cli;
+pub mod compiler;
 pub mod extract;
 pub mod ffi;
 pub mod graph;
@@ -11,6 +12,7 @@ pub mod navigation;
 pub mod query;
 pub mod store;
 pub mod surf;
+pub mod training;
 pub mod types;
 
 pub use app::*;

@@ -59,7 +59,7 @@ const C1DualCursor = ({ theme: T = C1_THEMES.graphite, label = 'graphite' }) => 
           <span className="mono" style={{ fontSize: 10.5, color: T.ink3 }}>418 docs · 6,204 chunks</span>
           <div style={{ width: 1, height: 14, background: T.rule, margin: '0 4px' }} />
           <ActorT who="human" T={T} />
-          <ActorT who="ai" T={T} label="claude" />
+          <ActorT who="ai" T={T} label="Agent" />
         </div>
       </div>
 
@@ -168,7 +168,7 @@ const C1DualCursor = ({ theme: T = C1_THEMES.graphite, label = 'graphite' }) => 
               <g transform={`translate(${aiAt.x + 14}, ${aiAt.y - 14})`}>
                 <rect x="0" y="0" width="88" height="18" rx="9" fill={T.surface1} stroke={T.rule} />
                 <circle cx="10" cy="9" r="3" fill={T.ai} />
-                <text x="18" y="12" fontSize="10" fontFamily='"IBM Plex Mono"' fill={T.ink2}>claude · citing</text>
+                <text x="18" y="12" fontSize="10" fontFamily='"IBM Plex Mono"' fill={T.ink2}>Agent · citing</text>
               </g>
             </svg>
           </div>
@@ -249,7 +249,7 @@ function ActorT({ who, T, label }) {
   return (
     <span className="mono" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 10.5, color: T.ink2, letterSpacing: 0.3 }}>
       <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, boxShadow: `0 0 0 2px ${T.surface1}, 0 0 0 3px ${color}33` }} />
-      {label || (who === 'human' ? 'you' : 'claude')}
+      {label || (who === 'human' ? 'you' : 'Agent')}
     </span>
   );
 }

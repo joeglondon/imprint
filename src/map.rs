@@ -67,4 +67,3 @@ fn trim_filters(filters: &mut BTreeMap<String, String>) {
 fn truncate(value: &str, max: usize) -> String {
     value.chars().take(max.max(1)).collect()
 }
-

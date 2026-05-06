@@ -9,11 +9,22 @@ final class AppState: ObservableObject {
     @Published var importResult: ImportResult?
     @Published var modelConfig = ModelConfig(
         mode: .local,
-        endpoint: "http://localhost:11434",
+        endpoint: "http://localhost:8080/v1",
         apiKeyName: nil,
-        chatModel: nil,
+        chatModel: "mlx-community/LFM2.5-1.2B-Instruct-8bit",
+        plannerModel: "LiquidAI/LFM2.5-350M-MLX-8bit",
+        responseModel: "mlx-community/LFM2.5-1.2B-Instruct-8bit",
+        plannerEndpoint: "http://127.0.0.1:8082/v1",
+        runtimePreset: .mlx,
+        cortexEnabled: true,
+        cortexRounds: 3,
+        criticModel: "LiquidAI/LFM2.5-350M-MLX-8bit",
+        criticEndpoint: "http://127.0.0.1:8082/v1",
+        compilerModel: "mlx-community/LFM2.5-1.2B-Instruct-8bit",
         embeddingModel: "embeddinggemma:300m",
-        health: ModelHealth(status: "disconnected", message: "Using local Ollama embeddings", checkedAt: nil)
+        embeddingEndpoint: "http://localhost:11434",
+        embeddingRuntimePreset: .ollama,
+        health: ModelHealth(status: "disconnected", message: "Using local OpenAI-compatible models", checkedAt: nil)
     )
     @Published var apiKey = ""
     @Published var inspector = InspectorState()
@@ -21,6 +32,13 @@ final class AppState: ObservableObject {
     @Published var searchText = ""
     @Published var grepText = ""
     @Published var semanticText = ""
+    @Published var chatSessions: [ChatSession] = []
+    @Published var selectedChatSession: ChatSession?
+    @Published var chatMessages: [ChatMessage] = []
+    @Published var chatInput = ""
+    @Published var chatContextTraces: [ChatContextTrace] = []
+    @Published var derivedMemories: [DerivedMemory] = []
+    @Published var workspaceConnections = WorkspaceConnection.defaults
     @Published var statusMessage = "Load files to begin building memory."
     @Published var isBusy = false
     @Published var operationProgress: OperationProgress?
@@ -44,8 +62,119 @@ final class AppState: ObservableObject {
             modelConfig = try RustBridge.loadModelConfig(storePath: storePath)
             summary = try RustBridge.getSummary(storePath: storePath)
             snapshot = try? RustBridge.getSnapshot(storePath: storePath)
+            loadChatState()
         } catch {
             statusMessage = error.localizedDescription
+        }
+    }
+
+    func loadChatState() {
+        do {
+            chatSessions = try RustBridge.listChatSessions(storePath: storePath)
+            if selectedChatSession == nil {
+                selectedChatSession = chatSessions.first
+            }
+            if let selectedChatSession {
+                chatMessages = try RustBridge.listChatMessages(storePath: storePath, sessionId: selectedChatSession.id)
+                chatContextTraces = try RustBridge.listChatContextTraces(storePath: storePath, sessionId: selectedChatSession.id)
+                derivedMemories = try RustBridge.listDerivedMemories(storePath: storePath, sessionId: selectedChatSession.id)
+            }
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func startChat() {
+        let storePath = self.storePath
+        runTask(
+            message: "Creating chat session…",
+            operation: {
+                let session = try RustBridge.createChatSession(storePath: storePath, title: "Memory chat")
+                let sessions = try RustBridge.listChatSessions(storePath: storePath)
+                return (session, sessions)
+            },
+            apply: { [weak self] session, sessions in
+                guard let self else { return }
+                self.selectedSection = .chat
+                self.selectedChatSession = session
+                self.chatSessions = sessions
+                self.chatMessages = []
+                self.chatContextTraces = []
+                self.derivedMemories = []
+                self.statusMessage = "Chat memory is active."
+            }
+        )
+    }
+
+    func selectChatSession(_ session: ChatSession) {
+        selectedChatSession = session
+        let storePath = self.storePath
+        runTask(
+            message: "Loading chat…",
+            operation: {
+                let messages = try RustBridge.listChatMessages(storePath: storePath, sessionId: session.id)
+                let traces = try RustBridge.listChatContextTraces(storePath: storePath, sessionId: session.id)
+                let derived = try RustBridge.listDerivedMemories(storePath: storePath, sessionId: session.id)
+                return (messages, traces, derived)
+            },
+            apply: { [weak self] messages, traces, derived in
+                guard let self else { return }
+                self.chatMessages = messages
+                self.chatContextTraces = traces
+                self.derivedMemories = derived
+                self.selectedSection = .chat
+            }
+        )
+    }
+
+    func sendChatTurn() {
+        let trimmed = chatInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let storePath = self.storePath
+        let existingSession = self.selectedChatSession
+        chatInput = ""
+        runTask(
+            message: "Routing chat through hot memory…",
+            operation: {
+                let session: ChatSession
+                if let existingSession {
+                    session = existingSession
+                } else {
+                    session = try RustBridge.createChatSession(storePath: storePath, title: "Memory chat")
+                }
+                let result = try RustBridge.sendChatTurn(
+                    storePath: storePath,
+                    request: ChatTurnRequest(sessionId: session.id, message: trimmed)
+                )
+                let messages = try RustBridge.listChatMessages(storePath: storePath, sessionId: session.id)
+                let traces = try RustBridge.listChatContextTraces(storePath: storePath, sessionId: session.id)
+                let derived = try RustBridge.listDerivedMemories(storePath: storePath, sessionId: session.id)
+                let sessions = try RustBridge.listChatSessions(storePath: storePath)
+                return (result, messages, traces, derived, sessions)
+            },
+            apply: { [weak self] result, messages, traces, derived, sessions in
+                guard let self else { return }
+                self.selectedSection = .chat
+                self.selectedChatSession = result.session
+                self.chatSessions = sessions
+                self.chatMessages = messages
+                self.chatContextTraces = traces
+                self.derivedMemories = derived
+                self.statusMessage = "Used \(result.contextTrace.snippets.count) memory snippets."
+            }
+        )
+    }
+
+    func connectWorkspace(_ kind: WorkspaceConnectionKind) {
+        updateWorkspaceConnection(kind, status: .connecting)
+        statusMessage = "\(kind.rawValue) is optional. Connect it when you want imprint to index that workspace."
+
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            await MainActor.run {
+                self?.updateWorkspaceConnection(kind, status: .disconnected)
+                self?.statusMessage = "\(kind.rawValue) connection is ready to configure when the connector is available."
+            }
         }
     }
 
@@ -135,7 +264,18 @@ final class AppState: ObservableObject {
             endpoint: self.modelConfig.endpoint,
             apiKey: self.modelConfig.mode == .api ? self.apiKey : nil,
             chatModel: self.modelConfig.chatModel,
-            embeddingModel: self.modelConfig.embeddingModel
+            plannerModel: self.modelConfig.plannerModel,
+            responseModel: self.modelConfig.responseModel,
+            plannerEndpoint: self.modelConfig.plannerEndpoint,
+            runtimePreset: self.modelConfig.runtimePreset,
+            cortexEnabled: self.modelConfig.cortexEnabled,
+            cortexRounds: self.modelConfig.cortexRounds,
+            criticModel: self.modelConfig.criticModel,
+            criticEndpoint: self.modelConfig.criticEndpoint,
+            compilerModel: self.modelConfig.compilerModel,
+            embeddingModel: self.modelConfig.embeddingModel,
+            embeddingEndpoint: self.modelConfig.embeddingEndpoint,
+            embeddingRuntimePreset: self.modelConfig.embeddingRuntimePreset
         )
         let storePath = self.storePath
         let baseConfig = self.modelConfig
@@ -319,6 +459,7 @@ final class AppState: ObservableObject {
         let progressURL = URL(fileURLWithPath: storePath).appendingPathComponent("progress.json")
         progressTask = Task { [weak self] in
             let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
             while !Task.isCancelled {
                 if let data = try? Data(contentsOf: progressURL),
                    let progress = try? decoder.decode(OperationProgress.self, from: data) {
@@ -335,5 +476,11 @@ final class AppState: ObservableObject {
     private func stopProgressPolling() {
         progressTask?.cancel()
         progressTask = nil
+        operationProgress = nil
+    }
+
+    private func updateWorkspaceConnection(_ kind: WorkspaceConnectionKind, status: WorkspaceConnectionStatus) {
+        guard let index = workspaceConnections.firstIndex(where: { $0.kind == kind }) else { return }
+        workspaceConnections[index].status = status
     }
 }

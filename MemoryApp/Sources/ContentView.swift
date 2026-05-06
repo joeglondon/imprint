@@ -7,31 +7,25 @@ struct ContentView: View {
     @Environment(\.memoryTheme) private var theme
 
     var body: some View {
-        ZStack {
-            VStack(spacing: 0) {
-                GraphiteTitleBar(pickFiles: pickFiles)
-                DividerLine()
-                HStack(spacing: 0) {
-                    GraphiteSidebar()
-                        .frame(width: 208)
-                    DividerLine(axis: .vertical)
-                    CenterWorkspace()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    DividerLine(axis: .vertical)
-                    GraphiteInspector()
-                        .frame(width: 320)
-                }
-            }
-            .background(theme.surfaces.surface1)
-            .foregroundStyle(theme.ink.primary)
-            .environment(\.memoryTheme, ThemeCatalog.graphite)
-            .background(WindowChromeConfigurator())
-            .ignoresSafeArea(.container, edges: .top)
-
-            if appState.isBusy {
-                BusyOverlay(progress: appState.operationProgress, message: appState.statusMessage)
+        VStack(spacing: 0) {
+            GraphiteTitleBar(pickFiles: pickFiles)
+            DividerLine()
+            HStack(spacing: 0) {
+                GraphiteSidebar()
+                    .frame(width: 208)
+                DividerLine(axis: .vertical)
+                CenterWorkspace()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                DividerLine(axis: .vertical)
+                GraphiteInspector()
+                    .frame(width: 320)
             }
         }
+        .background(theme.surfaces.surface1)
+        .foregroundStyle(theme.ink.primary)
+        .environment(\.memoryTheme, ThemeCatalog.graphite)
+        .background(WindowChromeConfigurator())
+        .ignoresSafeArea(.container, edges: .top)
         .onDrop(of: [UTType.fileURL.identifier], isTargeted: nil, perform: handleDrop)
     }
 
@@ -114,8 +108,11 @@ private struct GraphiteTitleBar: View {
                 DividerLine(axis: .vertical)
                     .frame(height: 14)
                     .padding(.horizontal, 2)
-                ActorBadge(kind: .human)
-                ActorBadge(kind: .ai, label: "claude")
+                TopBarActivityStatus(
+                    isBusy: appState.isBusy,
+                    progress: appState.operationProgress,
+                    message: appState.statusMessage
+                )
                 IconButton("Import Files", systemImage: "square.and.arrow.down", action: pickFiles)
                     .disabled(appState.isBusy)
                 IconButton("Rebuild", systemImage: "arrow.triangle.2.circlepath", action: appState.rebuild)
@@ -215,9 +212,10 @@ private struct GraphiteSidebar: View {
                         .foregroundStyle(theme.ink.tertiary)
                 }
                 HStack(spacing: 8) {
-                    ActorBadge(kind: .ai, label: "claude")
-                    Text(appState.inspector.queryResult == nil ? "waiting" : "citing")
+                    ActorBadge(kind: .ai)
+                    Text(currentAgentRegionLabel)
                         .foregroundStyle(theme.ink.tertiary)
+                        .lineLimit(1)
                 }
             }
             .font(.system(size: 11.5))
@@ -231,9 +229,19 @@ private struct GraphiteSidebar: View {
         appState.inspector.selectedNode?.label ?? "map"
     }
 
+    private var currentAgentRegionLabel: String {
+        if appState.isBusy, let label = appState.operationProgress?.activeNodeLabel, !label.isEmpty {
+            return "on \(label)"
+        }
+        return appState.inspector.queryResult == nil ? "waiting" : "citing"
+    }
+
     private func count(for section: SidebarSection) -> Int? {
         switch section {
         case .library: return appState.summary.documents
+        case .chat: return appState.chatSessions.count
+        case .connections:
+            return appState.workspaceConnections.filter { $0.status == .connected }.count
         case .model: return nil
         case .map: return appState.summary.regions
         }
@@ -253,6 +261,14 @@ private struct CenterWorkspace: View {
     @Environment(\.memoryTheme) private var theme
 
     var body: some View {
+        if appState.selectedSection == .chat {
+            ChatWorkspace()
+        } else {
+            mapWorkspace
+        }
+    }
+
+    private var mapWorkspace: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 HStack(spacing: 8) {
@@ -284,7 +300,11 @@ private struct CenterWorkspace: View {
 
             DividerLine()
 
-            SemanticCloudView(snapshot: appState.snapshot, selectedNode: appState.inspector.selectedNode) { node in
+            SemanticCloudView(
+                snapshot: appState.snapshot,
+                selectedNode: appState.inspector.selectedNode,
+                agentPresence: GraphAgentPresence.from(progress: appState.isBusy ? appState.operationProgress : nil)
+            ) { node in
                 appState.selectNode(node)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -320,6 +340,205 @@ private struct CenterWorkspace: View {
     }
 }
 
+private struct ChatWorkspace: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Image(systemName: "flame")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(theme.accents.ai)
+                    Text(appState.selectedChatSession?.title ?? "Memory chat")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(theme.ink.primary)
+                    Spacer()
+                    Text("\(appState.chatMessages.count) turns")
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(theme.ink.quaternary)
+                    GraphiteButton("New", systemImage: "plus", style: .ghost, action: appState.startChat)
+                }
+                .padding(.horizontal, 14)
+                .frame(height: 42)
+                .background(theme.surfaces.surface1)
+
+                DividerLine()
+
+                SemanticCloudView(
+                    snapshot: appState.snapshot,
+                    selectedNode: appState.inspector.selectedNode,
+                    traceHighlight: GraphTraceHighlight.from(trace: appState.chatContextTraces.first),
+                    agentPresence: GraphAgentPresence.from(progress: appState.isBusy ? appState.operationProgress : nil)
+                ) { node in
+                    appState.selectNode(node)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                DividerLine()
+
+                ContextStrip(trace: appState.chatContextTraces.first)
+                    .frame(height: 112)
+            }
+            .frame(minWidth: 360)
+
+            DividerLine(axis: .vertical)
+
+            VStack(spacing: 0) {
+                ChatTranscriptView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                DividerLine()
+                ChatComposer()
+            }
+            .frame(width: 390)
+            .background(theme.surfaces.surface1)
+        }
+    }
+}
+
+private struct ChatTranscriptView: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    if appState.chatMessages.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            SectionLabel("Local Agent")
+                            EmptyHint("Start a chat to write transcript memory, derive summaries, and keep recent turns hot for retrieval.")
+                        }
+                        .padding(16)
+                    } else {
+                        ForEach(appState.chatMessages) { message in
+                            ChatBubble(message: message)
+                                .id(message.id)
+                        }
+                    }
+                }
+                .padding(14)
+            }
+            .onChange(of: appState.chatMessages.count) {
+                if let last = appState.chatMessages.last {
+                    proxy.scrollTo(last.id, anchor: .bottom)
+                }
+            }
+        }
+    }
+}
+
+private struct ChatBubble: View {
+    @Environment(\.memoryTheme) private var theme
+    let message: ChatMessage
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 7) {
+                Tag(message.role == .user ? "You" : "Agent", tone: message.role == .user ? .human : .ai)
+                Text("\(message.tokenEstimate) tok")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(theme.ink.quaternary)
+                Spacer()
+            }
+            Text(message.content)
+                .font(.system(size: 12.5))
+                .lineSpacing(3)
+                .foregroundStyle(theme.ink.primary)
+                .textSelection(.enabled)
+            if let anchor = message.sourceAnchor {
+                Text(anchor.path)
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(theme.ink.quaternary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(10)
+        .background(message.role == .user ? theme.tags.human : theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
+    }
+}
+
+private struct ChatComposer: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                TextField("Ask imprint; every turn becomes memory", text: $appState.chatInput)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12.5))
+                    .padding(.horizontal, 10)
+                    .frame(height: 34)
+                    .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
+                    .onSubmit(appState.sendChatTurn)
+                GraphiteButton("Send", systemImage: "paperplane.fill", style: .primary, action: appState.sendChatTurn)
+                    .disabled(appState.isBusy || appState.chatInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            HStack(spacing: 8) {
+                Text(appState.modelConfig.runtimePreset.rawValue)
+                DividerLine(axis: .vertical)
+                    .frame(height: 12)
+                Text(appState.modelConfig.responseModel ?? appState.modelConfig.chatModel ?? "response model unset")
+                    .lineLimit(1)
+                Spacer()
+            }
+            .font(.system(size: 10.5, design: .monospaced))
+            .foregroundStyle(theme.ink.quaternary)
+        }
+        .padding(12)
+        .background(theme.surfaces.surface1)
+    }
+}
+
+private struct ContextStrip: View {
+    @Environment(\.memoryTheme) private var theme
+    let trace: ChatContextTrace?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionLabel("Context Used") {
+                Text("\(trace?.snippets.count ?? 0)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(theme.ink.quaternary)
+            }
+            if let trace, !trace.snippets.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(trace.snippets.prefix(6)) { snippet in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Tag(snippet.sourceKind, tone: snippet.hotness > 0.7 ? .ai : .ink)
+                                    Spacer()
+                                    Text(String(format: "%.2f", snippet.hotness))
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundStyle(theme.ink.quaternary)
+                                }
+                                Text(snippet.excerpt)
+                                    .font(.system(size: 10.5))
+                                    .lineLimit(3)
+                                    .foregroundStyle(theme.ink.secondary)
+                            }
+                            .padding(8)
+                            .frame(width: 210, height: 70, alignment: .topLeading)
+                            .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
+                        }
+                    }
+                }
+            } else {
+                EmptyHint("The next response will show the exact transcript and source snippets used.")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(theme.surfaces.surface2)
+    }
+}
+
 private struct GraphiteInspector: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.memoryTheme) private var theme
@@ -329,6 +548,10 @@ private struct GraphiteInspector: View {
             switch appState.selectedSection {
             case .library:
                 LibraryInspector()
+            case .chat:
+                ChatInspector()
+            case .connections:
+                ConnectionsInspector()
             case .model:
                 ModelInspector()
             case .map:
@@ -597,6 +820,247 @@ private struct LibraryInspector: View {
     }
 }
 
+private struct ChatInspector: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                InspectorBlock {
+                    SectionLabel("Sessions") {
+                        IconButton("New Chat", systemImage: "plus", action: appState.startChat)
+                    }
+                    if appState.chatSessions.isEmpty {
+                        EmptyHint("No chat sessions yet.")
+                    } else {
+                        VStack(spacing: 4) {
+                            ForEach(appState.chatSessions.prefix(8)) { session in
+                                Button {
+                                    appState.selectChatSession(session)
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        Circle()
+                                            .fill(session.id == appState.selectedChatSession?.id ? theme.accents.ai : theme.ink.quaternary)
+                                            .frame(width: 7, height: 7)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(session.title)
+                                                .font(.system(size: 12, weight: .medium))
+                                                .lineLimit(1)
+                                            Text(String(format: "hot %.2f", session.hotness))
+                                                .font(.system(size: 9.5, design: .monospaced))
+                                                .foregroundStyle(theme.ink.quaternary)
+                                        }
+                                        Spacer()
+                                    }
+                                    .foregroundStyle(theme.ink.secondary)
+                                    .padding(8)
+                                    .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+
+                InspectorDivider()
+
+                InspectorBlock {
+                    SectionLabel("Derived Memories") {
+                        Text("\(appState.derivedMemories.count)")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(theme.ink.quaternary)
+                    }
+                    if appState.derivedMemories.isEmpty {
+                        EmptyHint("Summaries, facts, decisions, and tasks will appear here after chat turns.")
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(appState.derivedMemories.prefix(8)) { memory in
+                                VStack(alignment: .leading, spacing: 5) {
+                                    HStack {
+                                        Tag(memory.kind.rawValue, tone: tone(for: memory.kind))
+                                        Spacer()
+                                        Text(String(format: "%.2f", memory.confidence))
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .foregroundStyle(theme.ink.quaternary)
+                                    }
+                                    Text(memory.text)
+                                        .font(.system(size: 11.5))
+                                        .lineLimit(4)
+                                        .foregroundStyle(theme.ink.secondary)
+                                }
+                                .padding(8)
+                                .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            }
+                        }
+                    }
+                }
+
+                InspectorDivider()
+
+                InspectorBlock {
+                    SectionLabel("Tool Trace")
+                    if let trace = appState.chatContextTraces.first {
+                        VStack(alignment: .leading, spacing: 5) {
+                            ForEach(trace.toolTrace, id: \.self) { line in
+                                Text(line)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(theme.ink.tertiary)
+                            }
+                        }
+                    } else {
+                        EmptyHint("No routing trace yet.")
+                    }
+                }
+            }
+        }
+    }
+
+    private func tone(for kind: DerivedMemoryKind) -> ThemeTone {
+        switch kind {
+        case .summary: return .ai
+        case .decision: return .d
+        case .task: return .c
+        case .fact: return .human
+        }
+    }
+}
+
+private struct ConnectionsInspector: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                InspectorBlock {
+                    SectionLabel("Workspace Connections") {
+                        Tag("Optional", tone: .d)
+                    }
+                    Text("imprint works with local files and chat memory without workspace access. Add Slack, email, or calendar only when that source should become part of the library.")
+                        .font(.system(size: 12.5))
+                        .lineSpacing(3)
+                        .foregroundStyle(theme.ink.secondary)
+                }
+
+                InspectorDivider()
+
+                InspectorBlock {
+                    VStack(spacing: 8) {
+                        ForEach(appState.workspaceConnections) { connection in
+                            WorkspaceConnectionRow(connection: connection) {
+                                appState.connectWorkspace(connection.kind)
+                            }
+                        }
+                    }
+                }
+
+                InspectorDivider()
+
+                InspectorBlock {
+                    SectionLabel("Access Policy")
+                    VStack(alignment: .leading, spacing: 6) {
+                        PolicyLine(systemImage: "checkmark.circle", text: "No email or calendar permission is needed to import files, browse memory, search, or chat.")
+                        PolicyLine(systemImage: "lock", text: "Disconnected workspace sources stay out of retrieval and indexing.")
+                        PolicyLine(systemImage: "arrow.clockwise", text: "Connections can be added later without rebuilding the rest of the library.")
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct WorkspaceConnectionRow: View {
+    @Environment(\.memoryTheme) private var theme
+    let connection: WorkspaceConnection
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(iconColor)
+                .frame(width: 24, height: 24)
+                .background(theme.surfaces.surface3, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(connection.kind.rawValue)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(theme.ink.primary)
+                    Tag(connection.statusLabel, tone: tagTone)
+                }
+                Text(detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.ink.tertiary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            GraphiteButton(connection.actionTitle, systemImage: buttonIcon, style: .ghost, action: action)
+                .disabled(connection.status == .connecting)
+        }
+        .padding(9)
+        .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
+    }
+
+    private var icon: String {
+        switch connection.kind {
+        case .slack: return "bubble.left.and.bubble.right"
+        case .email: return "envelope"
+        case .calendar: return "calendar"
+        }
+    }
+
+    private var buttonIcon: String {
+        connection.status == .connected ? "slider.horizontal.3" : "plus"
+    }
+
+    private var iconColor: Color {
+        connection.status == .connected ? theme.accents.success : theme.ink.tertiary
+    }
+
+    private var tagTone: ThemeTone {
+        switch connection.status {
+        case .connected: return .d
+        case .connecting: return .ai
+        case .disconnected: return .ink
+        }
+    }
+
+    private var detail: String {
+        switch connection.kind {
+        case .slack:
+            return "Search and cite channels only after a workspace is connected."
+        case .email:
+            return "Mail remains private unless this source is explicitly connected."
+        case .calendar:
+            return "Events are optional context, not a requirement for memory."
+        }
+    }
+}
+
+private struct PolicyLine: View {
+    @Environment(\.memoryTheme) private var theme
+    let systemImage: String
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: systemImage)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(theme.accents.success)
+                .frame(width: 14)
+            Text(text)
+                .font(.system(size: 11.5))
+                .lineSpacing(2)
+                .foregroundStyle(theme.ink.secondary)
+        }
+    }
+}
+
 private struct ModelInspector: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.memoryTheme) private var theme
@@ -616,9 +1080,34 @@ private struct ModelInspector: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
 
+                    Picker("Runtime", selection: $appState.modelConfig.runtimePreset) {
+                        ForEach(ModelRuntimePreset.allCases) { preset in
+                            Text(preset.rawValue).tag(preset)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+
                     LabeledField("Endpoint", text: $appState.modelConfig.endpoint)
                     LabeledField("Chat Model", text: stringBinding($appState.modelConfig.chatModel))
+                    LabeledField("Planner Model", text: stringBinding($appState.modelConfig.plannerModel))
+                    LabeledField("Planner Endpoint", text: stringBinding($appState.modelConfig.plannerEndpoint))
+                    LabeledField("Response Model", text: stringBinding($appState.modelConfig.responseModel))
+                    Toggle("Recursive Cortex", isOn: $appState.modelConfig.cortexEnabled)
+                        .toggleStyle(.switch)
+                    Stepper("Cortex Rounds \(appState.modelConfig.cortexRounds)", value: $appState.modelConfig.cortexRounds, in: 1...4)
+                    LabeledField("Critic Model", text: stringBinding($appState.modelConfig.criticModel))
+                    LabeledField("Critic Endpoint", text: stringBinding($appState.modelConfig.criticEndpoint))
+                    LabeledField("Compiler Model", text: stringBinding($appState.modelConfig.compilerModel))
                     LabeledField("Embedding Model", text: stringBinding($appState.modelConfig.embeddingModel))
+                    LabeledField("Embedding Endpoint", text: stringBinding($appState.modelConfig.embeddingEndpoint))
+                    Picker("Embedding Runtime", selection: optionalRuntimeBinding($appState.modelConfig.embeddingRuntimePreset, fallback: appState.modelConfig.runtimePreset)) {
+                        ForEach(ModelRuntimePreset.allCases) { preset in
+                            Text(preset.rawValue).tag(preset)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
                     if appState.modelConfig.mode == .api {
                         VStack(alignment: .leading, spacing: 5) {
                             Text("API Key")
@@ -661,38 +1150,78 @@ private struct ModelInspector: View {
     }
 }
 
-private struct BusyOverlay: View {
+private struct TopBarActivityStatus: View {
     @Environment(\.memoryTheme) private var theme
+    let isBusy: Bool
     let progress: OperationProgress?
     let message: String
 
     var body: some View {
         let fraction = min(max((progress?.percent ?? 0) / 100, 0), 1)
-        VStack(spacing: 12) {
-            ProgressView(value: fraction, total: 1)
-                .progressViewStyle(.linear)
-                .tint(theme.accents.ai)
-            Text("\(Int((progress?.percent ?? 0).rounded()))%")
-                .font(.system(size: 28, weight: .semibold, design: .rounded))
-                .foregroundStyle(theme.ink.primary)
-            Text(message)
-                .font(.headline)
-                .foregroundStyle(theme.ink.primary)
-            if let progress {
-                Text("\(progress.completed)/\(progress.total) · \(progress.phase.capitalized)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(theme.ink.tertiary)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 7) {
+                statusDot
+                Text(message)
+                    .font(.system(size: 10.5, weight: isBusy ? .medium : .regular, design: .monospaced))
+                    .foregroundStyle(isBusy ? theme.ink.secondary : theme.ink.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let progress {
+                    Text("· \(Int(progress.percent.rounded()))% · \(progress.phase.capitalized)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(theme.ink.quaternary)
+                        .lineLimit(1)
+                        .monospacedDigit()
+                } else if isBusy {
+                    Text("· working")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(theme.ink.quaternary)
+                        .lineLimit(1)
+                }
             }
-            Text("Embedding and rebuilding the memory graph can take a few minutes for large imports.")
-                .font(.caption)
-                .foregroundStyle(theme.ink.tertiary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(theme.surfaces.rule.opacity(0.55))
+                    Capsule()
+                        .fill(isBusy ? theme.accents.ai : theme.ink.quaternary.opacity(0.55))
+                        .frame(width: max(10, proxy.size.width * CGFloat(fraction)))
+                        .opacity(progress == nil && !isBusy ? 0 : 1)
+                }
+            }
+            .frame(height: 3)
+            .overlay(alignment: .trailing) {
+                if let progress {
+                    Text("\(progress.completed)/\(progress.total)")
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundStyle(theme.ink.quaternary)
+                        .padding(.leading, 6)
+                        .background(theme.surfaces.surface2)
+                        .offset(y: 8)
+                        .monospacedDigit()
+                }
+            }
         }
-        .multilineTextAlignment(.center)
-        .padding(22)
-        .frame(maxWidth: 360)
-        .background(theme.surfaces.surface1.opacity(0.96), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.18), radius: 34, y: 18)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .frame(width: 360, height: 30, alignment: .center)
+        .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
+        .help(message)
+    }
+
+    private var statusDot: some View {
+        Circle()
+            .fill(isBusy ? theme.accents.ai : theme.ink.quaternary)
+            .frame(width: 7, height: 7)
+            .overlay {
+                if isBusy {
+                    Circle()
+                        .stroke(theme.accents.ai.opacity(0.35), lineWidth: 3)
+                }
+            }
     }
 }
 
@@ -714,7 +1243,7 @@ private struct ActorBadge: View {
                 .frame(width: 8, height: 8)
                 .background(Circle().fill(theme.surfaces.surface1).frame(width: 12, height: 12))
                 .overlay(Circle().stroke(color.opacity(0.35), lineWidth: 3))
-            Text(label ?? (kind == .human ? "you" : "claude"))
+            Text(label ?? (kind == .human ? "you" : "Agent"))
         }
         .font(.system(size: 10.5, design: .monospaced))
         .foregroundStyle(theme.ink.secondary)
@@ -865,6 +1394,8 @@ private struct SidebarSectionRow: View {
     private var icon: String {
         switch section {
         case .library: return "tray.full"
+        case .chat: return "message"
+        case .connections: return "link.badge.plus"
         case .model: return "cpu"
         case .map: return "globe.americas"
         }
@@ -1209,5 +1740,12 @@ private func stringBinding(_ source: Binding<String?>) -> Binding<String> {
     Binding<String>(
         get: { source.wrappedValue ?? "" },
         set: { source.wrappedValue = $0.isEmpty ? nil : $0 }
+    )
+}
+
+private func optionalRuntimeBinding(_ source: Binding<ModelRuntimePreset?>, fallback: ModelRuntimePreset) -> Binding<ModelRuntimePreset> {
+    Binding<ModelRuntimePreset>(
+        get: { source.wrappedValue ?? fallback },
+        set: { source.wrappedValue = $0 }
     )
 }

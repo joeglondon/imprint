@@ -85,12 +85,20 @@ pub fn open(memory: &PersistedMemory, node: &NodeRef) -> Option<SurfOpenResult> 
     let links = MemoryNavigator.list_links(memory, node);
     match node {
         NodeRef::Document(id) => {
-            let document = memory.documents.iter().find(|document| &document.id == id)?;
+            let document = memory
+                .documents
+                .iter()
+                .find(|document| &document.id == id)?;
             let passages = document_passages(memory, id);
             Some(SurfOpenResult {
                 node: node.clone(),
                 label: document.title.clone(),
-                excerpt: excerpt_window(&document.text, 0, document.text.chars().count().min(520), 0),
+                excerpt: excerpt_window(
+                    &document.text,
+                    0,
+                    document.text.chars().count().min(520),
+                    0,
+                ),
                 source_anchor: document.source_anchor.clone(),
                 passages,
                 links,
@@ -132,7 +140,11 @@ pub fn open(memory: &PersistedMemory, node: &NodeRef) -> Option<SurfOpenResult> 
     }
 }
 
-pub fn neighbors(memory: &PersistedMemory, node: &NodeRef, max_results: usize) -> Vec<SurfNeighbor> {
+pub fn neighbors(
+    memory: &PersistedMemory,
+    node: &NodeRef,
+    max_results: usize,
+) -> Vec<SurfNeighbor> {
     let mut out = Vec::new();
     let mut seen = HashSet::<NodeRef>::new();
     for link in MemoryNavigator.list_links(memory, node) {
@@ -160,7 +172,12 @@ pub fn neighbors(memory: &PersistedMemory, node: &NodeRef, max_results: usize) -
                 .chunks
                 .iter()
                 .filter(|candidate| candidate.id != chunk.id)
-                .map(|candidate| (candidate, cosine_similarity(&chunk.embedding, &candidate.embedding)))
+                .map(|candidate| {
+                    (
+                        candidate,
+                        cosine_similarity(&chunk.embedding, &candidate.embedding),
+                    )
+                })
                 .collect::<Vec<_>>();
             semantic.sort_by(|left, right| {
                 right
@@ -205,7 +222,11 @@ fn document_passages(memory: &PersistedMemory, document_id: &str) -> Vec<SurfPas
         .iter()
         .filter(|chunk| chunk.document_id == document_id)
         .collect::<Vec<_>>();
-    chunks.sort_by(|left, right| left.ordinal.cmp(&right.ordinal).then_with(|| left.id.cmp(&right.id)));
+    chunks.sort_by(|left, right| {
+        left.ordinal
+            .cmp(&right.ordinal)
+            .then_with(|| left.id.cmp(&right.id))
+    });
     chunks
         .into_iter()
         .take(5)
@@ -262,14 +283,21 @@ pub fn expand_chunk(
     window: usize,
 ) -> Option<SurfExpansion> {
     let chunk = memory.chunks.iter().find(|chunk| chunk.id == chunk_id)?;
-    let document = memory.documents.iter().find(|document| document.id == chunk.document_id)?;
+    let document = memory
+        .documents
+        .iter()
+        .find(|document| document.id == chunk.document_id)?;
     let (start, end) = match mode {
         ExpandMode::Window => (
             chunk.start.saturating_sub(window),
             (chunk.end + window).min(document.text.chars().count()),
         ),
-        ExpandMode::Page => span_for_metadata(memory, chunk, "page").unwrap_or((chunk.start, chunk.end)),
-        ExpandMode::Section => span_for_metadata(memory, chunk, "section").unwrap_or((chunk.start, chunk.end)),
+        ExpandMode::Page => {
+            span_for_metadata(memory, chunk, "page").unwrap_or((chunk.start, chunk.end))
+        }
+        ExpandMode::Section => {
+            span_for_metadata(memory, chunk, "section").unwrap_or((chunk.start, chunk.end))
+        }
         ExpandMode::Document => (0, document.text.chars().count()),
     };
     Some(SurfExpansion {
@@ -293,19 +321,31 @@ pub fn expand_chunk(
     })
 }
 
-pub fn jump_to_anchor(memory: &PersistedMemory, anchor_id: &str, window: usize) -> Option<SurfExpansion> {
-    if let Some(chunk) = memory
-        .chunks
-        .iter()
-        .find(|chunk| chunk.source_anchor.as_ref().map(|anchor| anchor.id.as_str()) == Some(anchor_id))
-    {
+pub fn jump_to_anchor(
+    memory: &PersistedMemory,
+    anchor_id: &str,
+    window: usize,
+) -> Option<SurfExpansion> {
+    if let Some(chunk) = memory.chunks.iter().find(|chunk| {
+        chunk
+            .source_anchor
+            .as_ref()
+            .map(|anchor| anchor.id.as_str())
+            == Some(anchor_id)
+    }) {
         return expand_chunk(memory, &chunk.id, ExpandMode::Window, window);
     }
-    let document = memory
-        .documents
+    let document = memory.documents.iter().find(|document| {
+        document
+            .source_anchor
+            .as_ref()
+            .map(|anchor| anchor.id.as_str())
+            == Some(anchor_id)
+    })?;
+    let first_chunk = memory
+        .chunks
         .iter()
-        .find(|document| document.source_anchor.as_ref().map(|anchor| anchor.id.as_str()) == Some(anchor_id))?;
-    let first_chunk = memory.chunks.iter().find(|chunk| chunk.document_id == document.id)?;
+        .find(|chunk| chunk.document_id == document.id)?;
     expand_chunk(memory, &first_chunk.id, ExpandMode::Document, window)
 }
 

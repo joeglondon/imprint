@@ -6,7 +6,12 @@ pub trait Navigator {
     fn open(&self, session: &mut SessionState, node: NodeRef);
     fn backtrack(&self, session: &mut SessionState) -> Option<NodeRef>;
     fn list_links(&self, memory: &PersistedMemory, node: &NodeRef) -> Vec<Link>;
-    fn step(&self, memory: &PersistedMemory, session: &mut SessionState, link_id: &str) -> Option<NodeRef>;
+    fn step(
+        &self,
+        memory: &PersistedMemory,
+        session: &mut SessionState,
+        link_id: &str,
+    ) -> Option<NodeRef>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -98,7 +103,12 @@ impl Navigator for MemoryNavigator {
         deduped.into_values().collect()
     }
 
-    fn step(&self, memory: &PersistedMemory, session: &mut SessionState, link_id: &str) -> Option<NodeRef> {
+    fn step(
+        &self,
+        memory: &PersistedMemory,
+        session: &mut SessionState,
+        link_id: &str,
+    ) -> Option<NodeRef> {
         let links = self.list_links(memory, session.current.as_ref()?);
         let link = links.into_iter().find(|link| link.id == link_id)?;
         let next = if link.source == session.current.clone()? {
@@ -110,4 +120,3 @@ impl Navigator for MemoryNavigator {
         Some(next)
     }
 }
-

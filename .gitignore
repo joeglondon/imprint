@@ -10,6 +10,13 @@
 # Packaged app bundles and distribution artifacts
 /dist/
 
+# Local model downloads
+/Models/
+/LiquidAI_LeapBundles_*/
+
+# Local brainstorming companion scratch space
+/.superpowers/
+
 # Local editor and OS noise
 .idea/
 .vscode/

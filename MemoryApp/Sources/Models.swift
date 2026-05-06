@@ -8,15 +8,74 @@ struct ResponseEnvelope<T: Decodable>: Decodable {
 
 enum SidebarSection: String, CaseIterable, Identifiable {
     case library = "Library"
+    case chat = "Chat"
+    case connections = "Connections"
     case model = "Model"
     case map = "Map"
 
     var id: String { rawValue }
 }
 
+enum WorkspaceConnectionKind: String, Codable, CaseIterable, Identifiable {
+    case slack = "Slack"
+    case email = "Email"
+    case calendar = "Calendar"
+
+    var id: String { rawValue }
+}
+
+enum WorkspaceConnectionStatus: String, Codable, Equatable {
+    case disconnected = "Disconnected"
+    case connecting = "Connecting"
+    case connected = "Connected"
+}
+
+struct WorkspaceConnection: Codable, Equatable, Identifiable {
+    var kind: WorkspaceConnectionKind
+    var status: WorkspaceConnectionStatus
+    var isRequired: Bool
+
+    var id: String { kind.id }
+
+    static let defaults: [WorkspaceConnection] = WorkspaceConnectionKind.allCases.map {
+        WorkspaceConnection(kind: $0, status: .disconnected, isRequired: false)
+    }
+
+    var statusLabel: String {
+        switch status {
+        case .connected:
+            return "Connected"
+        case .connecting:
+            return "Connecting"
+        case .disconnected:
+            return isRequired ? "Required" : "Optional"
+        }
+    }
+
+    var actionTitle: String {
+        switch status {
+        case .connected:
+            return "Manage"
+        case .connecting:
+            return "Connecting"
+        case .disconnected:
+            return "Connect"
+        }
+    }
+}
+
 enum ModelConnectionMode: String, Codable, CaseIterable, Identifiable {
     case local = "Local"
     case api = "Api"
+
+    var id: String { rawValue }
+}
+
+enum ModelRuntimePreset: String, Codable, CaseIterable, Identifiable {
+    case ollama = "Ollama"
+    case mlx = "Mlx"
+    case llamaCpp = "LlamaCpp"
+    case customOpenAi = "CustomOpenAi"
 
     var id: String { rawValue }
 }
@@ -32,7 +91,18 @@ struct ModelConfig: Codable, Equatable {
     var endpoint: String
     var apiKeyName: String?
     var chatModel: String?
+    var plannerModel: String?
+    var responseModel: String?
+    var plannerEndpoint: String?
+    var runtimePreset: ModelRuntimePreset
+    var cortexEnabled: Bool
+    var cortexRounds: Int
+    var criticModel: String?
+    var criticEndpoint: String?
+    var compilerModel: String?
     var embeddingModel: String?
+    var embeddingEndpoint: String?
+    var embeddingRuntimePreset: ModelRuntimePreset?
     var health: ModelHealth?
 }
 
@@ -41,7 +111,18 @@ struct ModelConnectionTestRequest: Codable {
     var endpoint: String
     var apiKey: String?
     var chatModel: String?
+    var plannerModel: String?
+    var responseModel: String?
+    var plannerEndpoint: String?
+    var runtimePreset: ModelRuntimePreset
+    var cortexEnabled: Bool
+    var cortexRounds: Int
+    var criticModel: String?
+    var criticEndpoint: String?
+    var compilerModel: String?
     var embeddingModel: String?
+    var embeddingEndpoint: String?
+    var embeddingRuntimePreset: ModelRuntimePreset?
 }
 
 struct MemorySummary: Codable, Equatable {
@@ -90,6 +171,231 @@ struct OperationProgress: Codable, Equatable {
     var total: Int
     var percent: Double
     var message: String
+    var activeNodeIds: [String]?
+    var activeNodeLabel: String?
+}
+
+enum ChatRole: String, Codable, Equatable {
+    case system = "System"
+    case user = "User"
+    case assistant = "Assistant"
+    case tool = "Tool"
+}
+
+struct ChatSession: Codable, Equatable, Identifiable {
+    var id: String
+    var title: String
+    var createdAt: UInt64
+    var updatedAt: UInt64
+    var hotness: Float
+}
+
+struct ChatMessage: Codable, Equatable, Identifiable {
+    var id: String
+    var sessionId: String
+    var role: ChatRole
+    var content: String
+    var createdAt: UInt64
+    var tokenEstimate: Int
+    var sourceAnchor: SourceAnchor?
+}
+
+enum AttentionState: String, Codable, Equatable {
+    case hot = "Hot"
+    case warm = "Warm"
+    case cold = "Cold"
+}
+
+struct TranscriptChunk: Codable, Equatable, Identifiable {
+    var id: String
+    var sessionId: String
+    var messageId: String
+    var ordinal: Int
+    var text: String
+    var embedding: [Float]
+    var embeddingProvider: String
+    var embeddingModel: String
+    var embeddingEndpoint: String
+    var sourceAnchor: SourceAnchor
+    var attentionState: AttentionState
+    var hotness: Float
+    var createdAt: UInt64
+}
+
+enum DerivedMemoryKind: String, Codable, Equatable {
+    case summary = "Summary"
+    case decision = "Decision"
+    case task = "Task"
+    case fact = "Fact"
+}
+
+struct ProvenanceRecord: Codable, Equatable {
+    var actor: String
+    var reason: String
+    var createdAt: UInt64
+    var sourceRefs: [String]
+}
+
+struct DerivedMemory: Codable, Equatable, Identifiable {
+    var id: String
+    var sessionId: String?
+    var kind: DerivedMemoryKind
+    var text: String
+    var sourceMessageIds: [String]
+    var actor: String
+    var confidence: Float
+    var createdAt: UInt64
+    var provenance: ProvenanceRecord
+}
+
+struct DerivedMemoryWrite: Codable, Equatable {
+    var sessionId: String?
+    var kind: DerivedMemoryKind
+    var text: String
+    var sourceMessageIds: [String]
+    var actor: String
+    var confidence: Float
+}
+
+struct WebFindingWrite: Codable, Equatable {
+    var sessionId: String?
+    var query: String
+    var url: String
+    var title: String
+    var summary: String
+    var retrievedAt: UInt64
+    var confidence: Float
+    var actor: String
+}
+
+struct WebFinding: Codable, Equatable, Identifiable {
+    var id: String
+    var sessionId: String?
+    var query: String
+    var url: String
+    var title: String
+    var summary: String
+    var retrievedAt: UInt64
+    var confidence: Float
+    var actor: String
+    var createdAt: UInt64
+    var provenance: ProvenanceRecord
+}
+
+struct AgentLinkWrite: Codable, Equatable {
+    var sourceId: String
+    var targetId: String
+    var label: String
+    var actor: String
+}
+
+struct AgentLinkMemory: Codable, Equatable, Identifiable {
+    var id: String
+    var sourceId: String
+    var targetId: String
+    var label: String
+    var actor: String
+    var createdAt: UInt64
+    var provenance: ProvenanceRecord
+}
+
+enum AttentionTargetKind: String, Codable, Equatable {
+    case chatSession = "ChatSession"
+    case chatMessage = "ChatMessage"
+    case transcriptChunk = "TranscriptChunk"
+    case derivedMemory = "DerivedMemory"
+    case webFinding = "WebFinding"
+    case document = "Document"
+    case chunk = "Chunk"
+    case region = "Region"
+    case link = "Link"
+}
+
+enum AttentionAction: String, Codable, Equatable {
+    case active = "Active"
+    case promote = "Promote"
+    case decay = "Decay"
+    case pin = "Pin"
+    case suppress = "Suppress"
+}
+
+struct AttentionMark: Codable, Equatable, Identifiable {
+    var id: String
+    var targetId: String
+    var targetKind: AttentionTargetKind
+    var action: AttentionAction
+    var reason: String
+    var actor: String
+    var createdAt: UInt64
+    var revertedAt: UInt64?
+}
+
+struct AttentionMarkWrite: Codable, Equatable {
+    var targetId: String
+    var targetKind: AttentionTargetKind
+    var action: AttentionAction
+    var reason: String
+    var actor: String
+}
+
+struct ChatContextSnippet: Codable, Equatable, Identifiable {
+    var id: String
+    var sourceKind: String
+    var sourceId: String
+    var excerpt: String
+    var score: Float
+    var hotness: Float
+    var sourceAnchor: SourceAnchor?
+}
+
+struct ChatContextTrace: Codable, Equatable, Identifiable {
+    var id: String
+    var sessionId: String
+    var userMessageId: String
+    var snippets: [ChatContextSnippet]
+    var toolTrace: [String]
+    var cortexTrace: CortexTrace?
+    var createdAt: UInt64
+}
+
+struct CortexCritique: Codable, Equatable {
+    var sufficient: Bool
+    var gap: String
+    var note: String
+}
+
+struct CortexRoundTrace: Codable, Equatable {
+    var round: Int
+    var actions: [String]
+    var snippetsBefore: Int
+    var snippetsAfter: Int
+    var critique: CortexCritique
+}
+
+struct CortexTrace: Codable, Equatable {
+    var enabled: Bool
+    var rounds: [CortexRoundTrace]
+    var finalNote: String
+}
+
+struct BrainCompileResult: Codable, Equatable {
+    var artifactsWritten: Int
+    var artifactIds: [String]
+    var trainingRecordsWritten: Int
+    var trainingRecordsPath: String
+    var exportFiles: [String]
+}
+
+struct ChatTurnRequest: Codable, Equatable {
+    var sessionId: String
+    var message: String
+}
+
+struct ChatTurnResult: Codable, Equatable {
+    var session: ChatSession
+    var messages: [ChatMessage]
+    var contextTrace: ChatContextTrace
+    var derivedMemories: [DerivedMemory]
 }
 
 struct MapEntry: Codable, Equatable, Identifiable {

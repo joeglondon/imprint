@@ -1,0 +1,9 @@
+[project]
+name = "imprint-training"
+version = "0.1.0"
+description = "Optional local training and eval harness for imprint tiny-model cortex adapters"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+mlx = ["mlx-lm"]

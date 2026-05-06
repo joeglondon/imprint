@@ -92,6 +92,50 @@ enum RustBridge {
         try decode(ai_memory_test_model_connection(jsonString(request)))
     }
 
+    static func createChatSession(storePath: String, title: String) throws -> ChatSession {
+        try decode(ai_memory_create_chat_session(storePath, title))
+    }
+
+    static func listChatSessions(storePath: String) throws -> [ChatSession] {
+        try decode(ai_memory_list_chat_sessions(storePath))
+    }
+
+    static func listChatMessages(storePath: String, sessionId: String) throws -> [ChatMessage] {
+        try decode(ai_memory_list_chat_messages(storePath, sessionId))
+    }
+
+    static func sendChatTurn(storePath: String, request: ChatTurnRequest) throws -> ChatTurnResult {
+        try decode(ai_memory_send_chat_turn(storePath, jsonString(request)))
+    }
+
+    static func listChatContextTraces(storePath: String, sessionId: String) throws -> [ChatContextTrace] {
+        try decode(ai_memory_list_chat_context_traces(storePath, sessionId))
+    }
+
+    static func listDerivedMemories(storePath: String, sessionId: String?) throws -> [DerivedMemory] {
+        try decode(ai_memory_list_derived_memories(storePath, sessionId ?? ""))
+    }
+
+    static func writeDerivedMemory(storePath: String, write: DerivedMemoryWrite) throws -> DerivedMemory {
+        try decode(ai_memory_write_derived_memory(storePath, jsonString(write)))
+    }
+
+    static func writeWebFinding(storePath: String, write: WebFindingWrite) throws -> WebFinding {
+        try decode(ai_memory_write_web_finding(storePath, jsonString(write)))
+    }
+
+    static func writeAgentLink(storePath: String, write: AgentLinkWrite) throws -> AgentLinkMemory {
+        try decode(ai_memory_write_agent_link(storePath, jsonString(write)))
+    }
+
+    static func applyAttentionMark(storePath: String, write: AttentionMarkWrite) throws -> AttentionMark {
+        try decode(ai_memory_apply_attention_mark(storePath, jsonString(write)))
+    }
+
+    static func compileMemoryBrain(storePath: String) throws -> BrainCompileResult {
+        try decode(ai_memory_compile_memory_brain(storePath))
+    }
+
     private static func decode<T: Decodable>(_ ptr: UnsafeMutablePointer<CChar>?) throws -> T {
         guard let ptr else {
             throw RustBridgeError.invalidResponse

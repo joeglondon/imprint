@@ -14,7 +14,7 @@ function App() {
       <DCSection
         id="intro"
         title="Concept 1 · Dual cursor — palette studies"
-        subtitle="Same layout, five color worlds. No paper/cream. Each palette picks a surface tone, an ink scale, and four shared-chroma accents that double as actor (you / claude) and tag colors."
+        subtitle="Same layout, five color worlds. No paper/cream. Each palette picks a surface tone, an ink scale, and four shared-chroma accents that double as actor (you / Agent) and tag colors."
       >
         <DCArtboard id="legend" label="Palettes overview" width={620} height={560}>
           <Overview themes={themes} />
@@ -69,7 +69,7 @@ function Overview({ themes }) {
                 <span style={{ width: 8, height: 8, borderRadius: '50%', background: T.human }} /> you
               </span>
               <span className="mono" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: T.ink2 }}>
-                <span style={{ width: 8, height: 8, borderRadius: '50%', background: T.ai }} /> claude
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: T.ai }} /> Agent
               </span>
             </div>
           </div>

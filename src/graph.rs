@@ -84,7 +84,12 @@ impl GraphBuilder {
                 .chunks
                 .iter()
                 .filter(|other| other.id != chunk.id)
-                .map(|other| (other.id.clone(), cosine_similarity(&chunk.embedding, &other.embedding)))
+                .map(|other| {
+                    (
+                        other.id.clone(),
+                        cosine_similarity(&chunk.embedding, &other.embedding),
+                    )
+                })
                 .filter(|(_, score)| *score >= CHUNK_SEMANTIC_THRESHOLD)
                 .collect::<Vec<_>>();
             candidates.sort_by(|left, right| {
@@ -94,7 +99,10 @@ impl GraphBuilder {
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| left.0.cmp(&right.0))
             });
-            for (other_id, score) in candidates.into_iter().take(MAX_CHUNK_SEMANTIC_LINKS_PER_CHUNK) {
+            for (other_id, score) in candidates
+                .into_iter()
+                .take(MAX_CHUNK_SEMANTIC_LINKS_PER_CHUNK)
+            {
                 let (left, right) = if chunk.id < other_id {
                     (chunk.id.clone(), other_id)
                 } else {
@@ -126,11 +134,21 @@ impl GraphBuilder {
                 };
                 let semantic_score = cosine_similarity(left_vector, right_vector);
                 if semantic_score >= DOC_SEMANTIC_THRESHOLD {
-                    candidates.push((other.id.clone(), LinkType::SemanticNeighbor, semantic_score, "semantic neighbor".to_string()));
+                    candidates.push((
+                        other.id.clone(),
+                        LinkType::SemanticNeighbor,
+                        semantic_score,
+                        "semantic neighbor".to_string(),
+                    ));
                     continue;
                 }
                 if document_entity_overlap(document, other) {
-                    candidates.push((other.id.clone(), LinkType::EntityOverlap, 0.45, "entity overlap".to_string()));
+                    candidates.push((
+                        other.id.clone(),
+                        LinkType::EntityOverlap,
+                        0.45,
+                        "entity overlap".to_string(),
+                    ));
                 }
             }
             candidates.sort_by(|left, right| {
@@ -209,7 +227,11 @@ impl GraphBuilder {
 fn parse_citations(text: &str) -> Vec<String> {
     text.split_whitespace()
         .filter_map(|token| token.strip_prefix("cite:"))
-        .map(|value| value.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '-').to_string())
+        .map(|value| {
+            value
+                .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '-')
+                .to_string()
+        })
         .collect()
 }
 

@@ -22,11 +22,18 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    Ingest { input: PathBuf },
+    Ingest {
+        input: PathBuf,
+    },
     Rebuild,
+    Compile,
     Mcp,
     Map,
-    Trace { query: String, #[arg(long, default_value_t = 3)] max_regions: usize },
+    Trace {
+        query: String,
+        #[arg(long, default_value_t = 3)]
+        max_regions: usize,
+    },
     Query {
         query: String,
         #[arg(long, default_value_t = 3)]
@@ -34,19 +41,66 @@ enum Command {
         #[arg(long, default_value_t = 5)]
         max_chunks: usize,
     },
-    GrepRegion { region_id: String, needle: String, #[arg(long, default_value_t = 80)] window: usize },
-    OpenDocument { chunk_id: String },
-    GrepDocument { document_id: String, needle: String, #[arg(long, default_value_t = 80)] window: usize },
-    SemanticDocument { document_id: String, query: String, #[arg(long, default_value_t = 80)] window: usize },
-    Excerpt { hit_id: String, #[arg(long, default_value_t = 80)] window: usize },
-    SurfOpen { node: String },
-    SurfNeighbors { node: String, #[arg(long, default_value_t = 8)] max_results: usize },
-    SurfExpand { chunk_id: String, #[arg(long, default_value = "window")] mode: String, #[arg(long, default_value_t = 360)] window: usize },
-    SurfJump { anchor_id: String, #[arg(long, default_value_t = 360)] window: usize },
-    SurfStep { session: String, action: String },
-    Links { node: String },
-    Step { node: String, link_id: String },
-    Backtrack { node: String },
+    GrepRegion {
+        region_id: String,
+        needle: String,
+        #[arg(long, default_value_t = 80)]
+        window: usize,
+    },
+    OpenDocument {
+        chunk_id: String,
+    },
+    GrepDocument {
+        document_id: String,
+        needle: String,
+        #[arg(long, default_value_t = 80)]
+        window: usize,
+    },
+    SemanticDocument {
+        document_id: String,
+        query: String,
+        #[arg(long, default_value_t = 80)]
+        window: usize,
+    },
+    Excerpt {
+        hit_id: String,
+        #[arg(long, default_value_t = 80)]
+        window: usize,
+    },
+    SurfOpen {
+        node: String,
+    },
+    SurfNeighbors {
+        node: String,
+        #[arg(long, default_value_t = 8)]
+        max_results: usize,
+    },
+    SurfExpand {
+        chunk_id: String,
+        #[arg(long, default_value = "window")]
+        mode: String,
+        #[arg(long, default_value_t = 360)]
+        window: usize,
+    },
+    SurfJump {
+        anchor_id: String,
+        #[arg(long, default_value_t = 360)]
+        window: usize,
+    },
+    SurfStep {
+        session: String,
+        action: String,
+    },
+    Links {
+        node: String,
+    },
+    Step {
+        node: String,
+        link_id: String,
+    },
+    Backtrack {
+        node: String,
+    },
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -67,16 +121,27 @@ pub fn run() -> anyhow::Result<()> {
             let result = crate::app::rebuild_memory(store.root())?;
             println!("{}", serde_json::to_string_pretty(&result.summary)?);
         }
+        Command::Compile => {
+            let result = crate::app::compile_memory_brain(store.root())?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
         Command::Mcp => {
             crate::mcp::run_stdio(store.root())?;
         }
         Command::Map => {
             let memory = load_ready_memory(&store)?;
-            println!("{}", memory.memory_map.context("memory map missing")?.serialized);
+            println!(
+                "{}",
+                memory.memory_map.context("memory map missing")?.serialized
+            );
         }
         Command::Trace { query, max_regions } => {
             let memory = load_ready_memory(&store)?;
-            let trace = engine.trace(memory.memory_map.as_ref().context("memory map missing")?, &query, max_regions);
+            let trace = engine.trace(
+                memory.memory_map.as_ref().context("memory map missing")?,
+                &query,
+                max_regions,
+            );
             println!("{}", serde_json::to_string_pretty(&trace)?);
         }
         Command::Query {
@@ -146,7 +211,8 @@ pub fn run() -> anyhow::Result<()> {
             window,
         } => {
             let memory = load_ready_memory(&store)?;
-            let hits = extractor.semantic_document(&embedder, &memory, &document_id, &query, window)?;
+            let hits =
+                extractor.semantic_document(&embedder, &memory, &document_id, &query, window)?;
             println!("{}", serde_json::to_string_pretty(&hits)?);
         }
         Command::Excerpt { hit_id, window } => {
@@ -161,11 +227,21 @@ pub fn run() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&opened)?);
         }
         Command::SurfNeighbors { node, max_results } => {
-            let neighbors = crate::app::surf_neighbors(store.root(), &parse_node(&node)?, max_results)?;
+            let neighbors =
+                crate::app::surf_neighbors(store.root(), &parse_node(&node)?, max_results)?;
             println!("{}", serde_json::to_string_pretty(&neighbors)?);
         }
-        Command::SurfExpand { chunk_id, mode, window } => {
-            let expansion = crate::app::surf_expand(store.root(), &chunk_id, parse_expand_mode(&mode)?, window)?;
+        Command::SurfExpand {
+            chunk_id,
+            mode,
+            window,
+        } => {
+            let expansion = crate::app::surf_expand(
+                store.root(),
+                &chunk_id,
+                parse_expand_mode(&mode)?,
+                window,
+            )?;
             println!("{}", serde_json::to_string_pretty(&expansion)?);
         }
         Command::SurfJump { anchor_id, window } => {
@@ -188,7 +264,9 @@ pub fn run() -> anyhow::Result<()> {
             let memory = load_ready_memory(&store)?;
             let node = parse_node(&node)?;
             let mut session = navigator.start_session(Some(node));
-            let next = navigator.step(&memory, &mut session, &link_id).context("link not found")?;
+            let next = navigator
+                .step(&memory, &mut session, &link_id)
+                .context("link not found")?;
             let payload = serde_json::json!({
                 "current": next,
                 "history": session.history,
@@ -214,7 +292,9 @@ fn parse_expand_mode(raw: &str) -> anyhow::Result<ExpandMode> {
         "page" => Ok(ExpandMode::Page),
         "section" => Ok(ExpandMode::Section),
         "document" => Ok(ExpandMode::Document),
-        _ => Err(anyhow!("unknown expand mode {raw}; expected window, page, section, or document")),
+        _ => Err(anyhow!(
+            "unknown expand mode {raw}; expected window, page, section, or document"
+        )),
     }
 }
 
@@ -302,18 +382,19 @@ mod tests {
     fn region_query_routes_and_finds_hits() {
         let memory = sample_memory();
         let ann = RegionIndexer.rebuild(&memory.chunks, &memory.regions);
-        let result = MemoryQueryEngine.execute(
-            &HashEmbedder::default(),
-            &memory,
-            &ann,
-            QueryRequest {
-                text: "parts of the foot".into(),
-                filters: BTreeMap::new(),
-                max_regions: 2,
-                max_chunks: 3,
-            },
-        )
-        .expect("query");
+        let result = MemoryQueryEngine
+            .execute(
+                &HashEmbedder::default(),
+                &memory,
+                &ann,
+                QueryRequest {
+                    text: "parts of the foot".into(),
+                    filters: BTreeMap::new(),
+                    max_regions: 2,
+                    max_chunks: 3,
+                },
+            )
+            .expect("query");
         assert!(!result.routed.region_ids.is_empty());
         assert!(!result.hits.is_empty());
     }
@@ -322,7 +403,8 @@ mod tests {
     fn navigation_can_follow_and_backtrack() {
         let memory = sample_memory();
         let navigator = MemoryNavigator;
-        let mut session = navigator.start_session(Some(NodeRef::Chunk("foot-anatomy:chunk:0".into())));
+        let mut session =
+            navigator.start_session(Some(NodeRef::Chunk("foot-anatomy:chunk:0".into())));
         let links = navigator.list_links(&memory, session.current.as_ref().expect("current"));
         let target = links
             .iter()
@@ -330,7 +412,9 @@ mod tests {
             .expect("doc link")
             .id
             .clone();
-        let next = navigator.step(&memory, &mut session, &target).expect("step");
+        let next = navigator
+            .step(&memory, &mut session, &target)
+            .expect("step");
         assert!(matches!(next, NodeRef::Document(_)));
         let previous = navigator.backtrack(&mut session).expect("backtrack");
         assert!(matches!(previous, NodeRef::Chunk(_)));

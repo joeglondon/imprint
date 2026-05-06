@@ -144,9 +144,73 @@ impl Embedder for OllamaEmbedder {
 }
 
 #[derive(Debug, Clone)]
+pub struct OpenAiCompatibleEmbedder {
+    endpoint: String,
+    model: String,
+    client: Client,
+}
+
+impl OpenAiCompatibleEmbedder {
+    pub fn new(endpoint: impl Into<String>, model: impl Into<String>) -> Result<Self> {
+        let raw = endpoint.into();
+        let trimmed = raw.trim_end_matches('/');
+        let endpoint = if trimmed.ends_with("/v1") {
+            trimmed.to_string()
+        } else {
+            format!("{trimmed}/v1")
+        };
+        Ok(Self {
+            endpoint,
+            model: model.into(),
+            client: Client::builder().timeout(Duration::from_secs(60)).build()?,
+        })
+    }
+}
+
+impl Embedder for OpenAiCompatibleEmbedder {
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let response = self
+            .client
+            .post(format!("{}/embeddings", self.endpoint))
+            .bearer_auth("not-needed")
+            .json(&OpenAiEmbeddingRequest {
+                model: &self.model,
+                input: text,
+            })
+            .send()
+            .with_context(|| format!("calling OpenAI-compatible embedding model {}", self.model))?
+            .error_for_status()
+            .with_context(|| {
+                format!(
+                    "OpenAI-compatible embedding model {} returned an error",
+                    self.model
+                )
+            })?
+            .json::<OpenAiEmbeddingResponse>()
+            .context("decoding OpenAI-compatible embedding response")?;
+        response
+            .data
+            .into_iter()
+            .next()
+            .map(|item| item.embedding)
+            .filter(|embedding| !embedding.is_empty())
+            .context("OpenAI-compatible endpoint returned no embedding values")
+    }
+
+    fn identity(&self) -> EmbedderIdentity {
+        EmbedderIdentity {
+            provider: "openai-compatible".into(),
+            model: self.model.clone(),
+            endpoint: self.endpoint.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum RuntimeEmbedder {
     Hash(HashEmbedder),
     Ollama(OllamaEmbedder),
+    OpenAi(OpenAiCompatibleEmbedder),
 }
 
 impl Embedder for RuntimeEmbedder {
@@ -154,6 +218,7 @@ impl Embedder for RuntimeEmbedder {
         match self {
             RuntimeEmbedder::Hash(embedder) => embedder.embed(text),
             RuntimeEmbedder::Ollama(embedder) => embedder.embed(text),
+            RuntimeEmbedder::OpenAi(embedder) => embedder.embed(text),
         }
     }
 
@@ -161,6 +226,7 @@ impl Embedder for RuntimeEmbedder {
         match self {
             RuntimeEmbedder::Hash(embedder) => embedder.identity(),
             RuntimeEmbedder::Ollama(embedder) => embedder.identity(),
+            RuntimeEmbedder::OpenAi(embedder) => embedder.identity(),
         }
     }
 }
@@ -180,6 +246,22 @@ struct OllamaEmbedManyRequest<'a> {
 #[derive(Deserialize)]
 struct OllamaEmbedResponse {
     embeddings: Vec<Vec<f32>>,
+}
+
+#[derive(Serialize)]
+struct OpenAiEmbeddingRequest<'a> {
+    model: &'a str,
+    input: &'a str,
+}
+
+#[derive(Deserialize)]
+struct OpenAiEmbeddingResponse {
+    data: Vec<OpenAiEmbeddingItem>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiEmbeddingItem {
+    embedding: Vec<f32>,
 }
 
 pub trait Indexer {
@@ -231,7 +313,12 @@ impl RegionAnnIndex {
                     let mut neighbors = region_chunks
                         .iter()
                         .filter(|other| other.id != chunk.id)
-                        .map(|other| (other.id.clone(), cosine_similarity(&chunk.embedding, &other.embedding)))
+                        .map(|other| {
+                            (
+                                other.id.clone(),
+                                cosine_similarity(&chunk.embedding, &other.embedding),
+                            )
+                        })
                         .collect::<Vec<_>>();
                     neighbors.sort_by(desc_score);
                     adjacency.insert(

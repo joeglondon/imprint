@@ -25,7 +25,12 @@ pub trait Extractor {
         query: &str,
         window: usize,
     ) -> anyhow::Result<Vec<ExtractHit>>;
-    fn excerpt_for_hit(&self, memory: &PersistedMemory, hit_id: &str, window: usize) -> Option<String>;
+    fn excerpt_for_hit(
+        &self,
+        memory: &PersistedMemory,
+        hit_id: &str,
+        window: usize,
+    ) -> Option<String>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -131,17 +136,30 @@ impl Extractor for MemoryExtractor {
                 }
             })
             .collect::<Vec<_>>();
-        hits.sort_by(|left, right| right.score.partial_cmp(&left.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(5);
         Ok(hits)
     }
 
-    fn excerpt_for_hit(&self, memory: &PersistedMemory, hit_id: &str, window: usize) -> Option<String> {
+    fn excerpt_for_hit(
+        &self,
+        memory: &PersistedMemory,
+        hit_id: &str,
+        window: usize,
+    ) -> Option<String> {
         if let Some(stripped) = hit_id.strip_prefix("doc-hit:") {
             let (document_id, remainder) = stripped.split_once('|')?;
             let (needle, index) = remainder.rsplit_once('|')?;
             let index = index.parse::<usize>().ok()?;
-            let document = memory.documents.iter().find(|document| document.id == document_id)?;
+            let document = memory
+                .documents
+                .iter()
+                .find(|document| document.id == document_id)?;
             let hits = grep_text(&document.text, needle, window);
             return hits.get(index).map(|(_, _, excerpt)| excerpt.clone());
         }
@@ -194,10 +212,16 @@ fn excerpt(text: &str, start: usize, end: usize, window: usize) -> String {
 }
 
 #[allow(dead_code)]
-fn _metadata_filter(metadata: &BTreeMap<String, String>, filters: &BTreeMap<String, String>) -> bool {
-    filters
-        .iter()
-        .all(|(key, value)| metadata.get(key).map(|candidate| candidate == value).unwrap_or(false))
+fn _metadata_filter(
+    metadata: &BTreeMap<String, String>,
+    filters: &BTreeMap<String, String>,
+) -> bool {
+    filters.iter().all(|(key, value)| {
+        metadata
+            .get(key)
+            .map(|candidate| candidate == value)
+            .unwrap_or(false)
+    })
 }
 
 #[allow(dead_code)]

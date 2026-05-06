@@ -89,7 +89,7 @@ function Actor({ who = 'human', label, size = 8 }) {
         background: color,
         boxShadow: `0 0 0 2px oklch(96% 0.006 85), 0 0 0 3px ${color === AMBER ? 'oklch(92% 0.05 75)' : 'oklch(92% 0.04 200)'}`,
       }} />
-      {label || (who === 'human' ? 'you' : 'claude')}
+      {label || (who === 'human' ? 'you' : 'Agent')}
     </span>
   );
 }

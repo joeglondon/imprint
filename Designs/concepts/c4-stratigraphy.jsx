@@ -189,7 +189,7 @@ const C4Stratigraphy = () => {
           <div className="serif" style={{ fontSize: 16.5, fontWeight: 500, color: INK, lineHeight: 1.3 }}>
             gateway-spec.md · §3.2
           </div>
-          <div className="mono" style={{ fontSize: 10, color: INK4, marginTop: 2 }}>written by you · 2 edits · last touched by claude</div>
+          <div className="mono" style={{ fontSize: 10, color: INK4, marginTop: 2 }}>written by you · 2 edits · last touched by Agent</div>
         </div>
 
         <div style={{

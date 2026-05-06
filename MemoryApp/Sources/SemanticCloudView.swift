@@ -6,6 +6,8 @@ struct SemanticCloudView: View {
     @State private var hoveredNode: GraphNode?
     let snapshot: VisualizationSnapshot?
     let selectedNode: GraphNode?
+    var traceHighlight: GraphTraceHighlight? = nil
+    var agentPresence: GraphAgentPresence? = nil
     var onSelect: (GraphNode) -> Void
 
     var body: some View {
@@ -16,6 +18,8 @@ struct SemanticCloudView: View {
                     snapshot: snapshot,
                     selectedNode: selectedNode,
                     hoveredNode: hoveredNode,
+                    traceHighlight: traceHighlight,
+                    agentPresence: agentPresence,
                     onSelect: onSelect,
                     onHover: { node in
                         if hoveredNode?.id != node?.id {
@@ -28,7 +32,10 @@ struct SemanticCloudView: View {
                         .padding(16)
                 }
                 .overlay(alignment: .topTrailing) {
-                    GraphLegend()
+                    GraphLegend(
+                        hasTraceHighlight: traceHighlight?.isEmpty == false,
+                        hasAgentPresence: agentPresence?.isEmpty == false
+                    )
                         .padding(16)
                 }
                 .overlay(alignment: .bottomLeading) {
@@ -58,6 +65,74 @@ struct SemanticCloudView: View {
     }
 }
 
+struct GraphAgentPresence: Equatable {
+    var nodeIDs: Set<String>
+    var primaryNodeIDs: Set<String>
+    var label: String?
+
+    var isEmpty: Bool {
+        nodeIDs.isEmpty
+    }
+
+    static func from(progress: OperationProgress?) -> GraphAgentPresence? {
+        guard let progress else { return nil }
+        let orderedNodeIDs = (progress.activeNodeIds ?? []).filter { !$0.isEmpty }
+        guard !orderedNodeIDs.isEmpty else { return nil }
+        return GraphAgentPresence(
+            nodeIDs: Set(orderedNodeIDs),
+            primaryNodeIDs: Set(orderedNodeIDs.prefix(3)),
+            label: progress.activeNodeLabel
+        )
+    }
+}
+
+struct GraphTraceHighlight: Equatable {
+    var nodeIDs: Set<String>
+    var primaryNodeIDs: Set<String>
+    var snippetCount: Int
+
+    var isEmpty: Bool {
+        nodeIDs.isEmpty
+    }
+
+    static func from(trace: ChatContextTrace?) -> GraphTraceHighlight? {
+        guard let trace else { return nil }
+
+        var orderedNodeIDs = [String]()
+        var seen = Set<String>()
+
+        func append(_ id: String?) {
+            guard let id, !id.isEmpty, seen.insert(id).inserted else { return }
+            orderedNodeIDs.append(id)
+        }
+
+        for snippet in trace.snippets {
+            switch snippet.sourceKind {
+            case "chunk", "source_window":
+                append("chunk:\(snippet.sourceId)")
+            case "document":
+                append("document:\(snippet.sourceId)")
+            case "region":
+                append("region:\(snippet.sourceId)")
+            default:
+                break
+            }
+
+            if let anchor = snippet.sourceAnchor {
+                append("document:\(anchor.documentId)")
+                append(anchor.chunkId.map { "chunk:\($0)" })
+            }
+        }
+
+        guard !orderedNodeIDs.isEmpty else { return nil }
+        return GraphTraceHighlight(
+            nodeIDs: Set(orderedNodeIDs),
+            primaryNodeIDs: Set(orderedNodeIDs.prefix(5)),
+            snippetCount: trace.snippets.count
+        )
+    }
+}
+
 private struct SemanticMap2DView: View {
     @Environment(\.memoryTheme) private var theme
     @State private var viewport = GraphViewportTransform()
@@ -65,6 +140,8 @@ private struct SemanticMap2DView: View {
     let snapshot: VisualizationSnapshot
     let selectedNode: GraphNode?
     let hoveredNode: GraphNode?
+    let traceHighlight: GraphTraceHighlight?
+    let agentPresence: GraphAgentPresence?
     var onSelect: (GraphNode) -> Void
     var onHover: (GraphNode?) -> Void
 
@@ -84,11 +161,25 @@ private struct SemanticMap2DView: View {
                     }
 
                     Canvas { context, _ in
+                        drawTraceOverlay(layout, highlight: traceHighlight, in: &context)
+                    }
+
+                    Canvas { context, _ in
+                        drawAgentPresenceOverlay(layout, presence: agentPresence, in: &context)
+                    }
+
+                    Canvas { context, _ in
                         drawFocusOverlay(layout, focusID: focusID, hoverID: hoveredNode?.id, in: &context)
                     }
 
-                    ForEach(layout.labelledNodes(focusID: focusID, scale: viewport.scale)) { display in
-                        NodeLabel(display: display, selected: display.node.id == focusID, scale: viewport.scale)
+                    ForEach(layout.labelledNodes(focusID: focusID, traceHighlight: traceHighlight, agentPresence: agentPresence, scale: viewport.scale)) { display in
+                        NodeLabel(
+                            display: display,
+                            selected: display.node.id == focusID,
+                            traced: traceHighlight?.nodeIDs.contains(display.node.id) == true,
+                            agentActive: agentPresence?.nodeIDs.contains(display.node.id) == true,
+                            scale: viewport.scale
+                        )
                             .position(x: display.point.x, y: display.point.y + display.radius + (display.node.kind == .region ? 17 : 14))
                             .allowsHitTesting(false)
                     }
@@ -144,6 +235,92 @@ private struct SemanticMap2DView: View {
     private func drawBaseNodes(_ layout: Graph2DLayout, in context: inout GraphicsContext) {
         for display in layout.nodes {
             drawNode(display, color: layout.color(for: display), opacity: 1.0, radiusScale: 1.0, isFocused: false, in: &context)
+        }
+    }
+
+    private func drawTraceOverlay(_ layout: Graph2DLayout, highlight: GraphTraceHighlight?, in context: inout GraphicsContext) {
+        guard let highlight, !highlight.isEmpty else { return }
+        let visibleNodeIDs = highlight.nodeIDs.intersection(layout.nodeByID.keys)
+        guard !visibleNodeIDs.isEmpty else { return }
+
+        for edge in layout.traceEdges(highlightedNodeIDs: visibleNodeIDs) {
+            var glowPath = Path()
+            glowPath.move(to: edge.source.point)
+            glowPath.addLine(to: edge.target.point)
+            context.stroke(
+                glowPath,
+                with: .color(theme.accents.highlight.opacity(0.22)),
+                style: StrokeStyle(lineWidth: 6.8, lineCap: .round)
+            )
+            context.stroke(
+                glowPath,
+                with: .color(theme.accents.highlight.opacity(0.82)),
+                style: StrokeStyle(lineWidth: 2.0, lineCap: .round)
+            )
+        }
+
+        for nodeID in visibleNodeIDs.sorted() {
+            guard let display = layout.nodeByID[nodeID] else { continue }
+            let isPrimary = highlight.primaryNodeIDs.contains(nodeID)
+            let radius = display.radius * (isPrimary ? 3.3 : 2.45)
+            let halo = Path(ellipseIn: CGRect(x: display.point.x - radius, y: display.point.y - radius, width: radius * 2, height: radius * 2))
+            context.fill(halo, with: .color(theme.accents.highlight.opacity(isPrimary ? 0.20 : 0.12)))
+            context.stroke(
+                halo,
+                with: .color(theme.accents.highlight.opacity(isPrimary ? 0.92 : 0.62)),
+                style: StrokeStyle(lineWidth: isPrimary ? 1.7 : 1.1, lineCap: .round)
+            )
+            drawNode(
+                display,
+                color: theme.accents.highlight,
+                opacity: isPrimary ? 1.0 : 0.82,
+                radiusScale: isPrimary ? 1.32 : 1.14,
+                isFocused: false,
+                in: &context
+            )
+        }
+    }
+
+    private func drawAgentPresenceOverlay(_ layout: Graph2DLayout, presence: GraphAgentPresence?, in context: inout GraphicsContext) {
+        guard let presence, !presence.isEmpty else { return }
+        let visibleNodeIDs = presence.nodeIDs.intersection(layout.nodeByID.keys)
+        guard !visibleNodeIDs.isEmpty else { return }
+
+        for edge in layout.traceEdges(highlightedNodeIDs: visibleNodeIDs) {
+            var path = Path()
+            path.move(to: edge.source.point)
+            path.addLine(to: edge.target.point)
+            context.stroke(
+                path,
+                with: .color(theme.accents.ai.opacity(0.36)),
+                style: StrokeStyle(lineWidth: 4.4, lineCap: .round)
+            )
+            context.stroke(
+                path,
+                with: .color(theme.accents.ai.opacity(0.78)),
+                style: StrokeStyle(lineWidth: 1.25, lineCap: .round, dash: [5, 4])
+            )
+        }
+
+        for nodeID in visibleNodeIDs.sorted() {
+            guard let display = layout.nodeByID[nodeID] else { continue }
+            let isPrimary = presence.primaryNodeIDs.contains(nodeID)
+            let radius = display.radius * (isPrimary ? 3.05 : 2.3)
+            let halo = Path(ellipseIn: CGRect(x: display.point.x - radius, y: display.point.y - radius, width: radius * 2, height: radius * 2))
+            context.fill(halo, with: .color(theme.accents.ai.opacity(isPrimary ? 0.20 : 0.12)))
+            context.stroke(
+                halo,
+                with: .color(theme.accents.ai.opacity(isPrimary ? 0.90 : 0.58)),
+                style: StrokeStyle(lineWidth: isPrimary ? 1.7 : 1.0, lineCap: .round, dash: isPrimary ? [] : [3, 4])
+            )
+            drawNode(
+                display,
+                color: theme.accents.ai,
+                opacity: isPrimary ? 1.0 : 0.84,
+                radiusScale: isPrimary ? 1.30 : 1.12,
+                isFocused: false,
+                in: &context
+            )
         }
     }
 
@@ -426,14 +603,23 @@ private struct GraphMapHeader: View {
 
 private struct GraphLegend: View {
     @Environment(\.memoryTheme) private var theme
+    let hasTraceHighlight: Bool
+    let hasAgentPresence: Bool
 
     var body: some View {
         HStack(spacing: 10) {
             legendDot("cluster hue", theme.accents.ai)
             legendDot("center = bright", theme.accents.highlight)
-            Text("blend = between")
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(theme.ink.tertiary)
+            if hasAgentPresence {
+                legendDot("Agent live", theme.accents.ai)
+            }
+            if hasTraceHighlight {
+                legendDot("used in answer", theme.accents.highlight)
+            } else {
+                Text("blend = between")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(theme.ink.tertiary)
+            }
         }
         .padding(.horizontal, 10)
         .frame(height: 28)
@@ -456,23 +642,25 @@ private struct NodeLabel: View {
     @Environment(\.memoryTheme) private var theme
     let display: GraphDisplayNode
     let selected: Bool
+    let traced: Bool
+    let agentActive: Bool
     let scale: CGFloat
 
     var body: some View {
         Text(label)
-            .font(.system(size: selected ? 10.5 : fontSize, weight: selected || display.node.kind == .region ? .medium : .regular, design: .monospaced))
-            .foregroundStyle(selected ? theme.ink.primary : theme.ink.secondary)
+            .font(.system(size: selected ? 10.5 : fontSize, weight: selected || traced || agentActive || display.node.kind == .region ? .medium : .regular, design: .monospaced))
+            .foregroundStyle(selected ? theme.ink.primary : (agentActive ? theme.accents.ai : (traced ? theme.accents.highlight : theme.ink.secondary)))
             .lineLimit(1)
-            .padding(.horizontal, selected ? 7 : 0)
-            .padding(.vertical, selected ? 3 : 0)
+            .padding(.horizontal, selected || traced || agentActive ? 7 : 0)
+            .padding(.vertical, selected || traced || agentActive ? 3 : 0)
             .background {
-                if selected {
+                if selected || traced || agentActive {
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(theme.surfaces.surface1.opacity(0.9))
-                        .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
+                        .fill(theme.surfaces.surface1.opacity(selected ? 0.9 : 0.78))
+                        .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(agentActive ? theme.accents.ai.opacity(0.48) : (traced ? theme.accents.highlight.opacity(0.42) : theme.surfaces.rule), lineWidth: 0.5))
                 }
             }
-            .frame(maxWidth: selected ? 220 : 150)
+            .frame(maxWidth: selected ? 220 : (agentActive || traced ? 190 : 150))
     }
 
     private var fontSize: CGFloat {
@@ -665,6 +853,7 @@ private struct Graph2DLayout {
     let nodeByID: [String: GraphDisplayNode]
     let territoryByID: [String: GraphTerritory]
     let colorByNodeID: [String: Color]
+    let allEdges: [GraphDisplayEdge]
     let ambientEdges: [GraphDisplayEdge]
     let focusEdgesByNodeID: [String: [GraphDisplayEdge]]
     let connectedNodeIDsByFocusID: [String: Set<String>]
@@ -778,6 +967,7 @@ private struct Graph2DLayout {
             nodeByID: nodeByID,
             territoryByID: territoryByID,
             colorByNodeID: colorByNodeID,
+            allEdges: displayEdges,
             ambientEdges: Array(ambientEdges),
             focusEdgesByNodeID: focusEdgesByNodeID,
             connectedNodeIDsByFocusID: connectedNodeIDsByFocusID,
@@ -785,13 +975,19 @@ private struct Graph2DLayout {
         )
     }
 
-    func labelledNodes(focusID: String?, scale: CGFloat) -> [GraphDisplayNode] {
+    func labelledNodes(focusID: String?, traceHighlight: GraphTraceHighlight?, agentPresence: GraphAgentPresence?, scale: CGFloat) -> [GraphDisplayNode] {
         var labelled = baseLabelledNodes
         if scale >= 1.25 {
             labelled.append(contentsOf: zoomLabels(for: .document, limit: scale >= 1.7 ? 48 : 18))
         }
         if scale >= 2.0 {
             labelled.append(contentsOf: zoomLabels(for: .chunk, limit: scale >= 2.55 ? 90 : 36))
+        }
+        if let traceHighlight {
+            labelled.append(contentsOf: traceHighlight.nodeIDs.compactMap { nodeByID[$0] })
+        }
+        if let agentPresence {
+            labelled.append(contentsOf: agentPresence.nodeIDs.compactMap { nodeByID[$0] })
         }
 
         guard let focusID, let focusNode = nodeByID[focusID] else {
@@ -847,6 +1043,23 @@ private struct Graph2DLayout {
 
     func connectedNodeIDs(focusID: String) -> Set<String>? {
         connectedNodeIDsByFocusID[focusID] ?? (nodeByID[focusID] == nil ? nil : [focusID])
+    }
+
+    func traceEdges(highlightedNodeIDs: Set<String>) -> [GraphDisplayEdge] {
+        let direct = allEdges.filter { edge in
+            highlightedNodeIDs.contains(edge.edge.source) && highlightedNodeIDs.contains(edge.edge.target)
+        }
+        if !direct.isEmpty {
+            return Array(direct.sorted { $0.edge.weight == $1.edge.weight ? $0.id < $1.id : $0.edge.weight > $1.edge.weight }.prefix(48))
+        }
+
+        return allEdges
+            .filter { edge in
+                highlightedNodeIDs.contains(edge.edge.source) || highlightedNodeIDs.contains(edge.edge.target)
+            }
+            .sorted { $0.edge.weight == $1.edge.weight ? $0.id < $1.id : $0.edge.weight > $1.edge.weight }
+            .prefix(36)
+            .map { $0 }
     }
 
     private func territoryKey(for node: GraphNode) -> String {
