@@ -11,6 +11,17 @@ pub struct MemoryQueryEngine;
 
 impl Router for MemoryQueryEngine {
     fn route(&self, memory_map: &MemoryMap, request: &QueryRequest) -> RoutedQuery {
+        self.route_with_region_scores(memory_map, request, &HashMap::new())
+    }
+}
+
+impl MemoryQueryEngine {
+    fn route_with_region_scores(
+        &self,
+        memory_map: &MemoryMap,
+        request: &QueryRequest,
+        semantic_scores: &HashMap<RegionId, f32>,
+    ) -> RoutedQuery {
         let tokens = tokenize(&request.text);
         let mut scored = memory_map
             .entries
@@ -39,12 +50,26 @@ impl Router for MemoryQueryEngine {
                         matched_terms.push(token.clone());
                     }
                 }
+                let semantic = semantic_scores
+                    .get(&entry.region_id)
+                    .copied()
+                    .unwrap_or_default()
+                    .max(0.0);
+                score += semantic * 3.0;
+                let reason = if semantic > 0.0 {
+                    format!(
+                        "{} matched route score {score:.2} (semantic {semantic:.2})",
+                        entry.label
+                    )
+                } else {
+                    format!("{} matched route score {score:.1}", entry.label)
+                };
                 RouteCandidate {
                     region_id: entry.region_id.clone(),
                     label: entry.label.clone(),
                     score,
                     matched_terms,
-                    reason: format!("{} matched route score {score:.1}", entry.label),
+                    reason,
                 }
             })
             .collect::<Vec<_>>();
@@ -80,9 +105,7 @@ impl Router for MemoryQueryEngine {
             },
         }
     }
-}
 
-impl MemoryQueryEngine {
     pub fn execute<E: Embedder>(
         &self,
         embedder: &E,
@@ -90,11 +113,22 @@ impl MemoryQueryEngine {
         ann_index: &RegionAnnIndex,
         request: QueryRequest,
     ) -> anyhow::Result<QueryResult> {
-        let routed = self.route(
+        let query_embedding = embedder.embed(&request.text)?;
+        let semantic_scores = memory
+            .regions
+            .iter()
+            .map(|region| {
+                (
+                    region.id.clone(),
+                    cosine_similarity(&query_embedding, &region.centroid),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let routed = self.route_with_region_scores(
             memory.memory_map.as_ref().expect("memory map missing"),
             &request,
+            &semantic_scores,
         );
-        let query_embedding = embedder.embed(&request.text)?;
         let chunks_by_id = memory
             .chunks
             .iter()
@@ -272,6 +306,7 @@ fn _region_score(query_embedding: &[f32], region: &Region) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::Indexer;
 
     fn entry(region_id: &str, label: &str, summary: &str) -> MapEntry {
         MapEntry {
@@ -320,5 +355,127 @@ mod tests {
             .next_steps
             .iter()
             .any(|step| step.contains("memory_search")));
+    }
+
+    #[test]
+    fn execute_routes_by_region_centroid_when_map_words_do_not_match() {
+        let embedder = crate::index::HashEmbedder::default();
+        let target_text = "Plantar fascia rehabilitation uses calf stretching and arch loading.";
+        let distractor_text = "Soup recipes use onion stock and gentle simmering.";
+        let target_embedding = embedder.embed(target_text).expect("target embedding");
+        let distractor_embedding = embedder
+            .embed(distractor_text)
+            .expect("distractor embedding");
+        let memory = PersistedMemory {
+            documents: vec![
+                Document {
+                    id: "doc-target".into(),
+                    title: "Foot note".into(),
+                    text: target_text.into(),
+                    metadata: BTreeMap::new(),
+                    source_anchor: None,
+                    content_hash: None,
+                    parser_version: None,
+                },
+                Document {
+                    id: "doc-distractor".into(),
+                    title: "Kitchen note".into(),
+                    text: distractor_text.into(),
+                    metadata: BTreeMap::new(),
+                    source_anchor: None,
+                    content_hash: None,
+                    parser_version: None,
+                },
+            ],
+            chunks: vec![
+                Chunk {
+                    id: "chunk-target".into(),
+                    document_id: "doc-target".into(),
+                    region_id: "region-hidden".into(),
+                    ordinal: 0,
+                    start: 0,
+                    end: target_text.chars().count(),
+                    text: target_text.into(),
+                    metadata: BTreeMap::new(),
+                    source_anchor: None,
+                    embedding: target_embedding.clone(),
+                    embedding_text_hash: None,
+                    embedding_provider: None,
+                    embedding_model: None,
+                    embedding_endpoint: None,
+                    embedding_dimension: None,
+                    chunking_version: None,
+                },
+                Chunk {
+                    id: "chunk-distractor".into(),
+                    document_id: "doc-distractor".into(),
+                    region_id: "region-distractor".into(),
+                    ordinal: 0,
+                    start: 0,
+                    end: distractor_text.chars().count(),
+                    text: distractor_text.into(),
+                    metadata: BTreeMap::new(),
+                    source_anchor: None,
+                    embedding: distractor_embedding.clone(),
+                    embedding_text_hash: None,
+                    embedding_provider: None,
+                    embedding_model: None,
+                    embedding_endpoint: None,
+                    embedding_dimension: None,
+                    chunking_version: None,
+                },
+            ],
+            regions: vec![
+                Region {
+                    id: "region-hidden".into(),
+                    label: "Archive A".into(),
+                    summary: "Opaque bucket".into(),
+                    filters: BTreeMap::new(),
+                    chunk_ids: vec!["chunk-target".into()],
+                    centroid: target_embedding,
+                    neighbors: Vec::new(),
+                },
+                Region {
+                    id: "region-distractor".into(),
+                    label: "Archive B".into(),
+                    summary: "Opaque bucket".into(),
+                    filters: BTreeMap::new(),
+                    chunk_ids: vec!["chunk-distractor".into()],
+                    centroid: distractor_embedding,
+                    neighbors: Vec::new(),
+                },
+            ],
+            links: Vec::new(),
+            memory_map: Some(MemoryMap {
+                budget_bytes: 2048,
+                serialized: String::new(),
+                entries: vec![
+                    entry("region-distractor", "Archive B", "Opaque bucket"),
+                    entry("region-hidden", "Archive A", "Opaque bucket"),
+                ],
+            }),
+        };
+        let ann = crate::index::RegionIndexer.rebuild(&memory.chunks, &memory.regions);
+
+        let result = MemoryQueryEngine
+            .execute(
+                &embedder,
+                &memory,
+                &ann,
+                QueryRequest {
+                    text: "plantar fascia".into(),
+                    filters: BTreeMap::new(),
+                    max_regions: 1,
+                    max_chunks: 3,
+                },
+            )
+            .expect("query");
+
+        assert_eq!(result.routed.region_ids, vec!["region-hidden"]);
+        assert!(result.routed.rationale.contains("semantic"));
+        assert_eq!(
+            result.hits.first().map(|hit| hit.chunk_id.as_str()),
+            Some("chunk-target")
+        );
     }
 }

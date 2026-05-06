@@ -157,7 +157,7 @@ Do not optimize for dumping whole corpora into prompt context. Optimize for surg
 - MLX adapter preparation manifests include base model, source dataset hash, prepared dataset hash, record counts, status, and iteration target. Freshness detection expects manifests under the store's `adapters/` directory.
 - Compiler-generated brain artifacts remain searchable as derived memories, but the compiler now filters its own prior `memory-compiler` artifacts out of the next source training set to avoid self-feedback. Remaining drawback: this is an in-process filtered compile view, not a persisted source/derived corpus boundary.
 - True latent RecursiveLink-style planner/critic/retriever/solver loops are not implemented; current recursion is trace/text/tool mediated.
-- Routing now returns a structured `RoutePlan` with candidate regions, scores, matched terms, and suggested next tool steps. It is still lexical over `MemoryMap`; it needs embedding-aware routing and a stronger recursive-agent policy contract.
+- Routing now returns a structured `RoutePlan` with candidate regions, scores, matched terms, and suggested next tool steps. Runtime query execution now blends lexical `MemoryMap` matches with embedding similarity against region centroids so semantically relevant regions can be selected even when compact map wording is weak. Remaining drawback: trace-only routing is still lexical, centroid scoring is still coarse, and the system still needs a stronger recursive-agent policy contract.
 - Vector search is in-memory and approximate, not yet a scalable ANN store.
 - Source anchors target extracted text offsets, not exact rendered PDF or original-file deep links.
 - Original source files are referenced by path but not managed as durable artifacts.
@@ -181,7 +181,8 @@ Do not optimize for dumping whole corpora into prompt context. Optimize for surg
 
 ## Recent Improvements
 
-- 2026-05-06: `RoutedQuery` now carries a typed route plan for LLM clients: ranked region candidates, lexical matched terms, per-candidate reasons, and next tool steps that preserve the route -> search -> open/surf -> expand/cite workflow. Swift mirror models were updated to keep the FFI/UI contract aligned. Remaining drawback: candidate scoring is still lexical and string-contained, so semantically related regions without shared words can be missed.
+- 2026-05-06: `RoutedQuery` now carries a typed route plan for LLM clients: ranked region candidates, lexical matched terms, per-candidate reasons, and next tool steps that preserve the route -> search -> open/surf -> expand/cite workflow. Swift mirror models were updated to keep the FFI/UI contract aligned.
+- 2026-05-06: Runtime query routing now embeds the user query before route selection and mixes region centroid similarity into `RouteCandidate` scores. Added a regression test proving a query can route into the correct region even when `MemoryMap` labels and summaries do not share query terms. Remaining drawback: `trace` and the public `Router` trait remain lexical compatibility paths, and centroid-only semantic routing is not yet a full learned cortex policy.
 
 ## Validation
 
