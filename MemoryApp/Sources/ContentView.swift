@@ -1247,6 +1247,8 @@ private struct ModelInspector: View {
                     .labelsHidden()
                     Toggle("Recursive Cortex", isOn: $appState.modelConfig.cortexEnabled)
                         .toggleStyle(.switch)
+                    Toggle("Latent RecursiveMAS Research", isOn: $appState.modelConfig.latentRecursiveEnabled)
+                        .toggleStyle(.switch)
                     Stepper("Cortex Rounds \(appState.modelConfig.cortexRounds)", value: $appState.modelConfig.cortexRounds, in: 1...4)
                     LabeledField("Critic Model", text: stringBinding($appState.modelConfig.criticModel))
                     LabeledField("Critic Endpoint", text: stringBinding($appState.modelConfig.criticEndpoint))

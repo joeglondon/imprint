@@ -49,6 +49,10 @@ fn default_cortex_enabled() -> bool {
     true
 }
 
+fn default_latent_recursive_enabled() -> bool {
+    crate::recursive::LATENT_RECURSION_DEFAULT_ENABLED
+}
+
 fn default_cortex_rounds() -> usize {
     3
 }
@@ -116,6 +120,8 @@ pub struct ModelConfig {
     pub runtime_preset: ModelRuntimePreset,
     #[serde(default = "default_cortex_enabled")]
     pub cortex_enabled: bool,
+    #[serde(default = "default_latent_recursive_enabled")]
+    pub latent_recursive_enabled: bool,
     #[serde(default = "default_cortex_rounds")]
     pub cortex_rounds: usize,
     #[serde(default)]
@@ -158,6 +164,8 @@ pub struct ModelConnectionTestRequest {
     pub runtime_preset: ModelRuntimePreset,
     #[serde(default = "default_cortex_enabled")]
     pub cortex_enabled: bool,
+    #[serde(default = "default_latent_recursive_enabled")]
+    pub latent_recursive_enabled: bool,
     #[serde(default = "default_cortex_rounds")]
     pub cortex_rounds: usize,
     #[serde(default)]
@@ -1451,6 +1459,7 @@ pub fn load_model_config(store_root: &Path) -> anyhow::Result<ModelConfig> {
             adapter_activation_policy: default_adapter_activation_policy(),
             runtime_preset: ModelRuntimePreset::Mlx,
             cortex_enabled: default_cortex_enabled(),
+            latent_recursive_enabled: default_latent_recursive_enabled(),
             cortex_rounds: default_cortex_rounds(),
             critic_model: Some(DEFAULT_PLANNER_MODEL.into()),
             critic_endpoint: None,
@@ -4663,6 +4672,7 @@ mod tests {
                 adapter_activation_policy: "automatic".into(),
                 runtime_preset: ModelRuntimePreset::CustomOpenAi,
                 cortex_enabled: true,
+                latent_recursive_enabled: false,
                 cortex_rounds: 3,
                 critic_model: Some(HASH_EMBEDDING_MODEL.into()),
                 critic_endpoint: Some(DEFAULT_LOCAL_ENDPOINT.into()),
@@ -4854,6 +4864,43 @@ mod tests {
     }
 
     #[test]
+    fn ingest_paths_persists_first_class_source_artifacts() {
+        let root = temp_store_root("source-artifact");
+        let input = root.join("artifact-note.md");
+        fs::write(
+            &input,
+            "# Provenance\n\nSource artifacts preserve original identity and import provenance.",
+        )
+        .expect("write input");
+
+        ingest_paths(&root, std::slice::from_ref(&input)).expect("ingest");
+        let artifacts = FileMemoryStore::new(&root)
+            .list_source_artifacts()
+            .expect("source artifacts");
+        let local_artifacts = artifacts
+            .iter()
+            .filter(|artifact| artifact.source_type == "local_file")
+            .collect::<Vec<_>>();
+        assert_eq!(local_artifacts.len(), 1);
+        let artifact = local_artifacts[0];
+        assert_eq!(artifact.source_type, "local_file");
+        assert_eq!(artifact.storage_mode, SourceStorageMode::ReferenceInPlace);
+        assert_eq!(artifact.original_path, input.display().to_string());
+        assert_eq!(
+            artifact.current_path.as_deref(),
+            Some(input.to_str().unwrap())
+        );
+        assert!(!artifact.file_hash.is_empty());
+        assert_eq!(artifact.parser_version, crate::ingest::PARSER_VERSION);
+        assert!(artifact.imported_at > 0);
+        assert!(artifact
+            .provenance
+            .source_refs
+            .iter()
+            .any(|source_ref| source_ref == &input.display().to_string()));
+    }
+
+    #[test]
     fn pdf_imports_text_and_reports_invalid_pdf_skips() {
         let root = temp_store_root("pdf");
         let pdf_path = root.join("memory.pdf");
@@ -5004,6 +5051,7 @@ mod tests {
             adapter_activation_policy: "manual".into(),
             runtime_preset: ModelRuntimePreset::CustomOpenAi,
             cortex_enabled: true,
+            latent_recursive_enabled: false,
             cortex_rounds: 2,
             critic_model: Some("critic-test".into()),
             critic_endpoint: Some("http://critic.example.com/v1".into()),
@@ -5041,6 +5089,7 @@ mod tests {
         );
         assert_eq!(loaded.adapter_activation_policy, "manual");
         assert!(loaded.cortex_enabled);
+        assert!(!loaded.latent_recursive_enabled);
         assert_eq!(loaded.cortex_rounds, 2);
         assert_eq!(loaded.critic_model.as_deref(), Some("critic-test"));
         assert_eq!(

@@ -20,7 +20,7 @@ const TRAINING_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_ADAPTER_ITERS: usize = 100;
 const DEFAULT_ADAPTER_TRAINING_TIMEOUT_MILLIS: u64 = 30 * 60 * 1000;
 pub const DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE: f64 = 0.8;
-const TRAINING_TASKS: [&str; 11] = [
+const TRAINING_TASKS: [&str; 14] = [
     "query_to_region",
     "query_to_source_family",
     "query_to_tool_plan",
@@ -32,6 +32,9 @@ const TRAINING_TASKS: [&str; 11] = [
     "recursive_role_trace",
     "recursive_sufficiency_eval",
     "recursive_efficiency_eval",
+    "recursive_region_selection_eval",
+    "recursive_hallucination_eval",
+    "recursive_token_usage_eval",
 ];
 
 #[derive(Debug, Clone)]
@@ -1328,6 +1331,19 @@ fn eval_record_passes_gate(record: &serde_json::Value) -> bool {
             target.contains("efficiency:")
                 && target.contains("tool_calls:")
                 && target.contains("source_grounded:")
+        }
+        "recursive_region_selection_eval" => {
+            target.contains("region_source_selection:")
+                && (target.contains("selected_refs:") || target.contains("next_action:"))
+        }
+        "recursive_hallucination_eval" => {
+            target.contains("hallucination_risk:")
+                && (target.contains("source_anchored") || target.contains("caveat_or_refuse"))
+        }
+        "recursive_token_usage_eval" => {
+            target.contains("token_usage:")
+                && target.contains("baseline_tool_calls:")
+                && target.contains("fallback:text_tool")
         }
         _ => false,
     }

@@ -101,6 +101,7 @@ struct ModelConfig: Codable, Equatable {
     var adapterActivationPolicy: String
     var runtimePreset: ModelRuntimePreset
     var cortexEnabled: Bool
+    var latentRecursiveEnabled: Bool
     var cortexRounds: Int
     var criticModel: String?
     var criticEndpoint: String?
@@ -126,6 +127,7 @@ struct ModelConnectionTestRequest: Codable {
     var adapterActivationPolicy: String
     var runtimePreset: ModelRuntimePreset
     var cortexEnabled: Bool
+    var latentRecursiveEnabled: Bool
     var cortexRounds: Int
     var criticModel: String?
     var criticEndpoint: String?
@@ -154,6 +156,25 @@ struct SourceAnchor: Codable, Equatable, Identifiable {
     var page: Int?
     var section: String?
     var parserVersion: UInt32
+}
+
+enum SourceStorageMode: String, Codable, Equatable {
+    case referenceInPlace = "ReferenceInPlace"
+    case managedCopy = "ManagedCopy"
+    case external = "External"
+    case generated = "Generated"
+}
+
+struct SourceArtifact: Codable, Equatable, Identifiable {
+    var id: String
+    var sourceType: String
+    var storageMode: SourceStorageMode
+    var originalPath: String
+    var currentPath: String?
+    var fileHash: String
+    var parserVersion: UInt32
+    var importedAt: UInt64
+    var provenance: ProvenanceRecord
 }
 
 struct ImportResult: Codable, Equatable {

@@ -58,6 +58,12 @@ def main() -> None:
             correct += 1
         elif record.get("task") == "recursive_efficiency_eval" and "efficiency:" in target:
             correct += 1
+        elif record.get("task") == "recursive_region_selection_eval" and "region_source_selection:" in target:
+            correct += 1
+        elif record.get("task") == "recursive_hallucination_eval" and "hallucination_risk:" in target:
+            correct += 1
+        elif record.get("task") == "recursive_token_usage_eval" and "token_usage:" in target:
+            correct += 1
     print(json.dumps({
         "records": len(eval_records),
         "baseline_accuracy": round(correct / len(eval_records), 4),

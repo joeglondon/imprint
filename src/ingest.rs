@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CHUNKING_VERSION: u32 = 2;
 pub const PARSER_VERSION: u32 = 1;
@@ -358,7 +359,15 @@ fn document_from_parsed(
     metadata.insert("path".into(), path.display().to_string());
     metadata.insert("source".into(), "local".into());
     metadata.insert("content_hash".into(), content_hash.clone());
+    metadata.insert("file_hash".into(), content_hash.clone());
     metadata.insert("parser_version".into(), PARSER_VERSION.to_string());
+    metadata.insert(
+        "source_artifact_id".into(),
+        source_artifact_id(&content_hash),
+    );
+    metadata.insert("source_type".into(), "local_file".into());
+    metadata.insert("storage_mode".into(), "reference_in_place".into());
+    metadata.insert("imported_at".into(), now_millis().to_string());
     metadata.insert(
         PAGE_SPANS_KEY.into(),
         serde_json::to_string(&page_spans).unwrap_or_else(|_| "[]".into()),
@@ -447,6 +456,17 @@ fn source_anchor_for_chunk(
         section: span_value_at::<String>(&document.metadata, SECTION_SPANS_KEY, start),
         parser_version,
     })
+}
+
+fn source_artifact_id(file_hash: &str) -> String {
+    format!("source-artifact:{file_hash}")
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn span_value_at<T>(metadata: &BTreeMap<String, String>, key: &str, offset: usize) -> Option<T>

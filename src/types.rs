@@ -18,6 +18,29 @@ pub type MemoryAccessId = String;
 pub type AuditEventId = String;
 pub type CortexIndexId = String;
 pub type CortexAdapterJobId = String;
+pub type SourceArtifactId = String;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SourceStorageMode {
+    ReferenceInPlace,
+    ManagedCopy,
+    External,
+    Generated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceArtifact {
+    pub id: SourceArtifactId,
+    pub source_type: String,
+    pub storage_mode: SourceStorageMode,
+    pub original_path: String,
+    #[serde(default)]
+    pub current_path: Option<String>,
+    pub file_hash: String,
+    pub parser_version: u32,
+    pub imported_at: u64,
+    pub provenance: ProvenanceRecord,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Document {

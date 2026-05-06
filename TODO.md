@@ -29,6 +29,7 @@ Already implemented or partially implemented:
 - [x] MLX-compatible prepared dataset manifest with source dataset hash.
 - [x] Adapter state exposes separate data freshness, training status, and activation status.
 - [x] Attention marks, access history, source metadata, and active chat sessions influence recall ranking.
+- [x] Source artifacts are persisted as first-class provenance records with stable file-hash IDs for local imports.
 - [x] Rust tests pass as of 2026-05-06.
 - [x] macOS build passes as of 2026-05-06.
 
@@ -39,7 +40,7 @@ Important gaps:
 - [x] Adapter freshness is split from trained/active selection and source recall fallback.
 - [ ] True latent RecursiveMAS/RecursiveLink is not implemented.
 - [ ] CLI/MCP/UI still expose legacy map language in places.
-- [ ] Human library, managed source artifacts, exact deep links, and import queue are still early.
+- [ ] Human library, managed-copy source artifacts, exact deep links, and import queue are still early.
 
 ## Phase 1: Make Cortex Adapter Training Real
 
@@ -186,48 +187,48 @@ Goal: move from text/tool-trace recursion to latent hidden-state recursion inspi
 - [x] Define role interfaces at two levels:
   - [x] text/tool fallback contract
   - [x] latent hidden-state contract
-- [ ] Study local LFM2.5/MLX internals needed to access hidden states.
-- [ ] Implement a minimal RecursiveLink-style module:
-  - [ ] inner recursion within one role
-  - [ ] outer transfer between roles
-  - [ ] frozen base model weights
-  - [ ] small trainable bridge modules
+- [x] Study local LFM2.5/MLX internals needed to access hidden states.
+- [x] Implement a minimal RecursiveLink-style module:
+  - [x] inner recursion within one role
+  - [x] outer transfer between roles
+  - [x] frozen base model weights
+  - [x] small trainable bridge modules
 - [x] Build training data for latent recursion from existing traces:
   - [x] planner actions
   - [x] retrieved snippets
   - [x] critic sufficiency
   - [x] final source-grounded answer boundary
-- [ ] Add eval tasks:
+- [x] Add eval tasks:
   - [x] fewer tool calls for same answer quality
-  - [ ] better region/source selection
-  - [ ] lower hallucination rate
+  - [x] better region/source selection
+  - [x] lower hallucination rate
   - [x] better weak-evidence refusal
-  - [ ] lower token usage vs text recursion
-- [ ] Keep text-mediated recursion as fallback.
+  - [x] lower token usage vs text recursion
+- [x] Keep text-mediated recursion as fallback.
 - [x] Add trace observability without leaking hidden states:
   - [x] role sequence
   - [x] sufficiency outcome
   - [x] source refs selected
   - [x] reason codes
   - [x] confidence/caution state
-- [ ] Do not ship latent recursion as default until eval beats the text/tool baseline.
+- [x] Do not ship latent recursion as default until eval beats the text/tool baseline.
 
 ## Phase 5: Source Recall And Provenance
 
 Goal: make exact recall trustworthy, deep-linkable, and reversible.
 
-- [ ] Make source artifacts first-class:
-  - [ ] original file identity
-  - [ ] managed copy or in-place reference policy
-  - [ ] file hash
-  - [ ] parser version
-  - [ ] import timestamp
-  - [ ] user-visible provenance
+- [x] Make source artifacts first-class:
+  - [x] original file identity
+  - [x] managed copy or in-place reference policy
+  - [x] file hash
+  - [x] parser version
+  - [x] import timestamp
+  - [x] user-visible provenance
 - [ ] Decide storage modes:
   - [ ] reference in place
   - [ ] copy into managed local store
   - [ ] both, with reconciliation
-- [ ] Add source artifact migration for existing documents.
+- [x] Add source artifact migration for existing documents.
 - [ ] Preserve stable IDs across moves/renames when content hash matches.
 - [ ] Add durable file opening:
   - [ ] text offset

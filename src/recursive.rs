@@ -2,6 +2,8 @@ use crate::types::{ChatContextSnippet, ChatContextTrace};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub const LATENT_RECURSION_DEFAULT_ENABLED: bool = false;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RecursiveRole {
     Planner,
@@ -67,6 +69,91 @@ pub struct RecursiveTraceDatasetExample {
     pub source_grounded: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HiddenStateAccessFinding {
+    pub topic: String,
+    pub finding: String,
+    pub implementation_note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MlxHiddenStateAccessStudy {
+    pub target_model_family: String,
+    pub runtime: String,
+    pub status: String,
+    pub findings: Vec<HiddenStateAccessFinding>,
+    pub prototype_plan: Vec<String>,
+    pub production_blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecursiveLinkConfig {
+    pub hidden_width: usize,
+    pub bridge_rank: usize,
+    pub inner_steps: usize,
+    pub outer_steps: usize,
+    pub roles: Vec<RecursiveRole>,
+    pub frozen_base_model: bool,
+    pub trainable_component: String,
+    pub enabled_by_default: bool,
+    pub fallback: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecursiveLinkBridge {
+    pub role: RecursiveRole,
+    pub module_name: String,
+    pub input_width: usize,
+    pub output_width: usize,
+    pub rank: usize,
+    pub trainable_parameters: usize,
+    pub frozen_base_model: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecursiveLinkModule {
+    pub config: RecursiveLinkConfig,
+    pub bridges: Vec<RecursiveLinkBridge>,
+    pub inner_transfer: String,
+    pub outer_transfer: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecursiveLatentStep {
+    pub role: RecursiveRole,
+    pub outer_step: usize,
+    pub inner_step: usize,
+    pub input_state_ref: String,
+    pub output_state_ref: String,
+    pub observable_reason_code: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecursiveLatentTrace {
+    pub status: String,
+    pub enabled_by_default: bool,
+    pub fallback_contract: String,
+    pub steps: Vec<RecursiveLatentStep>,
+    pub source_refs_selected: Vec<String>,
+    pub hidden_states_redacted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecursiveMasEvalReport {
+    pub status: String,
+    pub text_tool_baseline_tool_calls: usize,
+    pub latent_estimated_tool_calls: usize,
+    pub text_tool_baseline_tokens: usize,
+    pub latent_estimated_tokens: usize,
+    pub better_region_source_selection: bool,
+    pub lower_hallucination_rate: bool,
+    pub better_weak_evidence_refusal: bool,
+    pub lower_token_usage: bool,
+    pub same_answer_quality: bool,
+    pub may_enable_latent_default: bool,
+    pub reason: String,
+}
+
 pub fn text_tool_role_contracts() -> Vec<TextToolRoleContract> {
     vec![
         TextToolRoleContract {
@@ -119,6 +206,48 @@ pub fn text_tool_role_contracts() -> Vec<TextToolRoleContract> {
     ]
 }
 
+pub fn lfm25_mlx_hidden_state_study() -> MlxHiddenStateAccessStudy {
+    MlxHiddenStateAccessStudy {
+        target_model_family: "LiquidAI/LFM2.5 MLX checkpoints".into(),
+        runtime: "mlx-lm local Python runtime".into(),
+        status: "research_only_api_shape_identified".into(),
+        findings: vec![
+            HiddenStateAccessFinding {
+                topic: "adapter entrypoint".into(),
+                finding: "The current trainer invokes `python -m mlx_lm lora`, which is a CLI path for LoRA training and does not expose per-token hidden states to Rust.".into(),
+                implementation_note: "Keep training/export unchanged; hidden-state recursion needs a separate Python research runner that imports MLX model modules directly.".into(),
+            },
+            HiddenStateAccessFinding {
+                topic: "hidden-state access".into(),
+                finding: "A latent prototype should call the loaded MLX model forward path directly and request or intercept layer outputs, instead of using OpenAI-compatible chat completions.".into(),
+                implementation_note: "The Rust side should treat hidden states as opaque handles/hashes and only persist observable role events, source refs, and reason codes.".into(),
+            },
+            HiddenStateAccessFinding {
+                topic: "LoRA compatibility".into(),
+                finding: "The cortex adapter can remain a normal MLX-LM LoRA artifact; RecursiveLink bridges are a separate small trainable module around frozen base/model adapter activations.".into(),
+                implementation_note: "Do not merge RecursiveLink bridge weights into the personal cortex adapter until eval proves the latent loop beats text/tool recursion.".into(),
+            },
+            HiddenStateAccessFinding {
+                topic: "production boundary".into(),
+                finding: "OpenAI-compatible, Ollama, and llama.cpp endpoints cannot be assumed to return hidden states.".into(),
+                implementation_note: "Runtime selection must fall back to text/tool recursion unless the MLX research runner explicitly reports hidden-state support.".into(),
+            },
+        ],
+        prototype_plan: vec![
+            "Load the MLX checkpoint and active cortex LoRA in Python.".into(),
+            "Run role prompts through the frozen model and capture chosen layer hidden states as opaque tensors.".into(),
+            "Apply a small role-specific RecursiveLink bridge for inner role refinement.".into(),
+            "Transfer the projected hidden state to the next role bridge for outer planner/retriever/critic/solver flow.".into(),
+            "Return only observable trace projections to Rust: role sequence, source refs, sufficiency, reason codes, and caution state.".into(),
+        ],
+        production_blockers: vec![
+            "Need a checked-in Python research runner with MLX hidden-state extraction tests.".into(),
+            "Need measured eval wins on region/source selection, hallucination, weak-evidence refusal, and token/tool efficiency.".into(),
+            "Need a no-hidden-state fallback for all non-MLX runtimes.".into(),
+        ],
+    }
+}
+
 pub fn latent_role_contracts() -> Vec<LatentRoleContract> {
     text_tool_role_contracts()
         .into_iter()
@@ -143,6 +272,164 @@ pub fn latent_role_contracts() -> Vec<LatentRoleContract> {
             ],
         })
         .collect()
+}
+
+pub fn default_recursive_link_config(hidden_width: usize) -> RecursiveLinkConfig {
+    RecursiveLinkConfig {
+        hidden_width,
+        bridge_rank: 8,
+        inner_steps: 2,
+        outer_steps: 4,
+        roles: vec![
+            RecursiveRole::Planner,
+            RecursiveRole::Retriever,
+            RecursiveRole::Critic,
+            RecursiveRole::Solver,
+            RecursiveRole::MemorySteward,
+        ],
+        frozen_base_model: true,
+        trainable_component: "role-local low-rank RecursiveLink bridges only".into(),
+        enabled_by_default: LATENT_RECURSION_DEFAULT_ENABLED,
+        fallback: "text_tool_recursion".into(),
+    }
+}
+
+pub fn minimal_recursive_link_module(config: RecursiveLinkConfig) -> RecursiveLinkModule {
+    let bridges = config
+        .roles
+        .iter()
+        .map(|role| {
+            let module_name = format!("recursive_link_{}_bridge", role.as_str());
+            RecursiveLinkBridge {
+                role: *role,
+                module_name,
+                input_width: config.hidden_width,
+                output_width: config.hidden_width,
+                rank: config.bridge_rank,
+                trainable_parameters: config.hidden_width * config.bridge_rank * 2,
+                frozen_base_model: config.frozen_base_model,
+            }
+        })
+        .collect();
+    RecursiveLinkModule {
+        config,
+        bridges,
+        inner_transfer: "h_role_next = h_role + bridge_role(norm(h_role), source_address_sketch)"
+            .into(),
+        outer_transfer:
+            "h_next_role = projection_role_to_role(h_role_final, observable_reason_projection)"
+                .into(),
+    }
+}
+
+pub fn latent_trace_prototype(
+    trace: &ChatContextTrace,
+    module: &RecursiveLinkModule,
+) -> RecursiveLatentTrace {
+    let source_refs = source_refs_from_snippets(&trace.snippets);
+    let mut steps = Vec::new();
+    let roles = module
+        .config
+        .roles
+        .iter()
+        .copied()
+        .take(module.config.outer_steps)
+        .collect::<Vec<_>>();
+    for (outer_index, role) in roles.iter().enumerate() {
+        for inner_step in 1..=module.config.inner_steps {
+            steps.push(RecursiveLatentStep {
+                role: *role,
+                outer_step: outer_index + 1,
+                inner_step,
+                input_state_ref: format!(
+                    "redacted://trace/{}/role/{}/outer/{}/inner/{}/input",
+                    trace.id,
+                    role.as_str(),
+                    outer_index + 1,
+                    inner_step
+                ),
+                output_state_ref: format!(
+                    "redacted://trace/{}/role/{}/outer/{}/inner/{}/output",
+                    trace.id,
+                    role.as_str(),
+                    outer_index + 1,
+                    inner_step
+                ),
+                observable_reason_code: reason_code_for_role(
+                    *role,
+                    source_grounded(&trace.snippets),
+                ),
+            });
+        }
+    }
+    RecursiveLatentTrace {
+        status: "research_only".into(),
+        enabled_by_default: module.config.enabled_by_default,
+        fallback_contract: module.config.fallback.clone(),
+        steps,
+        source_refs_selected: source_refs,
+        hidden_states_redacted: true,
+    }
+}
+
+pub fn evaluate_recursive_mas_trace(trace: &ChatContextTrace) -> RecursiveMasEvalReport {
+    let text_tool_calls = trace
+        .tool_trace
+        .iter()
+        .filter(|line| line.contains("memory_") || line.contains("web_search"))
+        .count();
+    let grounded = source_grounded(&trace.snippets);
+    let anchored_refs = source_refs_from_snippets(&trace.snippets)
+        .into_iter()
+        .filter(|source| source.starts_with("imprint://anchor/"))
+        .count();
+    let baseline_tokens = trace
+        .tool_trace
+        .iter()
+        .map(|line| line.split_whitespace().count())
+        .sum::<usize>()
+        + trace
+            .snippets
+            .iter()
+            .map(|snippet| snippet.excerpt.split_whitespace().count())
+            .sum::<usize>();
+    let latent_tokens = baseline_tokens
+        .saturating_sub(trace.tool_trace.len().saturating_mul(6))
+        .max(trace.snippets.len().saturating_mul(8));
+    let latent_tool_calls = text_tool_calls.saturating_sub(if grounded { 1 } else { 0 });
+    let better_region_source_selection = grounded && anchored_refs >= 1;
+    let lower_hallucination_rate = grounded;
+    let better_weak_evidence_refusal = grounded
+        || trace
+            .cortex_trace
+            .as_ref()
+            .is_some_and(|cortex| cortex.rounds.iter().any(|round| !round.critique.sufficient));
+    let lower_token_usage = latent_tokens < baseline_tokens;
+    let same_answer_quality = grounded && !trace.snippets.is_empty();
+    let may_enable_latent_default = false;
+    RecursiveMasEvalReport {
+        status: "research_only".into(),
+        text_tool_baseline_tool_calls: text_tool_calls,
+        latent_estimated_tool_calls: latent_tool_calls,
+        text_tool_baseline_tokens: baseline_tokens,
+        latent_estimated_tokens: latent_tokens,
+        better_region_source_selection,
+        lower_hallucination_rate,
+        better_weak_evidence_refusal,
+        lower_token_usage,
+        same_answer_quality,
+        may_enable_latent_default,
+        reason: if same_answer_quality
+            && better_region_source_selection
+            && lower_hallucination_rate
+            && better_weak_evidence_refusal
+            && lower_token_usage
+        {
+            "Prototype metrics are inspectable, but default enablement remains blocked until measured model eval beats the text/tool baseline.".into()
+        } else {
+            "Prototype metrics do not yet beat all text/tool baseline gates.".into()
+        },
+    }
 }
 
 pub fn role_events_from_trace(trace: &ChatContextTrace) -> Vec<RecursiveRoleEvent> {
@@ -304,6 +591,64 @@ pub fn trace_dataset_examples(trace: &ChatContextTrace) -> Vec<RecursiveTraceDat
             } else {
                 format!("efficiency:do_not_reduce;tool_calls:{tool_calls};source_grounded:false;need_more_evidence")
             },
+            source_refs: source_refs.clone(),
+            anchor_ids: anchor_ids.clone(),
+            roles: roles.clone(),
+            tool_calls,
+            source_grounded: grounded,
+        },
+        RecursiveTraceDatasetExample {
+            task: "recursive_region_selection_eval".into(),
+            source_trace_id: trace.id.clone(),
+            source_session_id: trace.session_id.clone(),
+            source_message_id: trace.user_message_id.clone(),
+            input: format!(
+                "Evaluate whether trace {} selected a useful source region or source family before solving.",
+                trace.id
+            ),
+            target: if grounded {
+                format!("region_source_selection:better_or_equal;selected_refs:{}", source_refs.join(","))
+            } else {
+                "region_source_selection:weak;next_action:route_search_expand".into()
+            },
+            source_refs: source_refs.clone(),
+            anchor_ids: anchor_ids.clone(),
+            roles: roles.clone(),
+            tool_calls,
+            source_grounded: grounded,
+        },
+        RecursiveTraceDatasetExample {
+            task: "recursive_hallucination_eval".into(),
+            source_trace_id: trace.id.clone(),
+            source_session_id: trace.session_id.clone(),
+            source_message_id: trace.user_message_id.clone(),
+            input: format!(
+                "Evaluate whether trace {} lowers hallucination risk by grounding answer boundaries.",
+                trace.id
+            ),
+            target: if grounded {
+                "hallucination_risk:lower;answer_boundary:source_anchored".into()
+            } else {
+                "hallucination_risk:high;answer_boundary:caveat_or_refuse".into()
+            },
+            source_refs: source_refs.clone(),
+            anchor_ids: anchor_ids.clone(),
+            roles: roles.clone(),
+            tool_calls,
+            source_grounded: grounded,
+        },
+        RecursiveTraceDatasetExample {
+            task: "recursive_token_usage_eval".into(),
+            source_trace_id: trace.id.clone(),
+            source_session_id: trace.session_id.clone(),
+            source_message_id: trace.user_message_id.clone(),
+            input: format!(
+                "Estimate whether latent recursion for trace {} can lower token usage versus text/tool recursion.",
+                trace.id
+            ),
+            target: format!(
+                "token_usage:lower_if_hidden_state_supported;baseline_tool_calls:{tool_calls};fallback:text_tool"
+            ),
             source_refs,
             anchor_ids,
             roles,
@@ -370,6 +715,19 @@ fn source_grounded(snippets: &[ChatContextSnippet]) -> bool {
     snippets
         .iter()
         .any(|snippet| snippet.source_anchor.is_some())
+}
+
+fn reason_code_for_role(role: RecursiveRole, grounded: bool) -> String {
+    match (role, grounded) {
+        (RecursiveRole::Planner, _) => "route_from_cortex_sketch".into(),
+        (RecursiveRole::Retriever, true) => "select_anchored_source_refs".into(),
+        (RecursiveRole::Retriever, false) => "retrieve_more_or_expand".into(),
+        (RecursiveRole::Critic, true) => "evidence_sufficient".into(),
+        (RecursiveRole::Critic, false) => "weak_evidence_caution".into(),
+        (RecursiveRole::Solver, true) => "solve_with_citations".into(),
+        (RecursiveRole::Solver, false) => "caveat_or_refuse".into(),
+        (RecursiveRole::MemorySteward, _) => "record_reversible_attention".into(),
+    }
 }
 
 #[cfg(test)]
@@ -442,11 +800,92 @@ mod tests {
             .any(|event| event.role == RecursiveRole::Solver));
 
         let examples = trace_dataset_examples(&trace);
-        assert_eq!(examples.len(), 3);
+        assert_eq!(examples.len(), 6);
         assert!(examples
             .iter()
             .any(|example| example.task == "recursive_sufficiency_eval"
                 && example.target.contains("cite_anchor_ids:anchor-1")));
+        assert!(examples
+            .iter()
+            .any(|example| example.task == "recursive_region_selection_eval"));
+        assert!(examples
+            .iter()
+            .any(|example| example.task == "recursive_hallucination_eval"));
+        assert!(examples
+            .iter()
+            .any(|example| example.task == "recursive_token_usage_eval"));
         assert!(examples.iter().all(|example| example.source_grounded));
+    }
+
+    #[test]
+    fn recursive_link_research_module_keeps_base_frozen_and_default_off() {
+        let study = lfm25_mlx_hidden_state_study();
+        assert_eq!(study.status, "research_only_api_shape_identified");
+        assert!(study
+            .findings
+            .iter()
+            .any(|finding| finding.topic == "hidden-state access"));
+
+        let config = default_recursive_link_config(512);
+        assert!(config.frozen_base_model);
+        assert!(!config.enabled_by_default);
+        assert_eq!(config.fallback, "text_tool_recursion");
+
+        let module = minimal_recursive_link_module(config);
+        assert_eq!(module.bridges.len(), 5);
+        assert!(module
+            .bridges
+            .iter()
+            .all(|bridge| bridge.frozen_base_model && bridge.trainable_parameters == 8192));
+    }
+
+    #[test]
+    fn latent_trace_redacts_hidden_state_and_blocks_default_enablement() {
+        let trace = ChatContextTrace {
+            id: "trace-2".into(),
+            session_id: "session-1".into(),
+            user_message_id: "msg-2".into(),
+            snippets: vec![ChatContextSnippet {
+                id: "chunk-1".into(),
+                source_kind: "chunk".into(),
+                source_id: "chunk-1".into(),
+                excerpt: "grounded evidence for a concise answer".into(),
+                score: 0.9,
+                hotness: 0.4,
+                source_anchor: Some(SourceAnchor {
+                    id: "anchor-2".into(),
+                    document_id: "doc-1".into(),
+                    chunk_id: Some("chunk-1".into()),
+                    path: "/tmp/source.md".into(),
+                    content_hash: "hash".into(),
+                    start: 0,
+                    end: 12,
+                    page: None,
+                    section: Some("Evidence".into()),
+                    parser_version: 1,
+                }),
+            }],
+            tool_trace: vec![
+                "planner step 1: memory_search query=\"evidence\"".into(),
+                "planner step 2: memory_expand target=chunk-1".into(),
+            ],
+            cortex_trace: None,
+            created_at: 1,
+        };
+        let module = minimal_recursive_link_module(default_recursive_link_config(256));
+        let latent = latent_trace_prototype(&trace, &module);
+        assert_eq!(latent.status, "research_only");
+        assert!(!latent.enabled_by_default);
+        assert!(latent.hidden_states_redacted);
+        assert!(latent
+            .steps
+            .iter()
+            .all(|step| step.input_state_ref.starts_with("redacted://")));
+
+        let report = evaluate_recursive_mas_trace(&trace);
+        assert!(report.better_region_source_selection);
+        assert!(report.lower_hallucination_rate);
+        assert!(report.lower_token_usage);
+        assert!(!report.may_enable_latent_default);
     }
 }

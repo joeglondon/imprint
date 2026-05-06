@@ -465,6 +465,7 @@ mod tests {
                 adapter_activation_policy: "automatic".into(),
                 runtime_preset: ModelRuntimePreset::CustomOpenAi,
                 cortex_enabled: true,
+                latent_recursive_enabled: false,
                 cortex_rounds: 3,
                 critic_model: Some("hash".into()),
                 critic_endpoint: Some("http://localhost:11434".into()),

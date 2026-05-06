@@ -1,6 +1,7 @@
 use crate::types::*;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -29,6 +30,11 @@ impl FileMemoryStore {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn list_source_artifacts(&self) -> Result<Vec<SourceArtifact>> {
+        let connection = self.connection()?;
+        list_source_artifacts(&connection)
     }
 
     pub fn insert_chat_session(&self, session: &ChatSession) -> Result<()> {
@@ -659,6 +665,19 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             content_hash TEXT,
             parser_version INTEGER
         );
+        CREATE TABLE IF NOT EXISTS source_artifacts (
+            id TEXT PRIMARY KEY,
+            source_type TEXT NOT NULL,
+            storage_mode_json TEXT NOT NULL,
+            original_path TEXT NOT NULL,
+            current_path TEXT,
+            file_hash TEXT NOT NULL,
+            parser_version INTEGER NOT NULL,
+            imported_at INTEGER NOT NULL,
+            provenance_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_source_artifacts_hash ON source_artifacts(file_hash);
+        CREATE INDEX IF NOT EXISTS idx_source_artifacts_path ON source_artifacts(original_path);
         CREATE TABLE IF NOT EXISTS chunks (
             id TEXT PRIMARY KEY,
             document_id TEXT NOT NULL,
@@ -939,6 +958,7 @@ fn save_memory(connection: &mut Connection, memory: &PersistedMemory) -> Result<
         r#"
         DELETE FROM source_anchors;
         DELETE FROM chunks;
+        DELETE FROM source_artifacts;
         DELETE FROM documents;
         DELETE FROM regions;
         DELETE FROM links;
@@ -963,6 +983,10 @@ fn save_memory(connection: &mut Connection, memory: &PersistedMemory) -> Result<
         if let Some(anchor) = &document.source_anchor {
             insert_anchor(&tx, anchor)?;
         }
+    }
+
+    for artifact in source_artifacts_from_documents(&memory.documents) {
+        insert_source_artifact(&tx, &artifact)?;
     }
 
     for chunk in &memory.chunks {
@@ -1063,6 +1087,145 @@ fn insert_anchor(connection: &Connection, anchor: &SourceAnchor) -> Result<()> {
         ],
     )?;
     Ok(())
+}
+
+fn insert_source_artifact(connection: &Connection, artifact: &SourceArtifact) -> Result<()> {
+    connection.execute(
+        "INSERT OR REPLACE INTO source_artifacts (
+            id, source_type, storage_mode_json, original_path, current_path, file_hash,
+            parser_version, imported_at, provenance_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            artifact.id,
+            artifact.source_type,
+            to_json(&artifact.storage_mode)?,
+            artifact.original_path,
+            artifact.current_path,
+            artifact.file_hash,
+            artifact.parser_version as i64,
+            artifact.imported_at as i64,
+            to_json(&artifact.provenance)?,
+        ],
+    )?;
+    Ok(())
+}
+
+fn list_source_artifacts(connection: &Connection) -> Result<Vec<SourceArtifact>> {
+    let mut statement = connection.prepare(
+        "SELECT id, source_type, storage_mode_json, original_path, current_path, file_hash,
+            parser_version, imported_at, provenance_json FROM source_artifacts ORDER BY id",
+    )?;
+    let rows = statement.query_map([], source_artifact_from_row)?;
+    let stored = collect_rows(rows)?;
+    if stored.is_empty() {
+        return Ok(source_artifacts_from_documents(&load_documents(
+            connection,
+        )?));
+    }
+    Ok(stored)
+}
+
+fn source_artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceArtifact> {
+    Ok(SourceArtifact {
+        id: row.get(0)?,
+        source_type: row.get(1)?,
+        storage_mode: from_json(row.get::<_, String>(2)?)?,
+        original_path: row.get(3)?,
+        current_path: row.get(4)?,
+        file_hash: row.get(5)?,
+        parser_version: row.get::<_, i64>(6)? as u32,
+        imported_at: row.get::<_, i64>(7)? as u64,
+        provenance: from_json(row.get::<_, String>(8)?)?,
+    })
+}
+
+fn source_artifacts_from_documents(documents: &[Document]) -> Vec<SourceArtifact> {
+    let mut artifacts = BTreeMap::<String, SourceArtifact>::new();
+    for document in documents {
+        if let Some(artifact) = source_artifact_from_document(document) {
+            artifacts.entry(artifact.id.clone()).or_insert(artifact);
+        }
+    }
+    artifacts.into_values().collect()
+}
+
+fn source_artifact_from_document(document: &Document) -> Option<SourceArtifact> {
+    let anchor = document.source_anchor.as_ref();
+    let metadata = &document.metadata;
+    let original_path = metadata
+        .get("path")
+        .or_else(|| metadata.get("source_path"))
+        .cloned()
+        .or_else(|| anchor.map(|anchor| anchor.path.clone()))?;
+    let file_hash = metadata
+        .get("file_hash")
+        .or_else(|| metadata.get("content_hash"))
+        .cloned()
+        .or_else(|| document.content_hash.clone())
+        .or_else(|| anchor.map(|anchor| anchor.content_hash.clone()))?;
+    let id = metadata
+        .get("source_artifact_id")
+        .cloned()
+        .unwrap_or_else(|| format!("source-artifact:{file_hash}"));
+    let parser_version = document
+        .parser_version
+        .or_else(|| {
+            metadata
+                .get("parser_version")
+                .and_then(|value| value.parse::<u32>().ok())
+        })
+        .or_else(|| anchor.map(|anchor| anchor.parser_version))
+        .unwrap_or(1);
+    Some(SourceArtifact {
+        id,
+        source_type: metadata
+            .get("source_type")
+            .or_else(|| metadata.get("source"))
+            .cloned()
+            .unwrap_or_else(|| "unknown".into()),
+        storage_mode: source_storage_mode(metadata),
+        original_path: original_path.clone(),
+        current_path: Some(
+            metadata
+                .get("current_path")
+                .cloned()
+                .unwrap_or(original_path.clone()),
+        ),
+        file_hash,
+        parser_version,
+        imported_at: metadata
+            .get("imported_at")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0),
+        provenance: ProvenanceRecord {
+            actor: metadata
+                .get("provenance_actor")
+                .cloned()
+                .unwrap_or_else(|| "imprint".into()),
+            reason: metadata
+                .get("provenance_reason")
+                .cloned()
+                .unwrap_or_else(|| "Source artifact recorded from document provenance".into()),
+            created_at: metadata
+                .get("imported_at")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0),
+            source_refs: vec![document.id.clone(), original_path],
+        },
+    })
+}
+
+fn source_storage_mode(metadata: &BTreeMap<String, String>) -> SourceStorageMode {
+    match metadata.get("storage_mode").map(String::as_str) {
+        Some("managed_copy") => SourceStorageMode::ManagedCopy,
+        Some("external") => SourceStorageMode::External,
+        Some("generated") => SourceStorageMode::Generated,
+        _ => match metadata.get("source_type").map(String::as_str) {
+            Some("web_finding") => SourceStorageMode::External,
+            Some("derived_memory") | Some("brain_artifact") => SourceStorageMode::Generated,
+            _ => SourceStorageMode::ReferenceInPlace,
+        },
+    }
 }
 
 fn load_documents(connection: &Connection) -> Result<Vec<Document>> {
