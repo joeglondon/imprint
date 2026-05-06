@@ -215,10 +215,12 @@ impl MemoryQueryEngine {
                         chunk.text
                     ),
                 );
-                let score = apply_attention_score(
+                let score = apply_recall_score(
                     ann_score * 0.7 + lexical * 0.3,
                     chunk,
+                    document,
                     &attention_scores,
+                    now,
                 );
                 let excerpt = excerpt_window(&document.text, chunk.start, chunk.end, 60);
                 hits.push(ChunkHit {
@@ -267,7 +269,13 @@ impl MemoryQueryEngine {
                     chunk_id: chunk.id.clone(),
                     document_id: chunk.document_id.clone(),
                     region_id: chunk.region_id.clone(),
-                    score: apply_attention_score(lexical.max(0.05), chunk, &attention_scores),
+                    score: apply_recall_score(
+                        lexical.max(0.05),
+                        chunk,
+                        document,
+                        &attention_scores,
+                        now,
+                    ),
                     excerpt,
                     start: chunk.start,
                     end: chunk.end,
@@ -305,10 +313,12 @@ impl MemoryQueryEngine {
     }
 }
 
-fn apply_attention_score(
+fn apply_recall_score(
     base_score: f32,
     chunk: &Chunk,
+    document: &Document,
     attention_scores: &HashMap<String, f32>,
+    now: u64,
 ) -> f32 {
     let boost = attention_scores
         .get(&attention_key(&AttentionTargetKind::Chunk, &chunk.id))
@@ -328,7 +338,80 @@ fn apply_attention_score(
             ))
             .copied()
             .unwrap_or_default();
-    (base_score + boost.clamp(-0.45, 0.55)).max(0.001)
+    let source_signal = source_recall_signal(document, chunk, now);
+    (base_score + boost.clamp(-0.45, 0.55) + source_signal).max(0.001)
+}
+
+fn source_recall_signal(document: &Document, chunk: &Chunk, now: u64) -> f32 {
+    let mut signal = match metadata_value(document, chunk, "source_type").as_deref() {
+        Some("web_finding") => -0.01,
+        Some("derived_memory") | Some("brain_artifact") => -0.04,
+        Some("chat") => 0.01,
+        _ => 0.04,
+    };
+
+    if let Some(trust) = parse_metadata_f32(document, chunk, "source_trust") {
+        signal += (trust.clamp(0.0, 1.0) - 0.5) * 0.18;
+    }
+
+    if let Some(confidence) = parse_metadata_f32(document, chunk, "confidence") {
+        signal += (confidence.clamp(0.0, 1.0) - 0.5) * 0.12;
+    }
+
+    if let Some(retrieved_at) = parse_metadata_u64(document, chunk, "retrieved_at") {
+        signal += freshness_signal(retrieved_at, now);
+    }
+
+    if let Some(expires_at) = parse_metadata_u64(document, chunk, "freshness_expires_at") {
+        let expires_at = normalize_epoch_millis(expires_at);
+        if now > 0 && now > expires_at {
+            signal -= 0.12;
+        }
+    }
+
+    signal.clamp(-0.18, 0.18)
+}
+
+fn freshness_signal(retrieved_at: u64, now: u64) -> f32 {
+    if now == 0 {
+        return 0.0;
+    }
+    let retrieved_at = normalize_epoch_millis(retrieved_at);
+    let age = now.saturating_sub(retrieved_at);
+    let day = 24 * 60 * 60 * 1000;
+    if age <= 7 * day {
+        0.08
+    } else if age <= 30 * day {
+        0.02
+    } else if age <= 180 * day {
+        -0.03
+    } else {
+        -0.08
+    }
+}
+
+fn normalize_epoch_millis(value: u64) -> u64 {
+    if value < 10_000_000_000 {
+        value * 1000
+    } else {
+        value
+    }
+}
+
+fn parse_metadata_f32(document: &Document, chunk: &Chunk, key: &str) -> Option<f32> {
+    metadata_value(document, chunk, key).and_then(|value| value.parse::<f32>().ok())
+}
+
+fn parse_metadata_u64(document: &Document, chunk: &Chunk, key: &str) -> Option<u64> {
+    metadata_value(document, chunk, key).and_then(|value| value.parse::<u64>().ok())
+}
+
+fn metadata_value(document: &Document, chunk: &Chunk, key: &str) -> Option<String> {
+    chunk
+        .metadata
+        .get(key)
+        .or_else(|| document.metadata.get(key))
+        .cloned()
 }
 
 fn attention_scores(marks: &[AttentionMark]) -> HashMap<String, f32> {
@@ -792,6 +875,96 @@ mod tests {
         assert_eq!(
             result.hits.first().map(|hit| hit.chunk_id.as_str()),
             Some("chunk-b")
+        );
+        assert!(result.hits[0].score > result.hits[1].score);
+    }
+
+    #[test]
+    fn execute_uses_source_metadata_as_recall_signal() {
+        let embedder = crate::index::HashEmbedder::default();
+        let text = "same evidence about source grounded recall";
+        let embedding = embedder.embed(text).expect("embedding");
+        let mut stale_web_metadata = BTreeMap::new();
+        stale_web_metadata.insert("source_type".into(), "web_finding".into());
+        stale_web_metadata.insert("confidence".into(), "0.20".into());
+        stale_web_metadata.insert("retrieved_at".into(), "1000".into());
+        let mut trusted_local_metadata = BTreeMap::new();
+        trusted_local_metadata.insert("source".into(), "local".into());
+        trusted_local_metadata.insert("source_trust".into(), "0.90".into());
+        let document = |id: &str, metadata: BTreeMap<String, String>| Document {
+            id: id.into(),
+            title: id.into(),
+            text: text.into(),
+            metadata,
+            source_anchor: None,
+            content_hash: None,
+            parser_version: None,
+        };
+        let chunk = |id: &str, document_id: &str, ordinal: usize| Chunk {
+            id: id.into(),
+            document_id: document_id.into(),
+            region_id: "region".into(),
+            ordinal,
+            start: 0,
+            end: text.chars().count(),
+            text: text.into(),
+            metadata: BTreeMap::new(),
+            source_anchor: None,
+            embedding: embedding.clone(),
+            embedding_text_hash: None,
+            embedding_provider: None,
+            embedding_model: None,
+            embedding_endpoint: None,
+            embedding_dimension: None,
+            chunking_version: None,
+        };
+        let memory = PersistedMemory {
+            documents: vec![
+                document("doc-stale-web", stale_web_metadata),
+                document("doc-trusted-local", trusted_local_metadata),
+            ],
+            chunks: vec![
+                chunk("chunk-stale-web", "doc-stale-web", 0),
+                chunk("chunk-trusted-local", "doc-trusted-local", 1),
+            ],
+            regions: vec![Region {
+                id: "region".into(),
+                label: "Region".into(),
+                summary: text.into(),
+                filters: BTreeMap::new(),
+                chunk_ids: vec!["chunk-stale-web".into(), "chunk-trusted-local".into()],
+                centroid: embedding,
+                neighbors: Vec::new(),
+            }],
+            links: Vec::new(),
+            memory_map: Some(MemoryMap {
+                budget_bytes: 2048,
+                serialized: String::new(),
+                entries: vec![entry("region", "Region", text)],
+            }),
+        };
+        let ann = crate::index::RegionIndexer.rebuild(&memory.chunks, &memory.regions);
+
+        let result = MemoryQueryEngine
+            .execute_with_signals(
+                &embedder,
+                &memory,
+                &ann,
+                QueryRequest {
+                    text: text.into(),
+                    filters: BTreeMap::new(),
+                    max_regions: 1,
+                    max_chunks: 2,
+                },
+                &[],
+                &[],
+                1_777_311_476_000,
+            )
+            .expect("query");
+
+        assert_eq!(
+            result.hits.first().map(|hit| hit.chunk_id.as_str()),
+            Some("chunk-trusted-local")
         );
         assert!(result.hits[0].score > result.hits[1].score);
     }
