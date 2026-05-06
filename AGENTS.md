@@ -151,9 +151,10 @@ Do not optimize for dumping whole corpora into prompt context. Optimize for surg
 ## Current Known Gaps
 
 - `CortexIndex` is not yet a first-class persisted schema; current compiler artifacts are scaffolding.
-- Adapter freshness state is not yet wired into import/rebuild, Swift UI, CLI, or MCP surfaces.
+- Adapter freshness state is now reported by `memory_compile`/CLI/MCP JSON and mirrored in Swift models, but it is not yet persisted in SQLite, shown in the Swift UI, wired into import/rebuild, or used for model selection.
 - MLX cortex adapter training is not yet a core import/rebuild step.
-- MLX adapter dry runs now prepare an inspectable `adapter_manifest.json` without requiring optional `mlx_lm` installation, but the Rust app does not yet persist or read that manifest as adapter freshness state.
+- MLX adapter preparation now writes an inspectable `adapter_manifest.json` with base model, source dataset hash, prepared dataset hash, record counts, status, and iteration target. Freshness detection expects manifests under the store's `adapters/` directory.
+- Compiler-generated brain artifacts remain searchable as derived memories, but the compiler now filters its own prior `memory-compiler` artifacts out of the next source training set to avoid self-feedback. Remaining drawback: this is an in-process filtered compile view, not a persisted source/derived corpus boundary.
 - True latent RecursiveLink-style planner/critic/retriever/solver loops are not implemented; current recursion is trace/text/tool mediated.
 - Routing now returns a structured `RoutePlan` with candidate regions, scores, matched terms, and suggested next tool steps. It is still lexical over `MemoryMap`; it needs embedding-aware routing and a stronger recursive-agent policy contract.
 - Vector search is in-memory and approximate, not yet a scalable ANN store.
@@ -171,6 +172,8 @@ Do not optimize for dumping whole corpora into prompt context. Optimize for surg
 
 - 2026-05-05: Added a unit-tested MLX adapter preparation manifest in `training/train_mlx_lora.py`. Dry runs and completed training now share one manifest path, making prepared datasets inspectable before optional MLX dependencies are used for real training.
 - 2026-05-06: Fixed `training/train_mlx_lora.py --dry-run` so adapter dataset preparation and manifest writing work even when `mlx_lm` is not installed. Added a regression test that patches `mlx_lm` discovery absent and verifies the prepared manifest.
+- 2026-05-06: `compile_memory_brain` now reports `CortexAdapterState` with missing/fresh/stale/unknown freshness by comparing the current semantic training export hash against the newest `adapter_manifest.json` under `store/adapters/`. The MLX manifest now records `source_dataset_hash`, and dry runs remain available without `mlx_lm`. Remaining drawback: this state is compile-result JSON only; it is not yet persisted, surfaced in the app UI, or used to select/load adapters.
+- 2026-05-06: Cortex compilation now uses a source-only memory view that excludes previous `memory-compiler` derived memories and `brain_artifact` documents before generating artifacts and training exports. This keeps adapter freshness stable across repeated compile -> prepare adapter -> compile cycles while preserving generated artifacts for search.
 
 ## Recent Improvements
 

@@ -66,6 +66,7 @@ class TrainMlxLoraTests(unittest.TestCase):
             manifest = train_mlx_lora.write_adapter_manifest(
                 model="tiny-memory-model",
                 dataset=mlx_data,
+                source_dataset=dataset,
                 output=output,
                 iters=25,
                 status="prepared",
@@ -77,6 +78,8 @@ class TrainMlxLoraTests(unittest.TestCase):
             self.assertEqual(manifest["valid_records"], 1)
             self.assertEqual(manifest["test_records"], 1)
             self.assertRegex(manifest["dataset_hash"], r"^[0-9a-f]{64}$")
+            self.assertRegex(manifest["source_dataset_hash"], r"^[0-9a-f]{64}$")
+            self.assertNotEqual(manifest["dataset_hash"], manifest["source_dataset_hash"])
             written = json.loads((output / "adapter_manifest.json").read_text())
             self.assertEqual(written, manifest)
 
@@ -107,6 +110,7 @@ class TrainMlxLoraTests(unittest.TestCase):
             manifest = json.loads((output / "adapter_manifest.json").read_text())
             self.assertEqual(result["status"], "ready")
             self.assertEqual(manifest["status"], "prepared")
+            self.assertEqual(manifest["base_model"], "tiny-memory-model")
             self.assertEqual(manifest["train_records"], 1)
 
 

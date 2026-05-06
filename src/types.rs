@@ -469,6 +469,36 @@ pub struct BrainCompileResult {
     pub training_records_path: String,
     #[serde(default)]
     pub export_files: Vec<String>,
+    #[serde(default)]
+    pub adapter_state: Option<CortexAdapterState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CortexAdapterState {
+    pub freshness: String,
+    pub status: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub base_model: Option<String>,
+    #[serde(default)]
+    pub adapter_path: Option<String>,
+    #[serde(default)]
+    pub manifest_path: Option<String>,
+    #[serde(default)]
+    pub source_dataset_hash: Option<String>,
+    pub current_source_dataset_hash: String,
+    #[serde(default)]
+    pub prepared_dataset_hash: Option<String>,
+    #[serde(default)]
+    pub train_records: Option<usize>,
+    #[serde(default)]
+    pub valid_records: Option<usize>,
+    #[serde(default)]
+    pub test_records: Option<usize>,
+    #[serde(default)]
+    pub iters: Option<usize>,
+    pub checked_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

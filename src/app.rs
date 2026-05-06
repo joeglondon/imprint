@@ -856,8 +856,9 @@ pub fn compile_memory_brain(store_root: &Path) -> anyhow::Result<BrainCompileRes
     let store = FileMemoryStore::new(store_root);
     let config = load_model_config(store_root)?;
     let memory = store.load()?;
+    let compile_memory = memory_for_brain_compile(store_root, &memory, &config)?;
     let created_at = now_millis();
-    let artifacts = crate::compiler::build_brain_artifacts(&memory, created_at);
+    let artifacts = crate::compiler::build_brain_artifacts(&compile_memory, created_at);
 
     let mut artifact_ids = Vec::new();
     for artifact in &artifacts {
@@ -891,6 +892,9 @@ pub fn compile_memory_brain(store_root: &Path) -> anyhow::Result<BrainCompileRes
     std::fs::create_dir_all(store_root)?;
     std::fs::write(&training_records_path, training_records.join("\n"))?;
     let export_files = crate::training::write_training_exports(store_root, &artifacts)?;
+    let source_dataset_hash = crate::training::training_source_hash(&store_root.join("training"))?;
+    let adapter_state =
+        crate::training::read_cortex_adapter_state(store_root, source_dataset_hash, created_at)?;
     sync_brain_artifacts_with_config(store_root, &store, &config)?;
     sync_derived_memories_with_config(store_root, &store, &config)?;
     Ok(BrainCompileResult {
@@ -899,7 +903,35 @@ pub fn compile_memory_brain(store_root: &Path) -> anyhow::Result<BrainCompileRes
         training_records_written: training_records.len(),
         training_records_path: training_records_path.display().to_string(),
         export_files,
+        adapter_state: Some(adapter_state),
     })
+}
+
+fn memory_for_brain_compile(
+    store_root: &Path,
+    memory: &PersistedMemory,
+    config: &ModelConfig,
+) -> anyhow::Result<PersistedMemory> {
+    let source_documents = memory
+        .documents
+        .iter()
+        .filter(|document| !is_compiler_generated_document(document))
+        .cloned()
+        .collect::<Vec<_>>();
+    if source_documents.len() == memory.documents.len() {
+        return Ok(memory.clone());
+    }
+    let (source_memory, _) =
+        rebuild_from_documents(store_root, source_documents, &memory.chunks, config)?;
+    Ok(source_memory)
+}
+
+fn is_compiler_generated_document(document: &Document) -> bool {
+    matches!(
+        document.metadata.get("source_type").map(String::as_str),
+        Some("brain_artifact")
+    ) || (document.metadata.get("source_type").map(String::as_str) == Some("derived_memory")
+        && document.metadata.get("actor").map(String::as_str) == Some("memory-compiler"))
 }
 
 pub fn write_agent_link(
@@ -4372,6 +4404,8 @@ mod tests {
             .export_files
             .iter()
             .any(|file| file.ends_with("route_region.eval.jsonl")));
+        let missing_adapter = first.adapter_state.as_ref().expect("adapter state");
+        assert_eq!(missing_adapter.freshness, "missing");
         assert!(std::fs::read_to_string(&first.training_records_path)
             .expect("training records")
             .contains("\"task\":\"memory_routing\""));
@@ -4391,6 +4425,32 @@ mod tests {
         assert!(train_raw.contains("\"task\":\"route_region\""));
         assert!(train_raw.contains("\"artifact_ids\""));
         assert_ne!(train_raw, eval_raw);
+        let adapter_dir = root.join("adapters").join("check");
+        fs::create_dir_all(&adapter_dir).expect("adapter dir");
+        fs::write(
+            adapter_dir.join("adapter_manifest.json"),
+            serde_json::json!({
+                "status": "prepared",
+                "base_model": "tiny-memory-model",
+                "adapter_path": adapter_dir.display().to_string(),
+                "dataset_hash": "prepared-hash",
+                "source_dataset_hash": missing_adapter.current_source_dataset_hash,
+                "train_records": 1,
+                "valid_records": 1,
+                "test_records": 1,
+                "iters": 25
+            })
+            .to_string(),
+        )
+        .expect("adapter manifest");
+        let with_adapter = compile_memory_brain(&root).expect("compile with adapter");
+        let adapter_state = with_adapter.adapter_state.as_ref().expect("adapter state");
+        assert_eq!(adapter_state.freshness, "fresh");
+        assert_eq!(adapter_state.status, "prepared");
+        assert_eq!(
+            adapter_state.base_model.as_deref(),
+            Some("tiny-memory-model")
+        );
 
         let memories = list_derived_memories(&root, None).expect("derived memories");
         assert!(memories.iter().any(|memory| {

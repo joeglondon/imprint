@@ -65,7 +65,10 @@ def dataset_hash(dataset: Path) -> str:
     for path in sorted(dataset.glob("*.jsonl")):
         digest.update(path.name.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        for record in load_jsonl(path):
+            record.pop("created_at", None)
+            digest.update(json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+            digest.update(b"\n")
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -74,6 +77,7 @@ def write_adapter_manifest(
     *,
     model: str,
     dataset: Path,
+    source_dataset: Path | None = None,
     output: Path,
     iters: int,
     status: str,
@@ -87,6 +91,9 @@ def write_adapter_manifest(
         "iters": iters,
         **load_prepared_counts(dataset),
     }
+    if source_dataset is not None:
+        manifest["source_dataset"] = str(source_dataset)
+        manifest["source_dataset_hash"] = dataset_hash(source_dataset)
     (output / "adapter_manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
     return manifest
 
@@ -123,6 +130,7 @@ def main() -> None:
         manifest = write_adapter_manifest(
             model=args.model,
             dataset=mlx_data,
+            source_dataset=dataset,
             output=output,
             iters=args.iters,
             status="prepared",
@@ -141,6 +149,7 @@ def main() -> None:
     manifest = write_adapter_manifest(
         model=args.model,
         dataset=mlx_data,
+        source_dataset=dataset,
         output=output,
         iters=args.iters,
         status="trained",

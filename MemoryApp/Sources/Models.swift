@@ -384,6 +384,24 @@ struct BrainCompileResult: Codable, Equatable {
     var trainingRecordsWritten: Int
     var trainingRecordsPath: String
     var exportFiles: [String]
+    var adapterState: CortexAdapterState?
+}
+
+struct CortexAdapterState: Codable, Equatable {
+    var freshness: String
+    var status: String
+    var reason: String?
+    var baseModel: String?
+    var adapterPath: String?
+    var manifestPath: String?
+    var sourceDatasetHash: String?
+    var currentSourceDatasetHash: String
+    var preparedDatasetHash: String?
+    var trainRecords: Int?
+    var validRecords: Int?
+    var testRecords: Int?
+    var iters: Int?
+    var checkedAt: UInt64
 }
 
 struct ChatTurnRequest: Codable, Equatable {
