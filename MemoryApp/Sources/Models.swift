@@ -314,6 +314,9 @@ enum AttentionTargetKind: String, Codable, Equatable {
 
 enum AttentionAction: String, Codable, Equatable {
     case active = "Active"
+    case hot = "Hot"
+    case warm = "Warm"
+    case cold = "Cold"
     case promote = "Promote"
     case decay = "Decay"
     case pin = "Pin"

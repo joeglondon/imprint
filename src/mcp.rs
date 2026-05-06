@@ -315,13 +315,13 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "memory_mark_attention",
-            "Mark memory active, promoted, decayed, pinned, or suppressed with a reason.",
+            "Mark memory active, hot, warm, cold, promoted, decayed, pinned, or suppressed with a reason.",
             json!({
                 "type": "object",
                 "properties": {
                     "target_id": { "type": "string" },
                     "target_kind": { "type": "string", "enum": ["chat_session", "chat_message", "transcript_chunk", "derived_memory", "web_finding", "document", "chunk", "region", "link"] },
-                    "action": { "type": "string", "enum": ["active", "promote", "decay", "pin", "suppress"] },
+                    "action": { "type": "string", "enum": ["active", "hot", "warm", "cold", "promote", "decay", "pin", "suppress"] },
                     "reason": { "type": "string" },
                     "actor": { "type": "string" }
                 },
@@ -409,6 +409,9 @@ fn expand_mode_arg(args: &Value) -> Option<ExpandMode> {
 fn attention_action_arg(args: &Value) -> anyhow::Result<AttentionAction> {
     match string_arg(args, "action")?.to_ascii_lowercase().as_str() {
         "active" => Ok(AttentionAction::Active),
+        "hot" => Ok(AttentionAction::Hot),
+        "warm" => Ok(AttentionAction::Warm),
+        "cold" => Ok(AttentionAction::Cold),
         "promote" => Ok(AttentionAction::Promote),
         "decay" => Ok(AttentionAction::Decay),
         "pin" => Ok(AttentionAction::Pin),

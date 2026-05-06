@@ -645,8 +645,11 @@ fn attention_scores(marks: &[AttentionMark]) -> HashMap<String, f32> {
     for mark in marks.iter().filter(|mark| mark.reverted_at.is_none()) {
         let delta = match mark.action {
             AttentionAction::Pin => 0.35,
+            AttentionAction::Hot => 0.28,
             AttentionAction::Promote => 0.22,
+            AttentionAction::Warm => 0.10,
             AttentionAction::Active => 0.14,
+            AttentionAction::Cold => -0.08,
             AttentionAction::Decay => -0.14,
             AttentionAction::Suppress => -0.40,
         };
@@ -1118,16 +1121,28 @@ mod tests {
             }),
         };
         let ann = crate::index::RegionIndexer.rebuild(&memory.chunks, &memory.regions);
-        let marks = vec![AttentionMark {
-            id: "attention-1".into(),
-            target_id: "chunk-b".into(),
-            target_kind: AttentionTargetKind::Chunk,
-            action: AttentionAction::Pin,
-            reason: "User pinned this passage as the preferred routing address.".into(),
-            actor: "test".into(),
-            created_at: 1,
-            reverted_at: None,
-        }];
+        let marks = vec![
+            AttentionMark {
+                id: "attention-1".into(),
+                target_id: "chunk-a".into(),
+                target_kind: AttentionTargetKind::Chunk,
+                action: AttentionAction::Cold,
+                reason: "Agent marked this passage cold because it was weak context.".into(),
+                actor: "test".into(),
+                created_at: 1,
+                reverted_at: None,
+            },
+            AttentionMark {
+                id: "attention-2".into(),
+                target_id: "chunk-b".into(),
+                target_kind: AttentionTargetKind::Chunk,
+                action: AttentionAction::Hot,
+                reason: "Agent marked this passage hot as a preferred routing address.".into(),
+                actor: "test".into(),
+                created_at: 2,
+                reverted_at: None,
+            },
+        ];
 
         let result = MemoryQueryEngine
             .execute_with_attention(

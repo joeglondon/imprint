@@ -399,6 +399,9 @@ pub enum AttentionTargetKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AttentionAction {
     Active,
+    Hot,
+    Warm,
+    Cold,
     Promote,
     Decay,
     Pin,
