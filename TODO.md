@@ -71,7 +71,7 @@ Goal: cross from "better cortex-aware retrieval" into "some semantic memory is i
 - [ ] Run training asynchronously after import/rebuild so source recall stays usable.
 - [ ] Add cancel/retry behavior for adapter jobs.
 - [x] Add timeout, log capture, and failed-state persistence for training runs.
-- [ ] Keep the previously active adapter when a new training job fails.
+- [x] Keep the previously active adapter when a new training job fails.
 - [x] Record trained adapter manifests with:
   - [x] base model
   - [x] source dataset hash

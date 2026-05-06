@@ -1001,7 +1001,7 @@ pub fn compile_memory_brain(store_root: &Path) -> anyhow::Result<BrainCompileRes
         source_dataset_hash.clone(),
         created_at,
     )?;
-    if initial_adapter_state.freshness != "fresh" {
+    if initial_adapter_state.data_freshness != "fresh" {
         let compiler_model = config
             .compiler_model
             .as_deref()
@@ -5016,6 +5016,109 @@ mod tests {
                 .expect("load adapter state"),
             Some(state)
         );
+    }
+
+    #[test]
+    fn cortex_adapter_state_keeps_active_adapter_while_new_data_is_prepared_or_training_fails() {
+        let root = temp_store_root("adapter-active-retention");
+        let input = root.join("source.txt");
+        fs::write(
+            &input,
+            "The first adapter should remain active while later memory changes prepare a replacement.",
+        )
+        .expect("write source");
+        ingest_paths(&root, std::slice::from_ref(&input)).expect("ingest");
+        let first = compile_memory_brain(&root).expect("compile first");
+        let first_hash = first
+            .adapter_state
+            .as_ref()
+            .expect("first adapter state")
+            .current_source_dataset_hash
+            .clone();
+
+        let active_dir = root.join("adapters").join("active-first");
+        fs::create_dir_all(&active_dir).expect("active dir");
+        fs::write(
+            active_dir.join("adapter_manifest.json"),
+            serde_json::json!({
+                "status": "active",
+                "base_model": "tiny-memory-model",
+                "adapter_path": active_dir.display().to_string(),
+                "dataset_hash": "first-prepared-hash",
+                "prepared_dataset_hash": "first-prepared-hash",
+                "source_dataset_hash": first_hash.clone(),
+                "trained_source_dataset_hash": first_hash.clone(),
+                "active_adapter_hash": "first-active-hash",
+                "activation_status": "active",
+                "eval_score": 1.0,
+                "train_records": 4,
+                "valid_records": 4,
+                "test_records": 4,
+                "iters": 25
+            })
+            .to_string(),
+        )
+        .expect("active manifest");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let second_input = root.join("second-source.txt");
+        fs::write(
+            &second_input,
+            "A new source changes the cortex dataset and should prepare data without deactivating the previous adapter.",
+        )
+        .expect("write second source");
+        let second_import =
+            ingest_paths(&root, std::slice::from_ref(&second_input)).expect("ingest second");
+        let retained = second_import
+            .adapter_state
+            .as_ref()
+            .expect("retained adapter state");
+        assert_ne!(retained.current_source_dataset_hash, first_hash);
+        assert_eq!(retained.status, "active");
+        assert_eq!(retained.activation_status, "active");
+        assert_eq!(retained.freshness, "stale");
+        assert_eq!(retained.data_freshness, "fresh");
+        assert_eq!(retained.training_status, "prepared");
+        assert_eq!(
+            retained.active_adapter_hash.as_deref(),
+            Some("first-active-hash")
+        );
+        assert_eq!(
+            retained.trained_source_dataset_hash.as_deref(),
+            Some(first_hash.as_str())
+        );
+        let active_dir_display = active_dir.display().to_string();
+        assert_eq!(
+            retained.adapter_path.as_deref(),
+            Some(active_dir_display.as_str())
+        );
+
+        let failed = crate::training::run_cortex_adapter_training_job(
+            &root,
+            "tiny-memory-model",
+            &retained.current_source_dataset_hash,
+            crate::training::CortexAdapterTrainingOptions {
+                dry_run: true,
+                python: Some("python-binary-that-should-not-exist".into()),
+                output_dir: Some(root.join("adapters").join("failed-replacement")),
+                log_path: Some(root.join("adapters").join("failed-replacement.log")),
+                ..Default::default()
+            },
+        )
+        .expect("persist failed replacement job");
+        assert_eq!(failed.status, "failed");
+
+        let after_failure = load_cortex_adapter_snapshot(&root)
+            .expect("load adapter snapshot")
+            .adapter_state
+            .expect("adapter state after failure");
+        assert_eq!(after_failure.status, "active");
+        assert_eq!(after_failure.activation_status, "active");
+        assert_eq!(
+            after_failure.active_adapter_hash.as_deref(),
+            Some("first-active-hash")
+        );
+        assert_eq!(after_failure.data_freshness, "fresh");
     }
 
     #[test]

@@ -494,7 +494,8 @@ pub fn read_cortex_adapter_state(
     current_source_dataset_hash: String,
     checked_at: u64,
 ) -> anyhow::Result<CortexAdapterState> {
-    let Some(manifest_path) = newest_adapter_manifest(&store_root.join("adapters"))? else {
+    let manifests = adapter_manifests_by_modified(&store_root.join("adapters"))?;
+    let Some(newest_snapshot) = manifests.last() else {
         return Ok(CortexAdapterState {
             freshness: "missing".into(),
             status: "missing".into(),
@@ -520,18 +521,45 @@ pub fn read_cortex_adapter_state(
         });
     };
 
-    let raw = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("reading {}", manifest_path.display()))?;
-    let manifest: serde_json::Value = serde_json::from_str(&raw)
-        .with_context(|| format!("parsing {}", manifest_path.display()))?;
-    let source_dataset_hash = string_field(&manifest, "source_dataset_hash");
-    let status = string_field(&manifest, "status").unwrap_or_else(|| "unknown".into());
-    let training_status = adapter_training_status(&status);
-    let activation_status = adapter_activation_status(&status, &manifest);
-    let trained_source_dataset_hash = string_field(&manifest, "trained_source_dataset_hash")
+    let active_snapshot = manifests.iter().rev().find(|(_, manifest)| {
+        let status = string_field(manifest, "status").unwrap_or_else(|| "unknown".into());
+        adapter_activation_status(&status, manifest) == "active"
+    });
+    let current_snapshot = manifests.iter().rev().find(|(_, manifest)| {
+        string_field(manifest, "source_dataset_hash").as_deref()
+            == Some(current_source_dataset_hash.as_str())
+    });
+    let (manifest_path, manifest) = active_snapshot.unwrap_or(newest_snapshot);
+    let source_dataset_hash = string_field(manifest, "source_dataset_hash");
+    let status = string_field(manifest, "status").unwrap_or_else(|| "unknown".into());
+    let activation_status = adapter_activation_status(&status, manifest);
+    let current_manifest = current_snapshot.map(|(_, manifest)| manifest);
+    let current_status = current_manifest
+        .and_then(|manifest| string_field(manifest, "status"))
+        .unwrap_or_else(|| status.clone());
+    let training_status = if active_snapshot.is_some()
+        && current_snapshot
+            .map(|(path, _)| path != manifest_path)
+            .unwrap_or(false)
+    {
+        adapter_training_status(&current_status)
+    } else {
+        adapter_training_status(&status)
+    };
+    let trained_source_dataset_hash = string_field(manifest, "trained_source_dataset_hash")
         .or_else(|| match status.as_str() {
             "trained" | "active" => source_dataset_hash.clone(),
             _ => None,
+        });
+    let data_freshness = current_snapshot
+        .map(|_| "fresh".to_string())
+        .unwrap_or_else(|| {
+            match source_dataset_hash.as_deref() {
+                Some(hash) if hash == current_source_dataset_hash => "fresh",
+                Some(_) => "stale",
+                None => "unknown",
+            }
+            .to_string()
         });
     let freshness = match source_dataset_hash.as_deref() {
         Some(hash) if hash == current_source_dataset_hash => "fresh",
@@ -539,17 +567,24 @@ pub fn read_cortex_adapter_state(
         None => "unknown",
     }
     .to_string();
-    let reason = match freshness.as_str() {
-        "fresh" => Some("Adapter source dataset hash matches current training exports".into()),
-        "stale" => Some("Adapter source dataset hash does not match current training exports".into()),
+    let reason = match (activation_status.as_str(), freshness.as_str(), data_freshness.as_str()) {
+        ("active", "stale", "fresh") => Some(
+            "Current adapter data is fresh, while the active adapter was trained on an older source dataset".into(),
+        ),
+        ("active", "stale", _) => Some(
+            "Active adapter source dataset hash does not match current training exports".into(),
+        ),
+        (_, "fresh", _) => Some("Adapter source dataset hash matches current training exports".into()),
+        (_, "stale", _) => Some("Adapter source dataset hash does not match current training exports".into()),
         _ => Some("Manifest does not include source_dataset_hash; rerun train_mlx_lora.py to make freshness inspectable".into()),
     };
+    let data_manifest = current_manifest.unwrap_or(manifest);
 
     Ok(CortexAdapterState {
         freshness: freshness.clone(),
         status,
         reason,
-        data_freshness: freshness,
+        data_freshness,
         training_status,
         activation_status,
         base_model: string_field(&manifest, "base_model"),
@@ -560,14 +595,19 @@ pub fn read_cortex_adapter_state(
         trained_source_dataset_hash,
         active_adapter_hash: string_field(&manifest, "active_adapter_hash")
             .or_else(|| string_field(&manifest, "adapter_hash")),
-        prepared_dataset_hash: string_field(&manifest, "prepared_dataset_hash")
+        prepared_dataset_hash: string_field(data_manifest, "prepared_dataset_hash")
+            .or_else(|| string_field(data_manifest, "dataset_hash"))
+            .or_else(|| string_field(&manifest, "prepared_dataset_hash"))
             .or_else(|| string_field(&manifest, "dataset_hash")),
         eval_score: f64_field(&manifest, "eval_score"),
         failure_reason: string_field(&manifest, "failure_reason"),
-        train_records: usize_field(&manifest, "train_records"),
-        valid_records: usize_field(&manifest, "valid_records"),
-        test_records: usize_field(&manifest, "test_records"),
-        iters: usize_field(&manifest, "iters"),
+        train_records: usize_field(data_manifest, "train_records")
+            .or_else(|| usize_field(&manifest, "train_records")),
+        valid_records: usize_field(data_manifest, "valid_records")
+            .or_else(|| usize_field(&manifest, "valid_records")),
+        test_records: usize_field(data_manifest, "test_records")
+            .or_else(|| usize_field(&manifest, "test_records")),
+        iters: usize_field(data_manifest, "iters").or_else(|| usize_field(&manifest, "iters")),
         checked_at,
     })
 }
@@ -818,15 +858,23 @@ fn read_manifest(path: &Path) -> anyhow::Result<serde_json::Value> {
         .with_context(|| format!("parsing adapter manifest {}", path.display()))
 }
 
-fn newest_adapter_manifest(adapters_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
-    let mut manifests = Vec::new();
-    collect_adapter_manifests(adapters_dir, &mut manifests)?;
-    manifests.sort_by_key(|path| {
+fn adapter_manifests_by_modified(
+    adapters_dir: &Path,
+) -> anyhow::Result<Vec<(PathBuf, serde_json::Value)>> {
+    let mut paths = Vec::new();
+    collect_adapter_manifests(adapters_dir, &mut paths)?;
+    paths.sort_by_key(|path| {
         fs::metadata(path)
             .and_then(|metadata| metadata.modified())
             .ok()
     });
-    Ok(manifests.pop())
+    paths
+        .into_iter()
+        .map(|path| {
+            let manifest = read_manifest(&path)?;
+            Ok((path, manifest))
+        })
+        .collect()
 }
 
 fn newest_adapter_manifest_matching(
