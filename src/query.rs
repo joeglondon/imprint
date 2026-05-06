@@ -25,7 +25,7 @@ impl MemoryQueryEngine {
         attention_scores: &HashMap<RegionId, f32>,
     ) -> RoutedQuery {
         let tokens = tokenize(&request.text);
-        let mut scored = cortex_index
+        let mut cortex_scored = cortex_index
             .regions
             .iter()
             .map(|region| {
@@ -94,16 +94,30 @@ impl MemoryQueryEngine {
                 }
             })
             .collect::<Vec<_>>();
+        cortex_scored.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.region_id.cmp(&right.region_id))
+        });
         let cortex_region_ids = cortex_index
             .regions
             .iter()
             .map(|region| region.region_id.clone())
             .collect::<HashSet<_>>();
+        let max_regions = request.max_regions.max(1);
+        let mut candidates = cortex_scored
+            .iter()
+            .filter(|candidate| candidate.score > 0.0)
+            .take(max_regions)
+            .cloned()
+            .collect::<Vec<_>>();
         if let Some(memory_map) = fallback_memory_map {
             let mut fallback_request = request.clone();
             fallback_request.max_regions = memory_map.entries.len().max(request.max_regions);
-            scored.extend(
-                self.route_with_region_scores(
+            let fallback_candidates = self
+                .route_with_region_scores(
                     memory_map,
                     &fallback_request,
                     semantic_scores,
@@ -116,20 +130,16 @@ impl MemoryQueryEngine {
                 .map(|mut candidate| {
                     candidate.reason = format!("legacy fallback: {}", candidate.reason);
                     candidate
-                }),
-            );
+                });
+            candidates
+                .extend(fallback_candidates.take(max_regions.saturating_sub(candidates.len())));
         }
-        scored.sort_by(|left, right| {
-            right
-                .score
-                .partial_cmp(&left.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.region_id.cmp(&right.region_id))
-        });
-        let candidates = scored
-            .into_iter()
-            .take(request.max_regions.max(1))
-            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            candidates = cortex_scored
+                .into_iter()
+                .take(max_regions)
+                .collect::<Vec<_>>();
+        }
         let region_ids = candidates
             .iter()
             .map(|candidate| candidate.region_id.clone())
@@ -458,6 +468,74 @@ impl MemoryQueryEngine {
             chosen_regions: routed.region_ids,
             reasons: vec![routed.rationale],
         }
+    }
+
+    pub fn trace_with_signals<E: Embedder>(
+        &self,
+        embedder: &E,
+        memory: &PersistedMemory,
+        query: &str,
+        max_regions: usize,
+        attention_marks: &[AttentionMark],
+        memory_accesses: &[MemoryAccess],
+        now: u64,
+        cortex_index: Option<&CortexIndex>,
+    ) -> anyhow::Result<QueryTrace> {
+        let query_embedding = embedder.embed(query)?;
+        let mut attention_scores = attention_scores(attention_marks);
+        merge_access_scores(&mut attention_scores, memory_accesses, now);
+        let region_attention_scores = attention_scores
+            .iter()
+            .filter_map(|(key, score)| {
+                key.strip_prefix("region:")
+                    .map(|region_id| (region_id.to_string(), *score))
+            })
+            .collect::<HashMap<_, _>>();
+        let semantic_scores = memory
+            .regions
+            .iter()
+            .map(|region| {
+                (
+                    region.id.clone(),
+                    cosine_similarity(&query_embedding, &region.centroid),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let request = QueryRequest {
+            text: query.into(),
+            filters: BTreeMap::new(),
+            max_regions,
+            max_chunks: 5,
+        };
+        let routed = if let Some(cortex_index) = cortex_index {
+            self.route_with_cortex_index_scores(
+                cortex_index,
+                memory.memory_map.as_ref(),
+                &request,
+                &semantic_scores,
+                &region_attention_scores,
+            )
+        } else {
+            self.route_with_region_scores(
+                memory.memory_map.as_ref().expect("memory map missing"),
+                &request,
+                &semantic_scores,
+                &region_attention_scores,
+            )
+        };
+        let mut reasons = vec![routed.rationale];
+        reasons.extend(
+            routed
+                .route_plan
+                .next_steps
+                .iter()
+                .map(|step| format!("next: {step}")),
+        );
+        Ok(QueryTrace {
+            query: query.into(),
+            chosen_regions: routed.region_ids,
+            reasons,
+        })
     }
 }
 
@@ -911,6 +989,81 @@ mod tests {
         assert_eq!(legacy.region_ids, vec!["legacy-distractor"]);
         assert_eq!(cortex.region_ids, vec!["cortex-target"]);
         assert!(cortex.rationale.contains("cortex-index"));
+    }
+
+    #[test]
+    fn trace_uses_cortex_index_route_contract_when_available() {
+        let embedder = crate::index::HashEmbedder::default();
+        let memory_map = MemoryMap {
+            budget_bytes: 2048,
+            serialized: String::new(),
+            entries: vec![
+                entry(
+                    "legacy-distractor",
+                    "Plantar Fascia",
+                    "Legacy projection points at the old bucket",
+                ),
+                entry("cortex-target", "Archive", "Opaque summary"),
+            ],
+        };
+        let memory = PersistedMemory {
+            documents: Vec::new(),
+            chunks: Vec::new(),
+            regions: vec![Region {
+                id: "cortex-target".into(),
+                label: "Archive".into(),
+                summary: "Opaque summary".into(),
+                filters: BTreeMap::new(),
+                chunk_ids: Vec::new(),
+                centroid: embedder.embed("rehabilitation source").expect("embedding"),
+                neighbors: Vec::new(),
+            }],
+            links: Vec::new(),
+            memory_map: Some(memory_map.clone()),
+        };
+        let cortex_index = CortexIndex {
+            id: "cortex-index:current".into(),
+            schema_version: 1,
+            corpus_hash: "hash".into(),
+            created_at: 1,
+            compiler: "test".into(),
+            source_refs: vec!["imprint://chunk/target".into()],
+            artifact_ids: vec!["artifact:target".into()],
+            regions: vec![CortexRegionSketch {
+                region_id: "cortex-target".into(),
+                label: "Archive".into(),
+                summary: "Opaque summary".into(),
+                source_refs: vec!["imprint://chunk/target".into()],
+                artifact_ids: vec!["artifact:target".into()],
+                route_examples: vec!["plantar fascia rehabilitation source".into()],
+            }],
+            compatibility_map: memory_map.clone(),
+        };
+
+        let legacy_trace = MemoryQueryEngine.trace(&memory_map, "plantar fascia", 1);
+        let cortex_trace = MemoryQueryEngine
+            .trace_with_signals(
+                &embedder,
+                &memory,
+                "plantar fascia",
+                1,
+                &[],
+                &[],
+                0,
+                Some(&cortex_index),
+            )
+            .expect("trace");
+
+        assert_eq!(legacy_trace.chosen_regions, vec!["legacy-distractor"]);
+        assert_eq!(cortex_trace.chosen_regions, vec!["cortex-target"]);
+        assert!(cortex_trace
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("cortex-index")));
+        assert!(cortex_trace
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("memory_expand")));
     }
 
     #[test]

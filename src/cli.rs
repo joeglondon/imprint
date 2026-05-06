@@ -9,6 +9,9 @@ use anyhow::{anyhow, Context};
 use clap::{Parser, Subcommand};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const MEMORY_ACCESS_HORIZON_MILLIS: u64 = 30 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Parser)]
 #[command(name = "ai-memory")]
@@ -137,11 +140,22 @@ pub fn run() -> anyhow::Result<()> {
         }
         Command::Trace { query, max_regions } => {
             let memory = load_ready_memory(&store)?;
-            let trace = engine.trace(
-                memory.memory_map.as_ref().context("memory map missing")?,
+            let now = now_millis();
+            let attention_marks = store.list_attention_marks(None).unwrap_or_default();
+            let memory_accesses = store
+                .list_memory_accesses(None, Some(now.saturating_sub(MEMORY_ACCESS_HORIZON_MILLIS)))
+                .unwrap_or_default();
+            let cortex_index = store.load_current_cortex_index().unwrap_or_default();
+            let trace = engine.trace_with_signals(
+                &embedder,
+                &memory,
                 &query,
                 max_regions,
-            );
+                &attention_marks,
+                &memory_accesses,
+                now,
+                cortex_index.as_ref(),
+            )?;
             println!("{}", serde_json::to_string_pretty(&trace)?);
         }
         Command::Query {
@@ -284,6 +298,13 @@ pub fn run() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 fn parse_expand_mode(raw: &str) -> anyhow::Result<ExpandMode> {
