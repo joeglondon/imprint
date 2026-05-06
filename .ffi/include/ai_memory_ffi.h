@@ -34,6 +34,7 @@ char *ai_memory_write_web_finding(const char *store_path, const char *write_json
 char *ai_memory_write_agent_link(const char *store_path, const char *write_json);
 char *ai_memory_apply_attention_mark(const char *store_path, const char *write_json);
 char *ai_memory_compile_memory_brain(const char *store_path);
+char *ai_memory_load_cortex_adapter_snapshot(const char *store_path);
 void ai_memory_free_string(char *ptr);
 
 #endif

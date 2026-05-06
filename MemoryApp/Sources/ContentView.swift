@@ -117,6 +117,8 @@ private struct GraphiteTitleBar: View {
                     .disabled(appState.isBusy)
                 IconButton("Rebuild", systemImage: "arrow.triangle.2.circlepath", action: appState.rebuild)
                     .disabled(appState.isBusy)
+                IconButton("Compile Cortex", systemImage: "brain.head.profile", action: appState.compileMemoryBrain)
+                    .disabled(appState.isBusy)
                 IconButton("Refresh Map", systemImage: "arrow.clockwise", action: appState.refreshSnapshot)
                     .disabled(appState.isBusy)
             }
@@ -1061,6 +1063,79 @@ private struct PolicyLine: View {
     }
 }
 
+private struct AdapterStateSummary: View {
+    @Environment(\.memoryTheme) private var theme
+    let state: CortexAdapterState?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Cortex Adapter")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(theme.ink.tertiary)
+                Spacer()
+                Tag(state?.freshness ?? "not compiled", tone: tone)
+            }
+
+            if let state {
+                DetailRow(label: "Status", value: state.status)
+                if let baseModel = state.baseModel {
+                    DetailRow(label: "Base", value: baseModel)
+                }
+                DetailRow(label: "Source Hash", value: shortHash(state.currentSourceDatasetHash))
+                if let preparedDatasetHash = state.preparedDatasetHash {
+                    DetailRow(label: "Prepared Hash", value: shortHash(preparedDatasetHash))
+                }
+                if let reason = state.reason {
+                    Text(reason)
+                        .font(.system(size: 11.5))
+                        .lineSpacing(2)
+                        .foregroundStyle(theme.ink.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                Text("No persisted adapter freshness for this library.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(theme.ink.secondary)
+            }
+        }
+        .padding(.top, 6)
+    }
+
+    private var tone: ThemeTone {
+        switch state?.freshness {
+        case "fresh": return .ai
+        case "stale": return .d
+        case "missing": return .c
+        default: return .ink
+        }
+    }
+
+    private func shortHash(_ hash: String) -> String {
+        String(hash.prefix(12))
+    }
+}
+
+private struct DetailRow: View {
+    @Environment(\.memoryTheme) private var theme
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(theme.ink.quaternary)
+                .frame(width: 86, alignment: .leading)
+            Text(value)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(theme.ink.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+    }
+}
+
 private struct ModelInspector: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.memoryTheme) private var theme
@@ -1134,6 +1209,8 @@ private struct ModelInspector: View {
                             .foregroundStyle(health.status == "connected" ? theme.accents.success : theme.ink.tertiary)
                             .padding(.top, 4)
                     }
+
+                    AdapterStateSummary(state: appState.cortexAdapterState)
                 }
 
                 InspectorDivider()

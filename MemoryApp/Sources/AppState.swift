@@ -39,6 +39,7 @@ final class AppState: ObservableObject {
     @Published var chatContextTraces: [ChatContextTrace] = []
     @Published var derivedMemories: [DerivedMemory] = []
     @Published var workspaceConnections = WorkspaceConnection.defaults
+    @Published var cortexAdapterState: CortexAdapterState?
     @Published var statusMessage = "Load files to begin building memory."
     @Published var isBusy = false
     @Published var operationProgress: OperationProgress?
@@ -62,6 +63,7 @@ final class AppState: ObservableObject {
             modelConfig = try RustBridge.loadModelConfig(storePath: storePath)
             summary = try RustBridge.getSummary(storePath: storePath)
             snapshot = try? RustBridge.getSnapshot(storePath: storePath)
+            cortexAdapterState = try? RustBridge.loadCortexAdapterSnapshot(storePath: storePath).adapterState
             loadChatState()
         } catch {
             statusMessage = error.localizedDescription
@@ -217,6 +219,27 @@ final class AppState: ObservableObject {
         )
     }
 
+    func compileMemoryBrain() {
+        let storePath = self.storePath
+        runTask(
+            message: "Compiling cortex memory…",
+            operation: {
+                let result = try RustBridge.compileMemoryBrain(storePath: storePath)
+                let snapshot = try RustBridge.loadCortexAdapterSnapshot(storePath: storePath)
+                return (result, snapshot)
+            },
+            apply: { [weak self] result, snapshot in
+                guard let self else { return }
+                self.cortexAdapterState = snapshot.adapterState ?? result.adapterState
+                if let adapterState = self.cortexAdapterState {
+                    self.statusMessage = "Compiled \(result.artifactsWritten) artifacts. Adapter \(adapterState.freshness)."
+                } else {
+                    self.statusMessage = "Compiled \(result.artifactsWritten) artifacts."
+                }
+            }
+        )
+    }
+
     func refreshSnapshot() {
         let storePath = self.storePath
         runTask(
@@ -224,12 +247,14 @@ final class AppState: ObservableObject {
             operation: {
                 let summary = try RustBridge.getSummary(storePath: storePath)
                 let snapshot = try RustBridge.getSnapshot(storePath: storePath)
-                return (summary, snapshot)
+                let adapterSnapshot = try RustBridge.loadCortexAdapterSnapshot(storePath: storePath)
+                return (summary, snapshot, adapterSnapshot)
             },
-            apply: { [weak self] summary, snapshot in
+            apply: { [weak self] summary, snapshot, adapterSnapshot in
                 guard let self else { return }
                 self.summary = summary
                 self.snapshot = snapshot
+                self.cortexAdapterState = adapterSnapshot.adapterState
             }
         )
     }

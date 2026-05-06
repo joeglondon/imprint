@@ -368,6 +368,11 @@ pub extern "C" fn ai_memory_compile_memory_brain(store_path: *const c_char) -> *
     respond(|| app::compile_memory_brain(&path_arg(store_path)?))
 }
 
+#[no_mangle]
+pub extern "C" fn ai_memory_load_cortex_adapter_snapshot(store_path: *const c_char) -> *mut c_char {
+    respond(|| app::load_cortex_adapter_snapshot(&path_arg(store_path)?))
+}
+
 fn respond<T: Serialize>(f: impl FnOnce() -> anyhow::Result<T>) -> *mut c_char {
     let payload: FfiResponse<Value> = match f() {
         Ok(data) => FfiResponse {

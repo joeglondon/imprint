@@ -255,6 +255,34 @@ impl FileMemoryStore {
         }
     }
 
+    pub fn save_cortex_adapter_state(&self, state: &CortexAdapterState) -> Result<()> {
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT OR REPLACE INTO cortex_adapter_state (
+                id, freshness, status, checked_at, state_json
+             ) VALUES (1, ?1, ?2, ?3, ?4)",
+            params![
+                state.freshness,
+                state.status,
+                state.checked_at as i64,
+                to_json(state)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_cortex_adapter_state(&self) -> Result<Option<CortexAdapterState>> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT state_json FROM cortex_adapter_state WHERE id = 1",
+                [],
+                |row| from_json(row.get::<_, String>(0)?),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn insert_web_finding(&self, finding: &WebFinding) -> Result<()> {
         let connection = self.connection()?;
         connection.execute(
@@ -619,6 +647,14 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             updated_at INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_brain_artifacts_kind ON brain_artifacts(kind_json);
+        CREATE TABLE IF NOT EXISTS cortex_adapter_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            freshness TEXT NOT NULL,
+            status TEXT NOT NULL,
+            checked_at INTEGER NOT NULL,
+            state_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_cortex_adapter_state_checked ON cortex_adapter_state(checked_at);
         CREATE TABLE IF NOT EXISTS attention_marks (
             id TEXT PRIMARY KEY,
             target_id TEXT NOT NULL,

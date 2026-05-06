@@ -136,6 +136,10 @@ enum RustBridge {
         try decode(ai_memory_compile_memory_brain(storePath))
     }
 
+    static func loadCortexAdapterSnapshot(storePath: String) throws -> CortexAdapterSnapshot {
+        try decode(ai_memory_load_cortex_adapter_snapshot(storePath))
+    }
+
     private static func decode<T: Decodable>(_ ptr: UnsafeMutablePointer<CChar>?) throws -> T {
         guard let ptr else {
             throw RustBridgeError.invalidResponse

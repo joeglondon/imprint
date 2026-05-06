@@ -404,6 +404,10 @@ struct CortexAdapterState: Codable, Equatable {
     var checkedAt: UInt64
 }
 
+struct CortexAdapterSnapshot: Codable, Equatable {
+    var adapterState: CortexAdapterState?
+}
+
 struct ChatTurnRequest: Codable, Equatable {
     var sessionId: String
     var message: String

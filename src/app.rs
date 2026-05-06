@@ -895,6 +895,7 @@ pub fn compile_memory_brain(store_root: &Path) -> anyhow::Result<BrainCompileRes
     let source_dataset_hash = crate::training::training_source_hash(&store_root.join("training"))?;
     let adapter_state =
         crate::training::read_cortex_adapter_state(store_root, source_dataset_hash, created_at)?;
+    store.save_cortex_adapter_state(&adapter_state)?;
     sync_brain_artifacts_with_config(store_root, &store, &config)?;
     sync_derived_memories_with_config(store_root, &store, &config)?;
     Ok(BrainCompileResult {
@@ -904,6 +905,13 @@ pub fn compile_memory_brain(store_root: &Path) -> anyhow::Result<BrainCompileRes
         training_records_path: training_records_path.display().to_string(),
         export_files,
         adapter_state: Some(adapter_state),
+    })
+}
+
+pub fn load_cortex_adapter_snapshot(store_root: &Path) -> anyhow::Result<CortexAdapterSnapshot> {
+    let store = FileMemoryStore::new(store_root);
+    Ok(CortexAdapterSnapshot {
+        adapter_state: store.load_cortex_adapter_state()?,
     })
 }
 
@@ -4451,6 +4459,13 @@ mod tests {
             adapter_state.base_model.as_deref(),
             Some("tiny-memory-model")
         );
+        let persisted_snapshot =
+            load_cortex_adapter_snapshot(&root).expect("load persisted adapter state");
+        let persisted_adapter = persisted_snapshot
+            .adapter_state
+            .as_ref()
+            .expect("persisted adapter state");
+        assert_eq!(persisted_adapter, adapter_state);
 
         let memories = list_derived_memories(&root, None).expect("derived memories");
         assert!(memories.iter().any(|memory| {

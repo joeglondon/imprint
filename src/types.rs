@@ -502,6 +502,12 @@ pub struct CortexAdapterState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CortexAdapterSnapshot {
+    #[serde(default)]
+    pub adapter_state: Option<CortexAdapterState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BrainArtifactKind {
     LibraryMap,
     RegionCard,
