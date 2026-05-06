@@ -133,6 +133,23 @@ pub struct RoutedQuery {
     pub region_ids: Vec<RegionId>,
     pub filters: BTreeMap<String, String>,
     pub rationale: String,
+    #[serde(default)]
+    pub route_plan: RoutePlan,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RoutePlan {
+    pub candidates: Vec<RouteCandidate>,
+    pub next_steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RouteCandidate {
+    pub region_id: RegionId,
+    pub label: String,
+    pub score: f32,
+    pub matched_terms: Vec<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

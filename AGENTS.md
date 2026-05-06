@@ -66,12 +66,16 @@ Do not optimize for dumping whole corpora into prompt context. Optimize for anch
 
 ## Current Known Gaps
 
-- Routing is still lexical over `MemoryMap`; it needs a stronger agent/tool contract.
+- Routing now returns a structured `RoutePlan` with candidate regions, scores, matched terms, and suggested next tool steps. It is still lexical over `MemoryMap`; it needs embedding-aware routing and a stronger recursive-agent policy contract.
 - Vector search is in-memory and approximate, not yet a scalable ANN store.
 - Source anchors target extracted text offsets, not exact rendered PDF or original-file deep links.
 - Original source files are referenced by path but not managed as durable artifacts.
 - API model settings exist in UI, but Rust embedding support is currently local Ollama plus hash fallback.
 - Import is synchronous from the app perspective and needs queueing, resumability, deletion, and watchers.
+
+## Recent Improvements
+
+- 2026-05-06: `RoutedQuery` now carries a typed route plan for LLM clients: ranked region candidates, lexical matched terms, per-candidate reasons, and next tool steps that preserve the route -> search -> open/surf -> expand/cite workflow. Swift mirror models were updated to keep the FFI/UI contract aligned. Remaining drawback: candidate scoring is still lexical and string-contained, so semantically related regions without shared words can be missed.
 
 ## Validation
 

@@ -239,6 +239,22 @@ struct RoutedQuery: Codable, Equatable {
     var regionIds: [String]
     var filters: [String: String]
     var rationale: String
+    var routePlan: RoutePlan
+}
+
+struct RoutePlan: Codable, Equatable {
+    var candidates: [RouteCandidate]
+    var nextSteps: [String]
+}
+
+struct RouteCandidate: Codable, Equatable, Identifiable {
+    var regionId: String
+    var label: String
+    var score: Float
+    var matchedTerms: [String]
+    var reason: String
+
+    var id: String { regionId }
 }
 
 struct QueryRequest: Codable, Equatable {
