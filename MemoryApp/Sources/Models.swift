@@ -156,6 +156,7 @@ struct ImportResult: Codable, Equatable {
     var skippedCount: Int
     var embeddedCount: Int
     var reusedEmbeddingCount: Int
+    var adapterState: CortexAdapterState?
 }
 
 struct ImportSkip: Codable, Equatable, Identifiable {

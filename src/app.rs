@@ -156,6 +156,8 @@ pub struct ImportResult {
     pub skipped_count: usize,
     pub embedded_count: usize,
     pub reused_embedding_count: usize,
+    #[serde(default)]
+    pub adapter_state: Option<CortexAdapterState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -240,8 +242,13 @@ pub fn ingest_paths(store_root: &Path, paths: &[PathBuf]) -> anyhow::Result<Impo
     let config = load_model_config(store_root)?;
     let ingester = Ingester::new(embedder_for_config(&config)?);
     let batch = ingester.extract_documents(paths)?;
-    let existing_ids = existing
+    let existing_source_documents = existing
         .documents
+        .iter()
+        .filter(|document| !is_compiler_generated_document(document))
+        .cloned()
+        .collect::<Vec<_>>();
+    let existing_ids = existing_source_documents
         .iter()
         .map(|document| document.id.clone())
         .collect::<HashSet<_>>();
@@ -263,8 +270,7 @@ pub fn ingest_paths(store_root: &Path, paths: &[PathBuf]) -> anyhow::Result<Impo
         .filter_map(|document| document.metadata.get("path").cloned())
         .collect::<Vec<_>>();
 
-    let mut documents = existing
-        .documents
+    let mut documents = existing_source_documents
         .into_iter()
         .filter(|document| !incoming_ids.contains(&document.id))
         .collect::<Vec<_>>();
@@ -272,7 +278,21 @@ pub fn ingest_paths(store_root: &Path, paths: &[PathBuf]) -> anyhow::Result<Impo
     let (memory, stats) = rebuild_from_documents(store_root, documents, &existing.chunks, &config)?;
     write_progress(store_root, "save", 99, 100, "Saving memory store")?;
     store.save(&memory)?;
-    write_progress(store_root, "complete", 100, 100, "Memory updated")?;
+    write_progress(
+        store_root,
+        "cortex",
+        99,
+        100,
+        "Refreshing cortex adapter data",
+    )?;
+    let adapter_state = compile_memory_brain(store_root)?.adapter_state;
+    write_progress(
+        store_root,
+        "complete",
+        100,
+        100,
+        "Memory updated and cortex refreshed",
+    )?;
     Ok(ImportResult {
         summary: summarize(&memory),
         imported_count: imported_paths.len(),
@@ -280,6 +300,7 @@ pub fn ingest_paths(store_root: &Path, paths: &[PathBuf]) -> anyhow::Result<Impo
         skipped_count: batch.skipped_paths.len(),
         embedded_count: stats.embedded_count,
         reused_embedding_count: stats.reused_embedding_count,
+        adapter_state,
         imported_paths,
         replaced_paths,
         skipped_paths: batch.skipped_paths,
@@ -293,13 +314,31 @@ pub fn rebuild_memory(store_root: &Path) -> anyhow::Result<ImportResult> {
     if memory.documents.is_empty() {
         return Err(anyhow!("store is empty; ingest files first"));
     }
-    let docs = memory.documents;
+    let docs = memory
+        .documents
+        .into_iter()
+        .filter(|document| !is_compiler_generated_document(document))
+        .collect::<Vec<_>>();
     let reusable_chunks = memory.chunks;
     let config = load_model_config(store_root)?;
     let (rebuilt, stats) = rebuild_from_documents(store_root, docs, &reusable_chunks, &config)?;
     write_progress(store_root, "save", 99, 100, "Saving rebuilt memory")?;
     store.save(&rebuilt)?;
-    write_progress(store_root, "complete", 100, 100, "Memory rebuilt")?;
+    write_progress(
+        store_root,
+        "cortex",
+        99,
+        100,
+        "Refreshing cortex adapter data",
+    )?;
+    let adapter_state = compile_memory_brain(store_root)?.adapter_state;
+    write_progress(
+        store_root,
+        "complete",
+        100,
+        100,
+        "Memory rebuilt and cortex refreshed",
+    )?;
     Ok(ImportResult {
         summary: summarize(&rebuilt),
         imported_paths: Vec::new(),
@@ -310,6 +349,7 @@ pub fn rebuild_memory(store_root: &Path) -> anyhow::Result<ImportResult> {
         skipped_count: 0,
         embedded_count: stats.embedded_count,
         reused_embedding_count: stats.reused_embedding_count,
+        adapter_state,
     })
 }
 

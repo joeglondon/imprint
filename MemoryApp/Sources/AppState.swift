@@ -193,9 +193,14 @@ final class AppState: ObservableObject {
             apply: { [weak self] result, snapshot in
                 guard let self else { return }
                 self.importResult = result
-                self.summary = result.summary
+                self.summary = snapshot.summary
                 self.snapshot = snapshot
-                self.statusMessage = "Imported \(result.importedCount), reused \(result.reusedEmbeddingCount), embedded \(result.embeddedCount)."
+                self.cortexAdapterState = result.adapterState
+                if let adapterState = result.adapterState {
+                    self.statusMessage = "Imported \(result.importedCount), reused \(result.reusedEmbeddingCount), embedded \(result.embeddedCount). Adapter \(adapterState.freshness)."
+                } else {
+                    self.statusMessage = "Imported \(result.importedCount), reused \(result.reusedEmbeddingCount), embedded \(result.embeddedCount)."
+                }
             }
         )
     }
@@ -212,9 +217,14 @@ final class AppState: ObservableObject {
             apply: { [weak self] result, snapshot in
                 guard let self else { return }
                 self.importResult = result
-                self.summary = result.summary
+                self.summary = snapshot.summary
                 self.snapshot = snapshot
-                self.statusMessage = "Memory rebuilt: reused \(result.reusedEmbeddingCount), embedded \(result.embeddedCount)."
+                self.cortexAdapterState = result.adapterState
+                if let adapterState = result.adapterState {
+                    self.statusMessage = "Memory rebuilt: reused \(result.reusedEmbeddingCount), embedded \(result.embeddedCount). Adapter \(adapterState.freshness)."
+                } else {
+                    self.statusMessage = "Memory rebuilt: reused \(result.reusedEmbeddingCount), embedded \(result.embeddedCount)."
+                }
             }
         )
     }
