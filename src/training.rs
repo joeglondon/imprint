@@ -176,6 +176,17 @@ pub fn run_cortex_adapter_training_job(
     source_dataset_hash: &str,
     options: CortexAdapterTrainingOptions,
 ) -> anyhow::Result<CortexAdapterJob> {
+    let job =
+        queue_cortex_adapter_training_job(store_root, base_model, source_dataset_hash, options)?;
+    run_queued_cortex_adapter_training_job(store_root, &job.id)
+}
+
+pub fn queue_cortex_adapter_training_job(
+    store_root: &Path,
+    base_model: &str,
+    source_dataset_hash: &str,
+    options: CortexAdapterTrainingOptions,
+) -> anyhow::Result<CortexAdapterJob> {
     let store = FileMemoryStore::new(store_root);
     let queued_at = now_millis();
     let hash_prefix = &source_dataset_hash[..12.min(source_dataset_hash.len())];
@@ -229,7 +240,7 @@ pub fn run_cortex_adapter_training_job(
     payload.insert("dry_run".into(), options.dry_run.to_string());
     payload.insert("timeout_millis".into(), options.timeout_millis.to_string());
 
-    let mut job = CortexAdapterJob {
+    let job = CortexAdapterJob {
         id: format!("adapter-job:{hash_prefix}:{queued_at}"),
         status: "queued".into(),
         source_dataset_hash: source_dataset_hash.into(),
@@ -251,6 +262,28 @@ pub fn run_cortex_adapter_training_job(
         finished_at: None,
     };
     store.upsert_cortex_adapter_job(&job)?;
+    Ok(job)
+}
+
+pub fn run_queued_cortex_adapter_training_job(
+    store_root: &Path,
+    job_id: &str,
+) -> anyhow::Result<CortexAdapterJob> {
+    let store = FileMemoryStore::new(store_root);
+    let mut job = store
+        .load_cortex_adapter_job(job_id)?
+        .with_context(|| format!("cortex adapter job {job_id} not found"))?;
+    let output_dir = PathBuf::from(&job.adapter_output_path);
+    let log_path = job
+        .log_path
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| output_dir.with_extension("log"));
+    let timeout_millis = job
+        .payload
+        .get("timeout_millis")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_ADAPTER_TRAINING_TIMEOUT_MILLIS);
 
     let started_at = now_millis();
     job.status = "training".into();
@@ -258,7 +291,7 @@ pub fn run_cortex_adapter_training_job(
     job.started_at = Some(started_at);
     store.upsert_cortex_adapter_job(&job)?;
 
-    let result = execute_training_command(&job.command, options.timeout_millis);
+    let result = execute_training_command(&job.command, timeout_millis);
     let finished_at = now_millis();
     write_training_log(&log_path, &job.command, started_at, finished_at, &result)?;
     job.finished_at = Some(finished_at);
@@ -281,7 +314,7 @@ pub fn run_cortex_adapter_training_job(
             job.iters = usize_field(&manifest, "iters").or(job.iters);
             let adapter_state = read_cortex_adapter_state(
                 store_root,
-                source_dataset_hash.to_string(),
+                job.source_dataset_hash.clone(),
                 finished_at,
             )?;
             store.save_cortex_adapter_state(&adapter_state)?;

@@ -287,6 +287,9 @@ pub fn ingest_paths(store_root: &Path, paths: &[PathBuf]) -> anyhow::Result<Impo
         "Refreshing cortex adapter data",
     )?;
     let adapter_state = compile_memory_brain(store_root)?.adapter_state;
+    if let Some(state) = adapter_state.as_ref() {
+        let _ = maybe_start_cortex_adapter_training_after_refresh(store_root, &config, state);
+    }
     write_progress(
         store_root,
         "complete",
@@ -333,6 +336,9 @@ pub fn rebuild_memory(store_root: &Path) -> anyhow::Result<ImportResult> {
         "Refreshing cortex adapter data",
     )?;
     let adapter_state = compile_memory_brain(store_root)?.adapter_state;
+    if let Some(state) = adapter_state.as_ref() {
+        let _ = maybe_start_cortex_adapter_training_after_refresh(store_root, &config, state);
+    }
     write_progress(
         store_root,
         "complete",
@@ -1034,6 +1040,73 @@ pub fn load_cortex_adapter_snapshot(store_root: &Path) -> anyhow::Result<CortexA
     Ok(CortexAdapterSnapshot {
         adapter_state: store.load_cortex_adapter_state()?,
     })
+}
+
+fn maybe_start_cortex_adapter_training_after_refresh(
+    store_root: &Path,
+    config: &ModelConfig,
+    adapter_state: &CortexAdapterState,
+) -> anyhow::Result<Option<CortexAdapterJob>> {
+    if adapter_state.data_freshness != "fresh" {
+        return Ok(None);
+    }
+    if adapter_state.training_status == "training"
+        || adapter_state.training_status == "queued"
+        || (adapter_state.training_status == "trained" && adapter_state.freshness == "fresh")
+    {
+        return Ok(None);
+    }
+    if config.runtime_preset != ModelRuntimePreset::Mlx {
+        return Ok(None);
+    }
+    let Some(base_model) = adapter_state
+        .base_model
+        .as_deref()
+        .or(config.compiler_model.as_deref())
+        .or(config.response_model.as_deref())
+        .or(config.chat_model.as_deref())
+        .filter(|model| is_trainable_cortex_adapter_model(model))
+    else {
+        return Ok(None);
+    };
+
+    let store = FileMemoryStore::new(store_root);
+    let has_existing_job = store
+        .list_cortex_adapter_jobs(None)?
+        .iter()
+        .any(|job| job.source_dataset_hash == adapter_state.current_source_dataset_hash);
+    if has_existing_job {
+        return Ok(None);
+    }
+
+    let job = crate::training::queue_cortex_adapter_training_job(
+        store_root,
+        base_model,
+        &adapter_state.current_source_dataset_hash,
+        crate::training::CortexAdapterTrainingOptions::default(),
+    )?;
+    let root = store_root.to_path_buf();
+    let job_id = job.id.clone();
+    let source_dataset_hash = adapter_state.current_source_dataset_hash.clone();
+    std::thread::spawn(move || {
+        if let Ok(finished_job) =
+            crate::training::run_queued_cortex_adapter_training_job(&root, &job_id)
+        {
+            if finished_job.status == "trained" {
+                let _ = crate::training::activate_cortex_adapter(
+                    &root,
+                    &source_dataset_hash,
+                    crate::training::DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE,
+                );
+            }
+        }
+    });
+    Ok(Some(job))
+}
+
+fn is_trainable_cortex_adapter_model(model: &str) -> bool {
+    let model = model.trim();
+    !model.is_empty() && model != HASH_EMBEDDING_MODEL
 }
 
 fn memory_for_brain_compile(
