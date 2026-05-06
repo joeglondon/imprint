@@ -313,6 +313,76 @@ impl FileMemoryStore {
             .map_err(Into::into)
     }
 
+    pub fn upsert_cortex_adapter_job(&self, job: &CortexAdapterJob) -> Result<()> {
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT OR REPLACE INTO cortex_adapter_jobs (
+                id, status, source_dataset_hash, prepared_dataset_hash, base_model,
+                adapter_output_path, manifest_path, train_records, valid_records, test_records,
+                iters, command_json, log_path, failure_reason, payload_json,
+                created_at, updated_at, started_at, finished_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            params![
+                job.id,
+                job.status,
+                job.source_dataset_hash,
+                job.prepared_dataset_hash,
+                job.base_model,
+                job.adapter_output_path,
+                job.manifest_path,
+                job.train_records.map(|value| value as i64),
+                job.valid_records.map(|value| value as i64),
+                job.test_records.map(|value| value as i64),
+                job.iters.map(|value| value as i64),
+                to_json(&job.command)?,
+                job.log_path,
+                job.failure_reason,
+                to_json(&job.payload)?,
+                job.created_at as i64,
+                job.updated_at as i64,
+                job.started_at.map(|value| value as i64),
+                job.finished_at.map(|value| value as i64),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_cortex_adapter_job(&self, id: &str) -> Result<Option<CortexAdapterJob>> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT id, status, source_dataset_hash, prepared_dataset_hash, base_model,
+                    adapter_output_path, manifest_path, train_records, valid_records, test_records,
+                    iters, command_json, log_path, failure_reason, payload_json,
+                    created_at, updated_at, started_at, finished_at
+                 FROM cortex_adapter_jobs WHERE id = ?1",
+                params![id],
+                cortex_adapter_job_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn list_cortex_adapter_jobs(&self, status: Option<&str>) -> Result<Vec<CortexAdapterJob>> {
+        let connection = self.connection()?;
+        let sql = "SELECT id, status, source_dataset_hash, prepared_dataset_hash, base_model,
+                adapter_output_path, manifest_path, train_records, valid_records, test_records,
+                iters, command_json, log_path, failure_reason, payload_json,
+                created_at, updated_at, started_at, finished_at FROM cortex_adapter_jobs";
+        if let Some(status) = status {
+            let mut statement = connection.prepare(&format!(
+                "{sql} WHERE status = ?1 ORDER BY updated_at DESC, id"
+            ))?;
+            let rows = statement.query_map(params![status], cortex_adapter_job_from_row)?;
+            collect_rows(rows)
+        } else {
+            let mut statement =
+                connection.prepare(&format!("{sql} ORDER BY updated_at DESC, id"))?;
+            let rows = statement.query_map([], cortex_adapter_job_from_row)?;
+            collect_rows(rows)
+        }
+    }
+
     pub fn insert_web_finding(&self, finding: &WebFinding) -> Result<()> {
         let connection = self.connection()?;
         connection.execute(
@@ -752,6 +822,29 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             index_json TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_cortex_indexes_created ON cortex_indexes(created_at);
+        CREATE TABLE IF NOT EXISTS cortex_adapter_jobs (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            source_dataset_hash TEXT NOT NULL,
+            prepared_dataset_hash TEXT,
+            base_model TEXT,
+            adapter_output_path TEXT NOT NULL,
+            manifest_path TEXT,
+            train_records INTEGER,
+            valid_records INTEGER,
+            test_records INTEGER,
+            iters INTEGER,
+            command_json TEXT NOT NULL,
+            log_path TEXT,
+            failure_reason TEXT,
+            payload_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            started_at INTEGER,
+            finished_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_cortex_adapter_jobs_status ON cortex_adapter_jobs(status, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_cortex_adapter_jobs_source ON cortex_adapter_jobs(source_dataset_hash, updated_at);
         CREATE TABLE IF NOT EXISTS attention_marks (
             id TEXT PRIMARY KEY,
             target_id TEXT NOT NULL,
@@ -1173,6 +1266,30 @@ fn memory_access_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryAcc
         reason: row.get(4)?,
         actor: row.get(5)?,
         accessed_at: row.get::<_, i64>(6)? as u64,
+    })
+}
+
+fn cortex_adapter_job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CortexAdapterJob> {
+    Ok(CortexAdapterJob {
+        id: row.get(0)?,
+        status: row.get(1)?,
+        source_dataset_hash: row.get(2)?,
+        prepared_dataset_hash: row.get(3)?,
+        base_model: row.get(4)?,
+        adapter_output_path: row.get(5)?,
+        manifest_path: row.get(6)?,
+        train_records: row.get::<_, Option<i64>>(7)?.map(|value| value as usize),
+        valid_records: row.get::<_, Option<i64>>(8)?.map(|value| value as usize),
+        test_records: row.get::<_, Option<i64>>(9)?.map(|value| value as usize),
+        iters: row.get::<_, Option<i64>>(10)?.map(|value| value as usize),
+        command: from_json(row.get::<_, String>(11)?)?,
+        log_path: row.get(12)?,
+        failure_reason: row.get(13)?,
+        payload: from_json(row.get::<_, String>(14)?)?,
+        created_at: row.get::<_, i64>(15)? as u64,
+        updated_at: row.get::<_, i64>(16)? as u64,
+        started_at: row.get::<_, Option<i64>>(17)?.map(|value| value as u64),
+        finished_at: row.get::<_, Option<i64>>(18)?.map(|value| value as u64),
     })
 }
 

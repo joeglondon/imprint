@@ -17,6 +17,7 @@ pub type AttentionMarkId = String;
 pub type MemoryAccessId = String;
 pub type AuditEventId = String;
 pub type CortexIndexId = String;
+pub type CortexAdapterJobId = String;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Document {
@@ -583,6 +584,42 @@ fn default_adapter_activation_status() -> String {
 pub struct CortexAdapterSnapshot {
     #[serde(default)]
     pub adapter_state: Option<CortexAdapterState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CortexAdapterJob {
+    pub id: CortexAdapterJobId,
+    pub status: String,
+    pub source_dataset_hash: String,
+    #[serde(default)]
+    pub prepared_dataset_hash: Option<String>,
+    #[serde(default)]
+    pub base_model: Option<String>,
+    pub adapter_output_path: String,
+    #[serde(default)]
+    pub manifest_path: Option<String>,
+    #[serde(default)]
+    pub train_records: Option<usize>,
+    #[serde(default)]
+    pub valid_records: Option<usize>,
+    #[serde(default)]
+    pub test_records: Option<usize>,
+    #[serde(default)]
+    pub iters: Option<usize>,
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub log_path: Option<String>,
+    #[serde(default)]
+    pub failure_reason: Option<String>,
+    #[serde(default)]
+    pub payload: BTreeMap<String, String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+    #[serde(default)]
+    pub started_at: Option<u64>,
+    #[serde(default)]
+    pub finished_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

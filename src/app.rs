@@ -4766,6 +4766,83 @@ mod tests {
     }
 
     #[test]
+    fn cortex_adapter_jobs_persist_lifecycle_metadata() {
+        let root = temp_store_root("adapter-jobs");
+        let store = FileMemoryStore::new(&root);
+        let mut payload = BTreeMap::new();
+        payload.insert("dataset_dir".into(), "/tmp/imprint/training".into());
+        let queued = CortexAdapterJob {
+            id: "adapter-job:source-hash".into(),
+            status: "queued".into(),
+            source_dataset_hash: "source-hash".into(),
+            prepared_dataset_hash: Some("prepared-hash".into()),
+            base_model: Some("tiny-memory-model".into()),
+            adapter_output_path: root
+                .join("adapters")
+                .join("trained-source-hash")
+                .display()
+                .to_string(),
+            manifest_path: None,
+            train_records: Some(12),
+            valid_records: Some(3),
+            test_records: Some(3),
+            iters: Some(25),
+            command: vec![
+                "python3".into(),
+                "training/train_mlx_lora.py".into(),
+                "--dry-run".into(),
+            ],
+            log_path: Some(
+                root.join("adapters")
+                    .join("train.log")
+                    .display()
+                    .to_string(),
+            ),
+            failure_reason: None,
+            payload,
+            created_at: 100,
+            updated_at: 100,
+            started_at: None,
+            finished_at: None,
+        };
+        store
+            .upsert_cortex_adapter_job(&queued)
+            .expect("insert queued job");
+        assert_eq!(
+            store
+                .load_cortex_adapter_job(&queued.id)
+                .expect("load queued job"),
+            Some(queued.clone())
+        );
+        assert_eq!(
+            store
+                .list_cortex_adapter_jobs(Some("queued"))
+                .expect("list queued jobs"),
+            vec![queued.clone()]
+        );
+
+        let mut failed = queued.clone();
+        failed.status = "failed".into();
+        failed.updated_at = 150;
+        failed.started_at = Some(110);
+        failed.finished_at = Some(150);
+        failed.failure_reason = Some("mlx_lm is not installed".into());
+        store
+            .upsert_cortex_adapter_job(&failed)
+            .expect("update failed job");
+        assert!(store
+            .list_cortex_adapter_jobs(Some("queued"))
+            .expect("list queued jobs after update")
+            .is_empty());
+        assert_eq!(
+            store
+                .load_cortex_adapter_job(&failed.id)
+                .expect("load failed job"),
+            Some(failed)
+        );
+    }
+
+    #[test]
     fn chat_turns_are_persisted_indexed_hot_and_survive_rebuilds() {
         let root = temp_store_root("chat-memory");
         let session = create_chat_session(&root, Some("Milestone A".into())).expect("create chat");

@@ -45,7 +45,7 @@ Important gaps:
 
 Goal: cross from "better cortex-aware retrieval" into "some semantic memory is inside model weights."
 
-- [ ] Add a durable adapter job table or reuse `jobs` with typed payloads for cortex training.
+- [x] Add a durable adapter job table or reuse `jobs` with typed payloads for cortex training.
 - [x] Define adapter lifecycle states:
   - [x] `missing`
   - [x] `prepared`
