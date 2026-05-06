@@ -1,20 +1,33 @@
 use crate::store::FileMemoryStore;
-use crate::types::{BrainArtifact, BrainArtifactKind, CortexAdapterJob, CortexAdapterState};
+use crate::types::{
+    AttentionAction, AttentionMark, AttentionTargetKind, BrainArtifact, Chunk, CortexAdapterJob,
+    CortexAdapterState, CortexIndex, Document, LinkType, MemoryAccess, PersistedMemory, WebFinding,
+};
 use anyhow::{anyhow, Context};
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const TRAINING_SCHEMA_VERSION: u32 = 1;
+const TRAINING_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_ADAPTER_ITERS: usize = 100;
 const DEFAULT_ADAPTER_TRAINING_TIMEOUT_MILLIS: u64 = 30 * 60 * 1000;
 pub const DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE: f64 = 0.8;
+const TRAINING_TASKS: [&str; 8] = [
+    "query_to_region",
+    "query_to_source_family",
+    "query_to_tool_plan",
+    "chunk_to_semantic_address",
+    "weak_evidence_to_next_action",
+    "snippet_set_to_citation_boundary",
+    "deleted_or_stale_memory_to_caution",
+    "web_needed_or_not",
+];
 
 #[derive(Debug, Clone)]
 pub struct CortexAdapterTrainingOptions {
@@ -56,6 +69,7 @@ pub struct CortexAdapterEvalReport {
     pub minimum_score: f64,
     pub records: usize,
     pub source_ref_records: usize,
+    pub route_region_baseline_score: f64,
     pub task_scores: BTreeMap<String, CortexAdapterEvalTaskScore>,
     pub gates: BTreeMap<String, bool>,
     pub manifest_path: Option<String>,
@@ -65,9 +79,32 @@ pub struct CortexAdapterEvalReport {
     pub failure_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CortexTrainingDatasetSummary {
+    pub schema_version: u32,
+    pub records: usize,
+    pub task_counts: BTreeMap<String, usize>,
+    pub split_counts: BTreeMap<String, usize>,
+    pub source_counts: BTreeMap<String, usize>,
+    pub source_types: BTreeMap<String, usize>,
+    pub visibility_counts: BTreeMap<String, usize>,
+    pub stale_or_deleted_exclusions: usize,
+    pub redacted_records: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct CortexTrainingExportContext {
+    pub memory: PersistedMemory,
+    pub artifacts: Vec<BrainArtifact>,
+    pub cortex_index: Option<CortexIndex>,
+    pub web_findings: Vec<WebFinding>,
+    pub attention_marks: Vec<AttentionMark>,
+    pub memory_accesses: Vec<MemoryAccess>,
+}
+
 pub fn write_training_exports(
     store_root: &Path,
-    artifacts: &[BrainArtifact],
+    context: &CortexTrainingExportContext,
 ) -> anyhow::Result<Vec<String>> {
     let training_dir = store_root.join("training");
     fs::create_dir_all(&training_dir).with_context(|| {
@@ -76,21 +113,28 @@ pub fn write_training_exports(
             training_dir.display()
         )
     })?;
-    let tasks = [
-        "route_region",
-        "choose_tool",
-        "critique_evidence",
-        "collaboration_pattern",
-    ];
+    let records = build_training_records(context);
     let mut files = Vec::new();
-    for task in tasks {
-        files.push(write_split(&training_dir, task, "train", artifacts)?);
-        files.push(write_split(&training_dir, task, "eval", artifacts)?);
+    for task in TRAINING_TASKS {
+        for split in ["train", "eval", "test"] {
+            files.push(write_split(&training_dir, task, split, &records)?);
+        }
     }
+    write_training_dataset_summary(&training_dir, &records)?;
     Ok(files
         .into_iter()
         .map(|path| path.display().to_string())
         .collect())
+}
+
+pub fn summarize_training_dataset(
+    training_dir: &Path,
+) -> anyhow::Result<CortexTrainingDatasetSummary> {
+    let mut records = Vec::new();
+    for split in ["train", "eval", "test"] {
+        records.extend(training_records_for_split(training_dir, split)?);
+    }
+    Ok(dataset_summary(&records))
 }
 
 pub fn training_source_hash(training_dir: &Path) -> anyhow::Result<String> {
@@ -134,11 +178,20 @@ pub fn prepare_cortex_adapter_dataset(
     fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating adapter data directory {}", data_dir.display()))?;
 
-    let train_records = mlx_records_for_split(&training_dir, "train")?;
+    let mut train_records = mlx_records_for_split(&training_dir, "train")?;
+    if train_records.is_empty() {
+        train_records = mlx_records_for_split(&training_dir, "eval")?;
+    }
+    if train_records.is_empty() {
+        train_records = mlx_records_for_split(&training_dir, "test")?;
+    }
     if train_records.is_empty() {
         return Ok(None);
     }
     let mut valid_records = mlx_records_for_split(&training_dir, "eval")?;
+    if valid_records.is_empty() {
+        valid_records = mlx_records_for_split(&training_dir, "test")?;
+    }
     if valid_records.is_empty() {
         valid_records = train_records.clone();
     }
@@ -482,6 +535,7 @@ pub fn evaluate_cortex_adapter(
             minimum_score,
             records: 0,
             source_ref_records: 0,
+            route_region_baseline_score: 0.0,
             task_scores: BTreeMap::new(),
             gates: BTreeMap::from([
                 ("trained_adapter_manifest".into(), false),
@@ -500,7 +554,15 @@ pub fn evaluate_cortex_adapter(
     let manifest = read_manifest(&manifest_path)?;
     let status = string_field(&manifest, "status").unwrap_or_else(|| "unknown".into());
     let adapter_path = string_field(&manifest, "adapter_path");
-    let records = training_records_for_split(&store_root.join("training"), "eval")?;
+    let training_dir = store_root.join("training");
+    let mut records = training_records_for_split(&training_dir, "eval")?;
+    if records.is_empty() {
+        records = training_records_for_split(&training_dir, "test")?;
+    }
+    if records.is_empty() {
+        records = training_records_for_split(&training_dir, "train")?;
+    }
+    backfill_missing_eval_tasks(&training_dir, &mut records)?;
     let mut task_counts: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut source_ref_records = 0;
     for record in &records {
@@ -539,15 +601,16 @@ pub fn evaluate_cortex_adapter(
     }
     let score = ratio(passed_records, records.len());
     let route_score = task_scores
-        .get("route_region")
+        .get("query_to_region")
         .map(|task| task.score)
         .unwrap_or_default();
+    let route_region_baseline_score = route_region_baseline_score(&records);
     let tool_score = task_scores
-        .get("choose_tool")
+        .get("query_to_tool_plan")
         .map(|task| task.score)
         .unwrap_or_default();
     let critique_score = task_scores
-        .get("critique_evidence")
+        .get("weak_evidence_to_next_action")
         .map(|task| task.score)
         .unwrap_or_default();
     let source_refs_gate = !records.is_empty() && source_ref_records == records.len();
@@ -562,6 +625,10 @@ pub fn evaluate_cortex_adapter(
         ("adapter_file_hash".into(), adapter_hash_gate),
         ("overall_score".into(), score >= minimum_score),
         ("route_region_behavior".into(), route_score >= minimum_score),
+        (
+            "route_region_accuracy_above_baseline".into(),
+            route_score > route_region_baseline_score,
+        ),
         (
             "source_expansion_behavior".into(),
             tool_score >= minimum_score,
@@ -580,6 +647,7 @@ pub fn evaluate_cortex_adapter(
         minimum_score,
         records: records.len(),
         source_ref_records,
+        route_region_baseline_score,
         task_scores,
         gates,
         manifest_path: Some(manifest_path.display().to_string()),
@@ -672,6 +740,8 @@ pub fn read_cortex_adapter_state(
             valid_records: None,
             test_records: None,
             iters: None,
+            last_successful_training_at: None,
+            activated_at: None,
             checked_at,
         });
     };
@@ -737,7 +807,7 @@ pub fn read_cortex_adapter_state(
 
     Ok(CortexAdapterState {
         freshness: freshness.clone(),
-        status,
+        status: status.clone(),
         reason,
         data_freshness,
         training_status,
@@ -763,6 +833,13 @@ pub fn read_cortex_adapter_state(
         test_records: usize_field(data_manifest, "test_records")
             .or_else(|| usize_field(&manifest, "test_records")),
         iters: usize_field(data_manifest, "iters").or_else(|| usize_field(&manifest, "iters")),
+        last_successful_training_at: match status.as_str() {
+            "trained" | "active" => {
+                u64_field(&manifest, "finished_at").or_else(|| u64_field(&manifest, "created_at"))
+            }
+            _ => None,
+        },
+        activated_at: u64_field(&manifest, "activated_at"),
         checked_at,
     })
 }
@@ -771,13 +848,17 @@ fn write_split(
     training_dir: &Path,
     task: &str,
     split: &str,
-    artifacts: &[BrainArtifact],
+    records: &[serde_json::Value],
 ) -> anyhow::Result<PathBuf> {
     let path = training_dir.join(format!("{task}.{split}.jsonl"));
-    let mut lines = Vec::new();
-    for artifact in artifacts {
-        lines.push(training_record(task, split, artifact).to_string());
-    }
+    let lines = records
+        .iter()
+        .filter(|record| {
+            record.get("task").and_then(|value| value.as_str()) == Some(task)
+                && record.get("split").and_then(|value| value.as_str()) == Some(split)
+        })
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?;
     fs::write(&path, lines.join("\n")).with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
 }
@@ -851,6 +932,50 @@ fn training_records_for_split(
         }
     }
     Ok(records)
+}
+
+fn backfill_missing_eval_tasks(
+    training_dir: &Path,
+    records: &mut Vec<serde_json::Value>,
+) -> anyhow::Result<()> {
+    let present = records
+        .iter()
+        .filter_map(|record| record.get("task").and_then(|value| value.as_str()))
+        .collect::<BTreeSet<_>>();
+    if TRAINING_TASKS.iter().all(|task| present.contains(task)) {
+        return Ok(());
+    }
+    let fallback_records = ["test", "train"]
+        .into_iter()
+        .map(|split| training_records_for_split(training_dir, split))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let mut seen_ids = records
+        .iter()
+        .filter_map(|record| record.get("id").and_then(|value| value.as_str()))
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    for task in TRAINING_TASKS {
+        if records
+            .iter()
+            .any(|record| record.get("task").and_then(|value| value.as_str()) == Some(task))
+        {
+            continue;
+        }
+        if let Some(record) = fallback_records
+            .iter()
+            .find(|record| record.get("task").and_then(|value| value.as_str()) == Some(task))
+        {
+            if let Some(id) = record.get("id").and_then(|value| value.as_str()) {
+                if seen_ids.insert(id.to_string()) {
+                    records.push(record.clone());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn write_jsonl(path: &Path, records: &[serde_json::Value]) -> anyhow::Result<()> {
@@ -1137,6 +1262,10 @@ fn f64_field(value: &serde_json::Value, key: &str) -> Option<f64> {
     value.get(key)?.as_f64()
 }
 
+fn u64_field(value: &serde_json::Value, key: &str) -> Option<u64> {
+    value.get(key)?.as_u64()
+}
+
 fn ratio(passed: usize, total: usize) -> f64 {
     if total == 0 {
         return 0.0;
@@ -1160,14 +1289,40 @@ fn eval_record_passes_gate(record: &serde_json::Value) -> bool {
         .unwrap_or_default()
         .to_lowercase();
     match task {
-        "route_region" => target.starts_with("route to ") && !input.trim().is_empty(),
-        "choose_tool" => target.contains("memory_search") && target.contains("memory_expand"),
-        "critique_evidence" => target.contains("source anchors") && target.contains("weak"),
-        "collaboration_pattern" => {
-            target.contains("planner") && target.contains("critic") && target.contains("answers")
+        "query_to_region" => target.starts_with("route_region:") && !input.trim().is_empty(),
+        "query_to_source_family" => target.starts_with("source_family:"),
+        "query_to_tool_plan" => {
+            target.contains("memory_search") && target.contains("memory_expand")
+        }
+        "chunk_to_semantic_address" => {
+            target.contains("region:") && target.contains("document:") && target.contains("anchor:")
+        }
+        "weak_evidence_to_next_action" => {
+            target.contains("weak_evidence") || target.contains("search_original_sources")
+        }
+        "snippet_set_to_citation_boundary" => {
+            target.contains("cite_anchor_ids") && target.contains("do_not_cite")
+        }
+        "deleted_or_stale_memory_to_caution" => target.contains("caution:"),
+        "web_needed_or_not" => {
+            target.contains("web_search_needed") || target.contains("web_search_not_needed")
         }
         _ => false,
     }
+}
+
+fn route_region_baseline_score(records: &[serde_json::Value]) -> f64 {
+    let route_targets = records
+        .iter()
+        .filter(|record| {
+            record.get("task").and_then(|value| value.as_str()) == Some("query_to_region")
+        })
+        .filter_map(|record| record.get("target").and_then(|value| value.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+    if route_targets.len() <= 1 {
+        return 0.0;
+    }
+    ratio(1, route_targets.len())
 }
 
 fn adapter_output_hash(output: &Path) -> anyhow::Result<Option<String>> {
@@ -1250,47 +1405,709 @@ fn adapter_activation_status(status: &str, manifest: &serde_json::Value) -> Stri
     .into()
 }
 
-fn training_record(task: &str, split: &str, artifact: &BrainArtifact) -> serde_json::Value {
-    let target = match task {
-        "route_region" => format!("Route to {}", artifact.title),
-        "choose_tool" => "Use memory_search, then memory_expand before answering".to_string(),
-        "critique_evidence" => {
-            "Check source anchors and ask for another round if evidence is weak".to_string()
+fn build_training_records(context: &CortexTrainingExportContext) -> Vec<serde_json::Value> {
+    let mut records = Vec::new();
+    let documents_by_id = context
+        .memory
+        .documents
+        .iter()
+        .map(|document| (document.id.as_str(), document))
+        .collect::<HashMap<_, _>>();
+    let chunks_by_id = context
+        .memory
+        .chunks
+        .iter()
+        .map(|chunk| (chunk.id.as_str(), chunk))
+        .collect::<HashMap<_, _>>();
+    let suppressed = suppressed_targets(&context.attention_marks);
+    let artifact_ids_by_region = context
+        .artifacts
+        .iter()
+        .filter_map(|artifact| {
+            artifact
+                .id
+                .strip_prefix("brain-region:")
+                .or_else(|| artifact.id.strip_prefix("brain-routing:"))
+                .map(|region| (region.to_string(), artifact.id.clone()))
+        })
+        .fold(
+            BTreeMap::<String, Vec<String>>::new(),
+            |mut by_region, (region, id)| {
+                by_region.entry(region).or_default().push(id);
+                by_region
+            },
+        );
+
+    for region in &context.memory.regions {
+        let source_chunks = region
+            .chunk_ids
+            .iter()
+            .filter_map(|chunk_id| chunks_by_id.get(chunk_id.as_str()).copied())
+            .filter(|chunk| source_chunk_is_trainable(chunk, &documents_by_id, &suppressed))
+            .take(8)
+            .collect::<Vec<_>>();
+        if source_chunks.is_empty() {
+            continue;
         }
-        "collaboration_pattern" => {
-            "Planner gathers, critic checks, response model answers from bounded evidence"
-                .to_string()
+        let artifact_ids = artifact_ids_by_region
+            .get(&region.id)
+            .cloned()
+            .unwrap_or_default();
+        let region_examples = context
+            .cortex_index
+            .as_ref()
+            .and_then(|index| {
+                index
+                    .regions
+                    .iter()
+                    .find(|sketch| sketch.region_id == region.id)
+            })
+            .map(|sketch| sketch.route_examples.clone())
+            .unwrap_or_default();
+
+        for chunk in source_chunks {
+            let Some(document) = documents_by_id.get(chunk.document_id.as_str()).copied() else {
+                continue;
+            };
+            let source_id = chunk.id.clone();
+            let split = split_for_source(&source_id);
+            let anchor = chunk
+                .source_anchor
+                .as_ref()
+                .or(document.source_anchor.as_ref());
+            let source_refs = source_refs_for(document, Some(chunk));
+            let anchor_ids = anchor
+                .iter()
+                .map(|anchor| anchor.id.clone())
+                .collect::<Vec<_>>();
+            let query_hints = route_hints(document, chunk, &region_examples);
+            let source_type = source_type(document);
+            let source_family = source_family(document);
+            let visibility = visibility(document);
+
+            records.push(training_example(
+                "query_to_region",
+                split,
+                &source_id,
+                format!(
+                    "Where should imprint search for: {}?",
+                    query_hints.join(" / ")
+                ),
+                format!("route_region:{}", region.id),
+                &artifact_ids,
+                source_refs.clone(),
+                anchor_ids.clone(),
+                &source_type,
+                &visibility,
+                false,
+            ));
+            records.push(training_example(
+                "query_to_source_family",
+                split,
+                &source_id,
+                format!(
+                    "Classify the best source family for '{}' from path '{}'.",
+                    document.title,
+                    document
+                        .metadata
+                        .get("path")
+                        .map(String::as_str)
+                        .unwrap_or("")
+                ),
+                format!("source_family:{source_family}"),
+                &artifact_ids,
+                source_refs.clone(),
+                anchor_ids.clone(),
+                &source_type,
+                &visibility,
+                false,
+            ));
+            records.push(training_example(
+                "query_to_tool_plan",
+                split,
+                &source_id,
+                format!("Plan a source-grounded answer for: {}", query_hints.join(" ")),
+                "memory_search -> memory_open_or_neighbors -> memory_expand(anchor) -> answer_with_citations".into(),
+                &artifact_ids,
+                source_refs.clone(),
+                anchor_ids.clone(),
+                &source_type,
+                &visibility,
+                false,
+            ));
+            records.push(training_example(
+                "chunk_to_semantic_address",
+                split,
+                &source_id,
+                format!("Snippet: {}", bounded_text(&chunk.text)),
+                format!(
+                    "region:{};document:{};source_family:{};anchor:{}",
+                    region.id,
+                    document.id,
+                    source_family,
+                    anchor.map(|anchor| anchor.id.as_str()).unwrap_or("missing")
+                ),
+                &artifact_ids,
+                source_refs.clone(),
+                anchor_ids.clone(),
+                &source_type,
+                &visibility,
+                false,
+            ));
+            records.push(training_example(
+                "snippet_set_to_citation_boundary",
+                split,
+                &source_id,
+                format!(
+                    "Bound citations for snippet A [{}] and avoid unsupported derived memory.",
+                    anchor.map(|anchor| anchor.id.as_str()).unwrap_or("missing")
+                ),
+                format!(
+                    "cite_anchor_ids:{};do_not_cite_without_source_anchor",
+                    anchor_ids.join(",")
+                ),
+                &artifact_ids,
+                source_refs.clone(),
+                anchor_ids,
+                &source_type,
+                &visibility,
+                false,
+            ));
+            records.push(training_example(
+                "web_needed_or_not",
+                split,
+                &source_id,
+                format!(
+                    "Should a live web search be used when local source '{}' has anchor '{}'?",
+                    document.title,
+                    anchor.map(|anchor| anchor.id.as_str()).unwrap_or("missing")
+                ),
+                "web_search_not_needed:local_source_anchor_is_available".into(),
+                &artifact_ids,
+                source_refs,
+                anchor
+                    .iter()
+                    .map(|anchor| anchor.id.clone())
+                    .collect::<Vec<_>>(),
+                &source_type,
+                &visibility,
+                false,
+            ));
         }
-        _ => "Use source-grounded memory".to_string(),
-    };
-    let split_prefix = if split == "eval" {
-        "Held-out evaluation: "
-    } else {
-        ""
-    };
+    }
+
+    for artifact in &context.artifacts {
+        let source_id = artifact
+            .source_refs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| artifact.id.clone());
+        let split = split_for_source(&source_id);
+        records.push(training_example(
+            "weak_evidence_to_next_action",
+            split,
+            &source_id,
+            format!(
+                "Derived cortex artifact only: {}",
+                bounded_text(&artifact.body)
+            ),
+            "weak_evidence:search_original_sources_and_expand_anchor_before_answering".into(),
+            std::slice::from_ref(&artifact.id),
+            artifact.source_refs.clone(),
+            Vec::new(),
+            "derived_memory",
+            "private",
+            false,
+        ));
+        records.push(training_example(
+            "deleted_or_stale_memory_to_caution",
+            split,
+            &source_id,
+            format!(
+                "Derived memory without direct citation boundary: {}",
+                bounded_text(&artifact.body)
+            ),
+            "caution:derived_memory_requires_original_source_anchor_before_exact_claim".into(),
+            std::slice::from_ref(&artifact.id),
+            artifact.source_refs.clone(),
+            Vec::new(),
+            "derived_memory",
+            "private",
+            true,
+        ));
+    }
+
+    for finding in &context.web_findings {
+        let source_id = finding.id.clone();
+        let split = split_for_source(&source_id);
+        let stale = web_finding_is_stale(finding);
+        let source_refs = vec![format!("imprint://web_finding/{}", finding.id)];
+        records.push(training_example(
+            "web_needed_or_not",
+            split,
+            &source_id,
+            format!(
+                "Query '{}' has web finding '{}' retrieved at {} with confidence {:.2}.",
+                finding.query, finding.title, finding.retrieved_at, finding.confidence
+            ),
+            if stale || finding.confidence < 0.45 {
+                "web_search_needed:refresh_before_answering"
+            } else {
+                "web_search_not_needed:use_stored_web_finding_with_url_citation"
+            }
+            .into(),
+            &[],
+            source_refs.clone(),
+            Vec::new(),
+            "web_finding",
+            "private",
+            stale,
+        ));
+        if stale || finding.confidence < 0.45 {
+            records.push(training_example(
+                "deleted_or_stale_memory_to_caution",
+                split,
+                &source_id,
+                format!("Stale or low-confidence web finding: {}", finding.title),
+                "caution:mark_stale_and_refresh_web_or_local_source_before_claiming".into(),
+                &[],
+                source_refs,
+                Vec::new(),
+                "web_finding",
+                "private",
+                true,
+            ));
+        }
+    }
+
+    for mark in &context.attention_marks {
+        if matches!(
+            mark.action,
+            AttentionAction::Suppress | AttentionAction::Cold | AttentionAction::Decay
+        ) {
+            let source_id = format!(
+                "attention:{}:{}",
+                attention_kind_label(&mark.target_kind),
+                mark.target_id
+            );
+            let split = split_for_source(&source_id);
+            records.push(training_example(
+                "deleted_or_stale_memory_to_caution",
+                split,
+                &source_id,
+                format!(
+                    "Attention mark {} on {} because: {}",
+                    attention_action_label(&mark.action),
+                    mark.target_id,
+                    mark.reason
+                ),
+                "caution:deprioritize_or_verify_before_using_this_memory".into(),
+                &[],
+                vec![format!(
+                    "imprint://{}/{}",
+                    attention_kind_label(&mark.target_kind),
+                    mark.target_id
+                )],
+                Vec::new(),
+                attention_kind_label(&mark.target_kind),
+                "private",
+                true,
+            ));
+        }
+    }
+
+    for access in context.memory_accesses.iter().take(32) {
+        let source_id = format!(
+            "access:{}:{}",
+            attention_kind_label(&access.target_kind),
+            access.target_id
+        );
+        let split = split_for_source(&source_id);
+        records.push(training_example(
+            "query_to_tool_plan",
+            split,
+            &source_id,
+            format!(
+                "A successful retrieval trace recently used {} on {} for '{}'.",
+                memory_access_kind_label(access),
+                access.target_id,
+                access.reason
+            ),
+            "reuse_successful_trace:memory_search -> open_or_expand_recent_target -> cite_source_anchor".into(),
+            &[],
+            vec![format!("imprint://{}/{}", attention_kind_label(&access.target_kind), access.target_id)],
+            Vec::new(),
+            attention_kind_label(&access.target_kind),
+            "private",
+            false,
+        ));
+    }
+
+    for link in &context.memory.links {
+        if matches!(
+            link.link_type,
+            LinkType::CitationReference | LinkType::EntityOverlap
+        ) {
+            let source_id = format!("link:{}", link.id);
+            let split = split_for_source(&source_id);
+            records.push(training_example(
+                "query_to_region",
+                split,
+                &source_id,
+                format!(
+                    "Follow {} link '{}'.",
+                    link_type_label(&link.link_type),
+                    link.label
+                ),
+                format!("follow_link:{};then_search_linked_region_or_chunk", link.id),
+                &[],
+                vec![format!("imprint://link/{}", link.id)],
+                Vec::new(),
+                "link",
+                "private",
+                false,
+            ));
+        }
+    }
+
+    records.sort_by(|left, right| {
+        left.get("id")
+            .and_then(|value| value.as_str())
+            .cmp(&right.get("id").and_then(|value| value.as_str()))
+    });
+    records
+}
+
+fn training_example(
+    task: &str,
+    split: &str,
+    source_id: &str,
+    input: String,
+    target: String,
+    artifact_ids: &[String],
+    source_refs: Vec<String>,
+    anchor_ids: Vec<String>,
+    source_type: &str,
+    visibility: &str,
+    excluded_or_stale: bool,
+) -> serde_json::Value {
+    let (input, input_redacted) = redact_sensitive(&input);
+    let (target, target_redacted) = redact_sensitive(&target);
     json!({
         "schema_version": TRAINING_SCHEMA_VERSION,
         "task": task,
         "split": split,
-        "id": format!("{task}:{split}:{}", artifact.id),
-        "input": format!("{split_prefix}{}", artifact.body),
+        "id": format!("{task}:{split}:{}", stable_hash(&format!("{source_id}:{input}:{target}"))),
+        "source_id": source_id,
+        "input": input,
         "target": target,
-        "artifact_ids": [artifact.id.clone()],
-        "artifact_kind": artifact_kind_label(&artifact.kind),
-        "source_refs": artifact.source_refs,
-        "created_at": artifact.created_at,
+        "artifact_ids": artifact_ids,
+        "artifact_kind": "cortex_training_example",
+        "source_refs": source_refs,
+        "anchor_ids": anchor_ids,
+        "source_type": source_type,
+        "visibility": visibility,
+        "redacted": input_redacted || target_redacted,
+        "excluded_or_stale": excluded_or_stale,
     })
 }
 
-fn artifact_kind_label(kind: &BrainArtifactKind) -> &'static str {
-    match kind {
-        BrainArtifactKind::LibraryMap => "library_map",
-        BrainArtifactKind::RegionCard => "region_card",
-        BrainArtifactKind::EntityCard => "entity_card",
-        BrainArtifactKind::ProjectCard => "project_card",
-        BrainArtifactKind::PreferenceCard => "preference_card",
-        BrainArtifactKind::RoutingRule => "routing_rule",
-        BrainArtifactKind::ToolPattern => "tool_pattern",
-        BrainArtifactKind::CritiquePattern => "critique_pattern",
+fn write_training_dataset_summary(
+    training_dir: &Path,
+    records: &[serde_json::Value],
+) -> anyhow::Result<()> {
+    let summary = dataset_summary(records);
+    let path = training_dir.join("summary.json");
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&summary).context("serializing training dataset summary")?,
+    )
+    .with_context(|| format!("writing {}", path.display()))
+}
+
+fn dataset_summary(records: &[serde_json::Value]) -> CortexTrainingDatasetSummary {
+    let mut task_counts = BTreeMap::new();
+    let mut split_counts = BTreeMap::new();
+    let mut source_counts = BTreeMap::new();
+    let mut source_types = BTreeMap::new();
+    let mut visibility_counts = BTreeMap::new();
+    let mut stale_or_deleted_exclusions = 0;
+    let mut redacted_records = 0;
+    for record in records {
+        bump(&mut task_counts, json_str(record, "task"));
+        bump(&mut split_counts, json_str(record, "split"));
+        bump(&mut source_counts, json_str(record, "source_id"));
+        bump(&mut source_types, json_str(record, "source_type"));
+        bump(&mut visibility_counts, json_str(record, "visibility"));
+        if record
+            .get("excluded_or_stale")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            stale_or_deleted_exclusions += 1;
+        }
+        if record
+            .get("redacted")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            redacted_records += 1;
+        }
     }
+    CortexTrainingDatasetSummary {
+        schema_version: TRAINING_SCHEMA_VERSION,
+        records: records.len(),
+        task_counts,
+        split_counts,
+        source_counts,
+        source_types,
+        visibility_counts,
+        stale_or_deleted_exclusions,
+        redacted_records,
+    }
+}
+
+fn source_chunk_is_trainable(
+    chunk: &Chunk,
+    documents_by_id: &HashMap<&str, &Document>,
+    suppressed: &BTreeSet<String>,
+) -> bool {
+    if suppressed.contains(&chunk.id) || suppressed.contains(&chunk.document_id) {
+        return false;
+    }
+    let Some(document) = documents_by_id.get(chunk.document_id.as_str()) else {
+        return false;
+    };
+    !matches!(
+        source_type(document).as_str(),
+        "derived_memory" | "brain_artifact"
+    )
+}
+
+fn route_hints(document: &Document, chunk: &Chunk, region_examples: &[String]) -> Vec<String> {
+    let mut hints = BTreeSet::new();
+    hints.insert(document.title.clone());
+    if let Some(path) = document.metadata.get("path") {
+        hints.insert(path_tail(path));
+    }
+    if let Some(section) = chunk
+        .source_anchor
+        .as_ref()
+        .and_then(|anchor| anchor.section.clone())
+        .or_else(|| {
+            document
+                .source_anchor
+                .as_ref()
+                .and_then(|anchor| anchor.section.clone())
+        })
+    {
+        hints.insert(section);
+    }
+    for term in entity_terms(&chunk.text).into_iter().take(4) {
+        hints.insert(term);
+    }
+    for example in region_examples.iter().take(2) {
+        hints.insert(example.clone());
+    }
+    hints.into_iter().take(8).collect()
+}
+
+fn source_refs_for(document: &Document, chunk: Option<&Chunk>) -> Vec<String> {
+    let mut refs = Vec::new();
+    if let Some(chunk) = chunk {
+        refs.push(format!("imprint://chunk/{}", chunk.id));
+    }
+    refs.push(format!("imprint://document/{}", document.id));
+    if let Some(anchor) = chunk
+        .and_then(|chunk| chunk.source_anchor.as_ref())
+        .or(document.source_anchor.as_ref())
+    {
+        refs.push(format!("imprint://anchor/{}", anchor.id));
+    }
+    refs
+}
+
+fn split_for_source(source_id: &str) -> &'static str {
+    let mut digest = Sha256::new();
+    digest.update(source_id.as_bytes());
+    let value = digest.finalize()[0] % 10;
+    match value {
+        0..=6 => "train",
+        7 => "eval",
+        _ => "test",
+    }
+}
+
+fn suppressed_targets(marks: &[AttentionMark]) -> BTreeSet<String> {
+    marks
+        .iter()
+        .filter(|mark| mark.reverted_at.is_none())
+        .filter(|mark| matches!(mark.action, AttentionAction::Suppress))
+        .filter(|mark| {
+            matches!(
+                mark.target_kind,
+                AttentionTargetKind::Document | AttentionTargetKind::Chunk
+            )
+        })
+        .map(|mark| mark.target_id.clone())
+        .collect()
+}
+
+fn source_type(document: &Document) -> String {
+    document
+        .metadata
+        .get("source_type")
+        .or_else(|| document.metadata.get("source"))
+        .cloned()
+        .unwrap_or_else(|| "local_file".into())
+}
+
+fn source_family(document: &Document) -> String {
+    let source_type = source_type(document);
+    if source_type == "web_finding" {
+        return "web_finding".into();
+    }
+    document
+        .metadata
+        .get("path")
+        .map(|path| {
+            Path::new(path)
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or(source_type.as_str())
+                .to_string()
+        })
+        .unwrap_or(source_type)
+}
+
+fn visibility(document: &Document) -> String {
+    document
+        .metadata
+        .get("visibility")
+        .cloned()
+        .unwrap_or_else(|| "private".into())
+}
+
+fn bounded_text(text: &str) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = normalized.chars();
+    let bounded = chars.by_ref().take(320).collect::<String>();
+    if chars.next().is_some() {
+        format!("{bounded}...")
+    } else {
+        bounded
+    }
+}
+
+fn redact_sensitive(text: &str) -> (String, bool) {
+    let mut redacted = false;
+    let words = text
+        .split_whitespace()
+        .map(|word| {
+            let lower = word.to_lowercase();
+            if word.starts_with("sk-")
+                || lower.contains("api_key")
+                || lower.contains("apikey")
+                || lower.contains("password=")
+                || lower.contains("secret=")
+                || lower.contains("token=")
+            {
+                redacted = true;
+                "[REDACTED]".to_string()
+            } else {
+                word.to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+    (words.join(" "), redacted)
+}
+
+fn web_finding_is_stale(finding: &WebFinding) -> bool {
+    let now = now_millis();
+    let ninety_days = 90 * 24 * 60 * 60 * 1000;
+    finding.retrieved_at == 0 || finding.retrieved_at.saturating_add(ninety_days) < now
+}
+
+fn entity_terms(text: &str) -> Vec<String> {
+    text.split(|character: char| !character.is_alphanumeric())
+        .filter(|term| term.len() >= 4)
+        .filter(|term| term.chars().next().is_some_and(char::is_uppercase))
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn path_tail(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn attention_kind_label(kind: &AttentionTargetKind) -> &'static str {
+    match kind {
+        AttentionTargetKind::ChatSession => "chat_session",
+        AttentionTargetKind::ChatMessage => "chat_message",
+        AttentionTargetKind::TranscriptChunk => "transcript_chunk",
+        AttentionTargetKind::DerivedMemory => "derived_memory",
+        AttentionTargetKind::WebFinding => "web_finding",
+        AttentionTargetKind::Document => "document",
+        AttentionTargetKind::Chunk => "chunk",
+        AttentionTargetKind::Region => "region",
+        AttentionTargetKind::Link => "link",
+    }
+}
+
+fn attention_action_label(action: &AttentionAction) -> &'static str {
+    match action {
+        AttentionAction::Active => "active",
+        AttentionAction::Hot => "hot",
+        AttentionAction::Warm => "warm",
+        AttentionAction::Cold => "cold",
+        AttentionAction::Promote => "promote",
+        AttentionAction::Decay => "decay",
+        AttentionAction::Pin => "pin",
+        AttentionAction::Suppress => "suppress",
+    }
+}
+
+fn memory_access_kind_label(access: &MemoryAccess) -> &'static str {
+    match &access.access_kind {
+        crate::types::MemoryAccessKind::QueryHit => "query_hit",
+        crate::types::MemoryAccessKind::Open => "open",
+        crate::types::MemoryAccessKind::Expand => "expand",
+        crate::types::MemoryAccessKind::JumpToAnchor => "jump_to_anchor",
+        crate::types::MemoryAccessKind::Cite => "cite",
+    }
+}
+
+fn link_type_label(link_type: &LinkType) -> &'static str {
+    match link_type {
+        LinkType::SemanticNeighbor => "semantic_neighbor",
+        LinkType::SameDocument => "same_document",
+        LinkType::CitationReference => "citation_reference",
+        LinkType::EntityOverlap => "entity_overlap",
+        LinkType::RegionMembership => "region_membership",
+    }
+}
+
+fn json_str(record: &serde_json::Value, key: &str) -> String {
+    record
+        .get(key)
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn bump(counts: &mut BTreeMap<String, usize>, key: String) {
+    *counts.entry(key).or_default() += 1;
+}
+
+fn stable_hash(text: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(text.as_bytes());
+    format!("{:x}", digest.finalize())
 }

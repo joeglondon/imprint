@@ -34,9 +34,9 @@ Already implemented or partially implemented:
 
 Important gaps:
 
-- [ ] Actual MLX LoRA training is not automatic.
-- [ ] Trained adapters are not loaded into planner/response model selection.
-- [ ] Adapter freshness can mean "prepared data matches," not "trained and active."
+- [x] Actual MLX LoRA training is automatic after import/rebuild when a compiler/response/chat model is configured.
+- [x] Trained adapters are loaded into planner/response model selection when active and fresh.
+- [x] Adapter freshness is split from trained/active selection and source recall fallback.
 - [ ] True latent RecursiveMAS/RecursiveLink is not implemented.
 - [ ] CLI/MCP/UI still expose legacy map language in places.
 - [ ] Human library, managed source artifacts, exact deep links, and import queue are still early.
@@ -82,18 +82,18 @@ Goal: cross from "better cortex-aware retrieval" into "some semantic memory is i
   - [x] command/version metadata
   - [x] created/finished timestamps
 - [x] Add a small adapter evaluation suite before activation.
-- [ ] Define minimum activation gates:
-  - [ ] route-region accuracy above baseline
+- [x] Define minimum activation gates:
+  - [x] route-region accuracy above baseline
   - [x] source-expansion behavior present
   - [x] critique-evidence behavior present
   - [x] no regression on "answer only from source" tests
 - [x] Mark adapter `active` only after eval passes.
-- [ ] Surface adapter lifecycle in Swift:
-  - [ ] queued/training progress
-  - [ ] fresh/stale/trained/active distinction
-  - [ ] last successful training time
-  - [ ] failure reason and retry action
-- [ ] Add CLI commands:
+- [x] Surface adapter lifecycle in Swift:
+  - [x] queued/training progress
+  - [x] fresh/stale/trained/active distinction
+  - [x] last successful training time
+  - [x] failure reason and retry action
+- [x] Add CLI commands:
   - [x] `cortex status`
   - [x] `cortex compile`
   - [x] `cortex train`
@@ -105,72 +105,72 @@ Goal: cross from "better cortex-aware retrieval" into "some semantic memory is i
 
 Goal: planner/response behavior should actually use the trained personal cortex adapter.
 
-- [ ] Extend model configuration with adapter selection:
-  - [ ] planner adapter path
-  - [ ] response adapter path
-  - [ ] shared cortex adapter path
-  - [ ] active adapter hash
-  - [ ] activation policy
-- [ ] Decide how LFM2.5 is served with LoRA in the local runtime:
-  - [ ] MLX-LM adapter loading path
-  - [ ] fallback OpenAI-compatible endpoint behavior
-  - [ ] Ollama/llama.cpp compatibility story
-- [ ] Add health check that confirms the active adapter is loadable.
-- [ ] Add a route-only probe that tests whether the adapted model names the expected source family before retrieval.
-- [ ] Make planner prompt/context shorter when a fresh adapter is active.
-- [ ] Keep full source-grounded retrieval regardless of adapter freshness.
-- [ ] Add model selection rules:
-  - [ ] use active adapter when fresh
-  - [ ] warn when stale
-  - [ ] fall back when missing/failed
-  - [ ] never block exact source recall on adapter state
-- [ ] Add regression tests with a fake local model endpoint that verifies adapter path selection.
-- [ ] Add UI controls for:
-  - [ ] train now
-  - [ ] activate last trained adapter
-  - [ ] disable adapter
-  - [ ] compare base vs adapted routing
+- [x] Extend model configuration with adapter selection:
+  - [x] planner adapter path
+  - [x] response adapter path
+  - [x] shared cortex adapter path
+  - [x] active adapter hash
+  - [x] activation policy
+- [x] Decide how LFM2.5 is served with LoRA in the local runtime:
+  - [x] MLX-LM adapter loading path
+  - [x] fallback OpenAI-compatible endpoint behavior
+  - [x] Ollama/llama.cpp compatibility story
+- [x] Add health check that confirms the active adapter is loadable.
+- [x] Add a route-only probe that tests whether the adapted model names the expected source family before retrieval.
+- [x] Make planner prompt/context shorter when a fresh adapter is active.
+- [x] Keep full source-grounded retrieval regardless of adapter freshness.
+- [x] Add model selection rules:
+  - [x] use active adapter when fresh
+  - [x] warn when stale
+  - [x] fall back when missing/failed
+  - [x] never block exact source recall on adapter state
+- [x] Add regression tests with a fake local model endpoint that verifies adapter path selection.
+- [x] Add UI controls for:
+  - [x] train now
+  - [x] activate last trained adapter
+  - [x] disable adapter
+  - [x] compare base vs adapted routing
 
 ## Phase 3: Improve Cortex Training Data
 
 Goal: teach semantic addressability and source discipline, not accidental memorization of long private text.
 
-- [ ] Expand training tasks beyond current artifact-body examples:
-  - [ ] `query_to_region`
-  - [ ] `query_to_source_family`
-  - [ ] `query_to_tool_plan`
-  - [ ] `chunk_to_semantic_address`
-  - [ ] `weak_evidence_to_next_action`
-  - [ ] `snippet_set_to_citation_boundary`
-  - [ ] `deleted_or_stale_memory_to_caution`
-  - [ ] `web_needed_or_not`
+- [x] Expand training tasks beyond current artifact-body examples:
+  - [x] `query_to_region`
+  - [x] `query_to_source_family`
+  - [x] `query_to_tool_plan`
+  - [x] `chunk_to_semantic_address`
+  - [x] `weak_evidence_to_next_action`
+  - [x] `snippet_set_to_citation_boundary`
+  - [x] `deleted_or_stale_memory_to_caution`
+  - [x] `web_needed_or_not`
 - [ ] Generate route examples from:
-  - [ ] document titles
-  - [ ] headings/sections
-  - [ ] source paths
-  - [ ] entity overlaps
-  - [ ] citation links
+  - [x] document titles
+  - [x] headings/sections
+  - [x] source paths
+  - [x] entity overlaps
+  - [x] citation links
   - [ ] chat decisions/tasks
-  - [ ] web finding queries
-  - [ ] successful retrieval traces
+  - [x] web finding queries
+  - [x] successful retrieval traces
 - [ ] Add negative examples:
   - [ ] misleading source family
-  - [ ] weak evidence
-  - [ ] stale web finding
-  - [ ] derived memory without source anchor
-  - [ ] deleted/suppressed source
-- [ ] Keep long exact source text out of default adapter training.
-- [ ] Add explicit source refs and anchor IDs to every generated example when available.
-- [ ] Add deterministic train/eval/test split by source ID.
-- [ ] Prevent leakage between train/eval splits.
+  - [x] weak evidence
+  - [x] stale web finding
+  - [x] derived memory without source anchor
+  - [x] deleted/suppressed source
+- [x] Keep long exact source text out of default adapter training.
+- [x] Add explicit source refs and anchor IDs to every generated example when available.
+- [x] Add deterministic train/eval/test split by source ID.
+- [x] Prevent leakage between train/eval splits.
 - [ ] Version the training schema and provide migrations.
-- [ ] Add dataset inspection UI or CLI summary:
-  - [ ] task counts
-  - [ ] source counts
-  - [ ] private vs shared memory counts
-  - [ ] source types
-  - [ ] stale/deleted exclusions
-- [ ] Add export redaction policies for secrets and sensitive docs.
+- [x] Add dataset inspection UI or CLI summary:
+  - [x] task counts
+  - [x] source counts
+  - [x] private vs shared memory counts
+  - [x] source types
+  - [x] stale/deleted exclusions
+- [x] Add export redaction policies for secrets and sensitive docs.
 
 ## Phase 4: True Latent RecursiveMAS
 
@@ -566,10 +566,10 @@ The complete local-first vision is reached when:
 
 ## Suggested Next Three Milestones
 
-1. **Real Adapter Training And Activation**
-   - Queue/run MLX LoRA from Rust.
-   - Track training/eval/active states.
-   - Load active adapter into planner/response path.
+1. **Training Data Quality And Adapter Eval**
+   - Expand semantic-address tasks.
+   - Add negative/stale/deleted-source examples.
+   - Measure adapted routing against base/vector baselines.
 
 2. **Source Artifact And Deep-Link Foundation**
    - Make original sources first-class.

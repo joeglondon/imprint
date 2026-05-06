@@ -1066,6 +1066,8 @@ private struct PolicyLine: View {
 private struct AdapterStateSummary: View {
     @Environment(\.memoryTheme) private var theme
     let state: CortexAdapterState?
+    let jobs: [CortexAdapterJob]
+    let retryAction: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1094,6 +1096,12 @@ private struct AdapterStateSummary: View {
                 if let evalScore = state.evalScore {
                     DetailRow(label: "Eval", value: String(format: "%.3f", evalScore))
                 }
+                if let lastSuccessfulTrainingAt = state.lastSuccessfulTrainingAt {
+                    DetailRow(label: "Last Train", value: timeLabel(lastSuccessfulTrainingAt))
+                }
+                if let activatedAt = state.activatedAt {
+                    DetailRow(label: "Activated", value: timeLabel(activatedAt))
+                }
                 if let reason = state.reason {
                     Text(reason)
                         .font(.system(size: 11.5))
@@ -1113,6 +1121,33 @@ private struct AdapterStateSummary: View {
                     .font(.system(size: 11.5))
                     .foregroundStyle(theme.ink.secondary)
             }
+
+            if let job = primaryJob {
+                Divider().overlay(theme.surfaces.rule)
+                DetailRow(label: "Job", value: job.status)
+                DetailRow(label: "Job Hash", value: shortHash(job.sourceDatasetHash))
+                if let startedAt = job.startedAt {
+                    DetailRow(label: "Started", value: timeLabel(startedAt))
+                } else {
+                    DetailRow(label: "Queued", value: timeLabel(job.createdAt))
+                }
+                if let finishedAt = job.finishedAt {
+                    DetailRow(label: "Finished", value: timeLabel(finishedAt))
+                }
+                if let logPath = job.logPath {
+                    DetailRow(label: "Log", value: (logPath as NSString).lastPathComponent)
+                }
+                if let failureReason = job.failureReason {
+                    Text(failureReason)
+                        .font(.system(size: 11.5))
+                        .lineSpacing(2)
+                        .foregroundStyle(theme.accents.d)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if isRetryable(job) {
+                    GraphiteButton("Retry", systemImage: "arrow.clockwise", style: .ghost, action: retryAction)
+                }
+            }
         }
         .padding(.top, 6)
     }
@@ -1128,6 +1163,22 @@ private struct AdapterStateSummary: View {
 
     private func shortHash(_ hash: String) -> String {
         String(hash.prefix(12))
+    }
+
+    private var primaryJob: CortexAdapterJob? {
+        jobs.first { $0.status == "training" }
+            ?? jobs.first { $0.status == "queued" }
+            ?? jobs.first { isRetryable($0) }
+            ?? jobs.first
+    }
+
+    private func isRetryable(_ job: CortexAdapterJob) -> Bool {
+        job.status == "failed" || job.status == "cancelled" || job.status == "eval_failed"
+    }
+
+    private func timeLabel(_ millis: UInt64) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(millis) / 1000)
+        return date.formatted(date: .abbreviated, time: .shortened)
     }
 }
 
@@ -1183,6 +1234,17 @@ private struct ModelInspector: View {
                     LabeledField("Planner Model", text: stringBinding($appState.modelConfig.plannerModel))
                     LabeledField("Planner Endpoint", text: stringBinding($appState.modelConfig.plannerEndpoint))
                     LabeledField("Response Model", text: stringBinding($appState.modelConfig.responseModel))
+                    LabeledField("Planner Adapter", text: stringBinding($appState.modelConfig.plannerAdapterPath))
+                    LabeledField("Response Adapter", text: stringBinding($appState.modelConfig.responseAdapterPath))
+                    LabeledField("Shared Adapter", text: stringBinding($appState.modelConfig.sharedCortexAdapterPath))
+                    LabeledField("Active Adapter Hash", text: stringBinding($appState.modelConfig.activeAdapterHash))
+                    Picker("Adapter Policy", selection: $appState.modelConfig.adapterActivationPolicy) {
+                        Text("Automatic").tag("automatic")
+                        Text("Manual").tag("manual")
+                        Text("Disabled").tag("disabled")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
                     Toggle("Recursive Cortex", isOn: $appState.modelConfig.cortexEnabled)
                         .toggleStyle(.switch)
                     Stepper("Cortex Rounds \(appState.modelConfig.cortexRounds)", value: $appState.modelConfig.cortexRounds, in: 1...4)
@@ -1218,6 +1280,15 @@ private struct ModelInspector: View {
                         GraphiteButton("Test Connection", style: .primary, action: appState.testModelConnection)
                     }
 
+                    HStack {
+                        GraphiteButton("Train Now", systemImage: "play.fill", style: .ghost, action: appState.trainCortexAdapterNow)
+                        GraphiteButton("Activate", systemImage: "checkmark.seal", style: .ghost, action: appState.activateLastTrainedCortexAdapter)
+                    }
+                    HStack {
+                        GraphiteButton("Disable Adapter", systemImage: "pause.fill", style: .ghost, action: appState.disableCortexAdapter)
+                        GraphiteButton("Compare Routing", systemImage: "arrow.left.arrow.right", style: .ghost, action: appState.compareBaseVsAdaptedRouting)
+                    }
+
                     if let health = appState.modelConfig.health {
                         Label(health.message, systemImage: health.status == "connected" ? "checkmark.circle.fill" : "bolt.horizontal.circle")
                             .font(.system(size: 11.5))
@@ -1225,7 +1296,24 @@ private struct ModelInspector: View {
                             .padding(.top, 4)
                     }
 
-                    AdapterStateSummary(state: appState.cortexAdapterState)
+                    AdapterStateSummary(
+                        state: appState.cortexAdapterState,
+                        jobs: appState.cortexAdapterJobs,
+                        retryAction: appState.retryLatestCortexAdapterJob
+                    )
+                    if let probe = appState.cortexRouteProbe {
+                        Divider().overlay(theme.surfaces.rule)
+                        DetailRow(label: "Probe", value: probe.matched ? "matched" : "review")
+                        DetailRow(label: "Expected", value: probe.expectedSourceFamily)
+                        if let modelSourceFamily = probe.modelSourceFamily {
+                            DetailRow(label: "Adapted", value: modelSourceFamily)
+                        }
+                        if let warning = probe.warning {
+                            Text(warning)
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(theme.ink.secondary)
+                        }
+                    }
                 }
 
                 InspectorDivider()

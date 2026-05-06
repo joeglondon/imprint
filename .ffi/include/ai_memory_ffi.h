@@ -35,6 +35,11 @@ char *ai_memory_write_agent_link(const char *store_path, const char *write_json)
 char *ai_memory_apply_attention_mark(const char *store_path, const char *write_json);
 char *ai_memory_compile_memory_brain(const char *store_path);
 char *ai_memory_load_cortex_adapter_snapshot(const char *store_path);
+char *ai_memory_retry_cortex_adapter_job(const char *store_path, const char *job_id);
+char *ai_memory_train_cortex_adapter_now(const char *store_path);
+char *ai_memory_activate_last_trained_cortex_adapter(const char *store_path);
+char *ai_memory_disable_cortex_adapter(const char *store_path);
+char *ai_memory_probe_cortex_adapter_route(const char *store_path, const char *query);
 void ai_memory_free_string(char *ptr);
 
 #endif

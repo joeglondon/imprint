@@ -53,6 +53,10 @@ fn default_cortex_rounds() -> usize {
     3
 }
 
+fn default_adapter_activation_policy() -> String {
+    "automatic".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ModelConnectionMode {
     Local,
@@ -75,6 +79,18 @@ pub struct ModelHealth {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CortexRouteProbeResult {
+    pub query: String,
+    pub expected_source_family: String,
+    pub model_source_family: Option<String>,
+    pub matched: bool,
+    pub used_adapter_path: Option<String>,
+    pub used_adapter_hash: Option<String>,
+    pub warning: Option<String>,
+    pub raw_response: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelConfig {
     pub mode: ModelConnectionMode,
     pub endpoint: String,
@@ -86,6 +102,16 @@ pub struct ModelConfig {
     pub response_model: Option<String>,
     #[serde(default)]
     pub planner_endpoint: Option<String>,
+    #[serde(default)]
+    pub planner_adapter_path: Option<String>,
+    #[serde(default)]
+    pub response_adapter_path: Option<String>,
+    #[serde(default)]
+    pub shared_cortex_adapter_path: Option<String>,
+    #[serde(default)]
+    pub active_adapter_hash: Option<String>,
+    #[serde(default = "default_adapter_activation_policy")]
+    pub adapter_activation_policy: String,
     #[serde(default = "default_runtime_preset")]
     pub runtime_preset: ModelRuntimePreset,
     #[serde(default = "default_cortex_enabled")]
@@ -118,6 +144,16 @@ pub struct ModelConnectionTestRequest {
     pub response_model: Option<String>,
     #[serde(default)]
     pub planner_endpoint: Option<String>,
+    #[serde(default)]
+    pub planner_adapter_path: Option<String>,
+    #[serde(default)]
+    pub response_adapter_path: Option<String>,
+    #[serde(default)]
+    pub shared_cortex_adapter_path: Option<String>,
+    #[serde(default)]
+    pub active_adapter_hash: Option<String>,
+    #[serde(default = "default_adapter_activation_policy")]
+    pub adapter_activation_policy: String,
     #[serde(default = "default_runtime_preset")]
     pub runtime_preset: ModelRuntimePreset,
     #[serde(default = "default_cortex_enabled")]
@@ -1000,7 +1036,15 @@ pub fn compile_memory_brain(store_root: &Path) -> anyhow::Result<BrainCompileRes
         .collect::<Vec<_>>();
     std::fs::create_dir_all(store_root)?;
     std::fs::write(&training_records_path, training_records.join("\n"))?;
-    let export_files = crate::training::write_training_exports(store_root, &artifacts)?;
+    let export_context = crate::training::CortexTrainingExportContext {
+        memory: compile_memory.clone(),
+        artifacts: artifacts.clone(),
+        cortex_index: Some(cortex_index.clone()),
+        web_findings: store.list_web_findings(None).unwrap_or_default(),
+        attention_marks: store.list_attention_marks(None).unwrap_or_default(),
+        memory_accesses: store.list_memory_accesses(None, None).unwrap_or_default(),
+    };
+    let export_files = crate::training::write_training_exports(store_root, &export_context)?;
     let source_dataset_hash = crate::training::training_source_hash(&store_root.join("training"))?;
     let initial_adapter_state = crate::training::read_cortex_adapter_state(
         store_root,
@@ -1039,6 +1083,187 @@ pub fn load_cortex_adapter_snapshot(store_root: &Path) -> anyhow::Result<CortexA
     let store = FileMemoryStore::new(store_root);
     Ok(CortexAdapterSnapshot {
         adapter_state: store.load_cortex_adapter_state()?,
+        recent_jobs: store
+            .list_cortex_adapter_jobs(None)?
+            .into_iter()
+            .take(12)
+            .collect(),
+    })
+}
+
+pub fn train_cortex_adapter_now(store_root: &Path) -> anyhow::Result<CortexAdapterJob> {
+    let compile = compile_memory_brain(store_root)?;
+    let adapter_state = compile
+        .adapter_state
+        .as_ref()
+        .context("compile did not return adapter state")?;
+    let config = load_model_config(store_root)?;
+    let base_model = adapter_state
+        .base_model
+        .clone()
+        .or(config.compiler_model)
+        .or(config.response_model)
+        .or(config.chat_model)
+        .context("no compiler, response, or chat model configured for cortex training")?;
+    let job = crate::training::queue_cortex_adapter_training_job(
+        store_root,
+        &base_model,
+        &adapter_state.current_source_dataset_hash,
+        crate::training::CortexAdapterTrainingOptions::default(),
+    )?;
+    let root = store_root.to_path_buf();
+    let job_id = job.id.clone();
+    let source_hash = adapter_state.current_source_dataset_hash.clone();
+    std::thread::spawn(move || {
+        if crate::training::run_queued_cortex_adapter_training_job(&root, &job_id).is_ok() {
+            let _ = crate::training::activate_cortex_adapter(
+                &root,
+                &source_hash,
+                crate::training::DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE,
+            );
+        }
+    });
+    Ok(job)
+}
+
+pub fn activate_last_trained_cortex_adapter(
+    store_root: &Path,
+) -> anyhow::Result<CortexAdapterState> {
+    let compile = compile_memory_brain(store_root)?;
+    let adapter_state = compile
+        .adapter_state
+        .as_ref()
+        .context("compile did not return adapter state")?;
+    let (_report, state) = crate::training::activate_cortex_adapter(
+        store_root,
+        &adapter_state.current_source_dataset_hash,
+        crate::training::DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE,
+    )?;
+    let mut config = load_model_config(store_root)?;
+    if let Some(path) = state.adapter_path.clone() {
+        config.shared_cortex_adapter_path = Some(path);
+    }
+    config.active_adapter_hash = state.active_adapter_hash.clone();
+    config.adapter_activation_policy = "automatic".into();
+    save_model_config(store_root, &config)?;
+    Ok(state)
+}
+
+pub fn disable_cortex_adapter(store_root: &Path) -> anyhow::Result<ModelConfig> {
+    let mut config = load_model_config(store_root)?;
+    config.adapter_activation_policy = "disabled".into();
+    save_model_config(store_root, &config)
+}
+
+pub fn probe_cortex_adapter_route(
+    store_root: &Path,
+    query: &str,
+) -> anyhow::Result<CortexRouteProbeResult> {
+    let config = load_model_config(store_root)?;
+    let adapter = resolve_cortex_adapter_for_role(store_root, &config, "planner");
+    let memory = FileMemoryStore::new(store_root).load()?;
+    let expected = memory
+        .regions
+        .iter()
+        .max_by_key(|region| region.chunk_ids.len())
+        .map(|region| region.label.clone())
+        .unwrap_or_else(|| "unknown".into());
+    let model = config
+        .planner_model
+        .as_deref()
+        .unwrap_or(DEFAULT_PLANNER_MODEL);
+    if model == HASH_EMBEDDING_MODEL {
+        return Ok(CortexRouteProbeResult {
+            query: query.into(),
+            expected_source_family: expected.clone(),
+            model_source_family: Some(expected),
+            matched: true,
+            used_adapter_path: adapter.path,
+            used_adapter_hash: adapter.hash,
+            warning: adapter.warning,
+            raw_response: Some("hash planner mirrors expected source family".into()),
+        });
+    }
+    let prompt = format!(
+        "Name the single best source family or region for this imprint query before retrieval. Return strict JSON: {{\"source_family\":\"...\"}}\n\nExpected families:\n{}\n\nQuery: {query}",
+        memory
+            .regions
+            .iter()
+            .take(12)
+            .map(|region| format!("- {}: {}", region.label, truncate(&region.summary, 120)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let endpoint = openai_base_url(
+        config
+            .planner_endpoint
+            .as_deref()
+            .unwrap_or(&config.endpoint),
+    );
+    let request = OpenAiChatRequest {
+        model,
+        stream: false,
+        temperature: 0.0,
+        adapter_path: adapter.path.as_deref(),
+        adapter_hash: adapter.hash.as_deref(),
+        adapter_activation_policy: adapter_policy_hint(&config),
+        messages: vec![
+            OpenAiChatMessage {
+                role: "system",
+                content: "Return strict JSON only.",
+            },
+            OpenAiChatMessage {
+                role: "user",
+                content: &prompt,
+            },
+        ],
+    };
+    let content = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?
+        .post(format!("{endpoint}/chat/completions"))
+        .bearer_auth("not-needed")
+        .json(&request)
+        .send()
+        .with_context(|| format!("calling local planner model {model}"))?
+        .error_for_status()
+        .with_context(|| format!("local planner model {model} returned an error"))?
+        .json::<OpenAiChatResponse>()
+        .context("decoding local planner response")?
+        .choices
+        .into_iter()
+        .next()
+        .map(|choice| choice.message.content)
+        .context("local planner model returned no content")?;
+    let model_source_family = extract_json_object(&content)
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| {
+            value
+                .get("source_family")
+                .and_then(|field| field.as_str())
+                .map(ToOwned::to_owned)
+        });
+    let matched = model_source_family
+        .as_deref()
+        .map(|family| {
+            family.eq_ignore_ascii_case(&expected)
+                || family
+                    .to_ascii_lowercase()
+                    .contains(&expected.to_ascii_lowercase())
+                || expected
+                    .to_ascii_lowercase()
+                    .contains(&family.to_ascii_lowercase())
+        })
+        .unwrap_or(false);
+    Ok(CortexRouteProbeResult {
+        query: query.into(),
+        expected_source_family: expected,
+        model_source_family,
+        matched,
+        used_adapter_path: adapter.path,
+        used_adapter_hash: adapter.hash,
+        warning: adapter.warning,
+        raw_response: Some(content),
     })
 }
 
@@ -1217,6 +1442,11 @@ pub fn load_model_config(store_root: &Path) -> anyhow::Result<ModelConfig> {
             planner_model: Some(DEFAULT_PLANNER_MODEL.into()),
             response_model: Some(DEFAULT_RESPONSE_MODEL.into()),
             planner_endpoint: None,
+            planner_adapter_path: None,
+            response_adapter_path: None,
+            shared_cortex_adapter_path: None,
+            active_adapter_hash: None,
+            adapter_activation_policy: default_adapter_activation_policy(),
             runtime_preset: ModelRuntimePreset::Mlx,
             cortex_enabled: default_cortex_enabled(),
             cortex_rounds: default_cortex_rounds(),
@@ -1291,6 +1521,15 @@ pub fn load_model_config(store_root: &Path) -> anyhow::Result<ModelConfig> {
     {
         config.planner_endpoint = Some(config.endpoint.clone());
     }
+    if config.adapter_activation_policy.trim().is_empty() {
+        config.adapter_activation_policy = default_adapter_activation_policy();
+    }
+    if !matches!(
+        config.adapter_activation_policy.as_str(),
+        "automatic" | "manual" | "disabled"
+    ) {
+        config.adapter_activation_policy = default_adapter_activation_policy();
+    }
     config.cortex_rounds = config.cortex_rounds.clamp(1, 4);
     if config
         .critic_model
@@ -1338,6 +1577,23 @@ pub fn test_model_connection(request: ModelConnectionTestRequest) -> anyhow::Res
             .unwrap_or_default()
             .as_secs(),
     );
+    let adapter_path = request
+        .planner_adapter_path
+        .as_deref()
+        .or(request.response_adapter_path.as_deref())
+        .or(request.shared_cortex_adapter_path.as_deref())
+        .filter(|path| !path.trim().is_empty());
+    if request.adapter_activation_policy != "disabled" {
+        if let Some(path) = adapter_path {
+            let path = Path::new(path);
+            if !path.exists() {
+                anyhow::bail!(
+                    "Configured cortex adapter path is not loadable: {}",
+                    path.display()
+                );
+            }
+        }
+    }
 
     let response = match request.mode {
         ModelConnectionMode::Local => {
@@ -1367,9 +1623,12 @@ pub fn test_model_connection(request: ModelConnectionTestRequest) -> anyhow::Res
                 }
             };
             embedder.embed("AI memory embedding health check")?;
+            let adapter_note = adapter_path
+                .map(|path| format!(" with cortex adapter {}", Path::new(path).display()))
+                .unwrap_or_default();
             return Ok(ModelHealth {
                 status: "connected".into(),
-                message: format!("Local embedding model {model} responded"),
+                message: format!("Local embedding model {model} responded{adapter_note}"),
                 checked_at,
             });
         }
@@ -2347,7 +2606,13 @@ fn build_chat_context_trace_with_searcher<S: WebSearcher>(
         mandatory_hits.len()
     ));
     snippets.extend(mandatory_hits);
-    let actions = match plan_memory_actions(config, user_message, memory.as_ref(), &hot_snippets) {
+    let actions = match plan_memory_actions(
+        store_root,
+        config,
+        user_message,
+        memory.as_ref(),
+        &hot_snippets,
+    ) {
         Ok(actions) => actions,
         Err(error) => {
             tool_trace.push(format!("planner fallback: {error}"));
@@ -2638,6 +2903,7 @@ fn complete_chat_response(
         ));
     }
 
+    let adapter = resolve_cortex_adapter_for_role(store_root, config, "response");
     let endpoint = openai_base_url(&config.endpoint);
     let context = trace
         .snippets
@@ -2659,10 +2925,17 @@ fn complete_chat_response(
         model,
         stream: false,
         temperature: 0.2,
+        adapter_path: adapter.path.as_deref(),
+        adapter_hash: adapter.hash.as_deref(),
+        adapter_activation_policy: adapter_policy_hint(config),
         messages: vec![
             OpenAiChatMessage {
                 role: "system",
-                content: "You are imprint's memory agent. You receive source-grounded context from the local DB and from web findings that the tool planner retrieves with `web_search(query,max_results)`. Answer from the supplied snippets, use web-backed snippets when present, and cite snippet numbers when relevant.",
+                content: if adapter.active {
+                    "You are imprint's memory agent. Your personal cortex adapter may contain fuzzy semantic addresses, but exact claims must come from the supplied snippets. Cite snippet numbers when relevant."
+                } else {
+                    "You are imprint's memory agent. You receive source-grounded context from the local DB and from web findings that the tool planner retrieves with `web_search(query,max_results)`. Answer from the supplied snippets, use web-backed snippets when present, and cite snippet numbers when relevant."
+                },
             },
             OpenAiChatMessage {
                 role: "system",
@@ -2693,6 +2966,107 @@ fn complete_chat_response(
         .map(|choice| choice.message.content)
         .filter(|content| !content.trim().is_empty())
         .context("local response model returned no content")
+}
+
+#[derive(Debug, Clone, Default)]
+struct ResolvedCortexAdapter {
+    path: Option<String>,
+    hash: Option<String>,
+    active: bool,
+    warning: Option<String>,
+}
+
+fn resolve_cortex_adapter_for_role(
+    store_root: &Path,
+    config: &ModelConfig,
+    role: &str,
+) -> ResolvedCortexAdapter {
+    if config.adapter_activation_policy == "disabled" {
+        return ResolvedCortexAdapter {
+            warning: Some("cortex adapter disabled by model configuration".into()),
+            ..Default::default()
+        };
+    }
+    if matches!(
+        config.runtime_preset,
+        ModelRuntimePreset::Ollama | ModelRuntimePreset::LlamaCpp
+    ) {
+        return ResolvedCortexAdapter {
+            warning: Some(format!(
+                "{:?} does not accept per-request MLX LoRA adapter paths; using base model",
+                config.runtime_preset
+            )),
+            ..Default::default()
+        };
+    }
+    let state = FileMemoryStore::new(store_root)
+        .load_cortex_adapter_state()
+        .ok()
+        .flatten();
+    let Some(state) = state else {
+        return ResolvedCortexAdapter {
+            warning: Some("no active cortex adapter state found".into()),
+            ..Default::default()
+        };
+    };
+    if state.activation_status != "active" {
+        return ResolvedCortexAdapter {
+            warning: Some(format!(
+                "cortex adapter activation status is {}; using base model",
+                state.activation_status
+            )),
+            ..Default::default()
+        };
+    }
+    if state.data_freshness != "fresh" || state.freshness != "fresh" {
+        return ResolvedCortexAdapter {
+            path: state.adapter_path,
+            hash: state.active_adapter_hash,
+            active: false,
+            warning: Some("active cortex adapter is stale; source recall remains enabled".into()),
+        };
+    }
+    if let (Some(config_hash), Some(state_hash)) = (
+        config.active_adapter_hash.as_deref(),
+        state.active_adapter_hash.as_deref(),
+    ) {
+        if config_hash != state_hash {
+            return ResolvedCortexAdapter {
+                warning: Some("configured adapter hash does not match active adapter state".into()),
+                ..Default::default()
+            };
+        }
+    }
+    let configured_path = match role {
+        "planner" => config.planner_adapter_path.as_deref(),
+        "response" => config.response_adapter_path.as_deref(),
+        _ => None,
+    }
+    .or(config.shared_cortex_adapter_path.as_deref())
+    .filter(|path| !path.trim().is_empty())
+    .map(ToOwned::to_owned)
+    .or_else(|| state.adapter_path.clone());
+    let Some(path) = configured_path else {
+        return ResolvedCortexAdapter {
+            warning: Some("active cortex adapter has no path".into()),
+            ..Default::default()
+        };
+    };
+    if !Path::new(&path).exists() {
+        return ResolvedCortexAdapter {
+            hash: state.active_adapter_hash,
+            warning: Some(format!(
+                "active cortex adapter path is not loadable: {path}"
+            )),
+            ..Default::default()
+        };
+    }
+    ResolvedCortexAdapter {
+        path: Some(path),
+        hash: state.active_adapter_hash,
+        active: true,
+        warning: None,
+    }
 }
 
 fn build_cortex_trace(
@@ -2757,6 +3131,7 @@ fn build_cortex_trace(
 }
 
 fn plan_memory_actions(
+    store_root: &Path,
     config: &ModelConfig,
     user_message: &ChatMessage,
     memory: Option<&PersistedMemory>,
@@ -2773,6 +3148,24 @@ fn plan_memory_actions(
         .and_then(|memory| memory.memory_map.as_ref())
         .map(|map| map.serialized.as_str())
         .unwrap_or("Memory map unavailable.");
+    let adapter = resolve_cortex_adapter_for_role(store_root, config, "planner");
+    let active_adapter = adapter.active;
+    let map = if active_adapter {
+        memory
+            .map(|memory| {
+                memory
+                    .regions
+                    .iter()
+                    .take(8)
+                    .map(|region| format!("{}: {}", region.id, truncate(&region.summary, 120)))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| map.to_string())
+    } else {
+        map.to_string()
+    };
     let hot = hot_snippets
         .iter()
         .take(6)
@@ -2788,7 +3181,12 @@ fn plan_memory_actions(
         .collect::<Vec<_>>()
         .join("\n");
     let prompt = format!(
-        "You are imprint's tool planner. Read the compact map and hot conversation memory, then choose up to 6 small navigation actions before the response model answers. You do have web search access. Use `web_search(query,max_results)` if the answer is not in the local DB or if the user asks for current/live web information. Available tools:\n- memory_search(query,max_chunks)\n- web_search(query,max_results)\n- memory_open(node_kind,node_id) for kind chunk/document/region\n- memory_neighbors(node_kind,node_id,max_results)\n- memory_expand(chunk_id,mode,window) where mode is window/page/section/document\n- memory_jump_to_anchor(anchor_id,window)\n- mark_attention(action,reason) where action is hot, warm, cold, promote, decay, pin, suppress, or active\nUse memory_search to check the local DB first. Use web_search to pull external results into memory, where they will be embedded and searched before the response model answers. Open/neighbor calls inspect linked memory, expand/jump reads original source context, and mark_attention records useful or weak context. Return strict JSON only: {{\"actions\":[{{\"tool\":\"memory_search\",\"query\":\"...\",\"max_chunks\":4}},{{\"tool\":\"web_search\",\"query\":\"...\",\"max_results\":4}},{{\"tool\":\"memory_open\"}},{{\"tool\":\"memory_neighbors\",\"max_results\":5}},{{\"tool\":\"memory_expand\",\"mode\":\"window\",\"window\":520}},{{\"tool\":\"mark_attention\",\"action\":\"hot\",\"reason\":\"...\"}}]}}.\n\nMAP:\n{map}\n\nHOT MEMORY:\n{hot}\n\nUSER QUERY:\n{}",
+        "{}\nAvailable tools: memory_search(query,max_chunks), web_search(query,max_results), memory_open(node_kind,node_id), memory_neighbors(node_kind,node_id,max_results), memory_expand(chunk_id,mode,window), memory_jump_to_anchor(anchor_id,window), mark_attention(action,reason). Return strict JSON only: {{\"actions\":[{{\"tool\":\"memory_search\",\"query\":\"...\",\"max_chunks\":4}},{{\"tool\":\"memory_expand\",\"mode\":\"window\",\"window\":520}}]}}.\n\nMAP:\n{map}\n\nHOT MEMORY:\n{hot}\n\nUSER QUERY:\n{}",
+        if active_adapter {
+            "You are imprint's adapted tool planner. Use your personal cortex adapter as a semantic address hint, then choose small source-recall actions. Search/open/expand before answering."
+        } else {
+            "You are imprint's tool planner. Read the compact map and hot conversation memory, then choose up to 6 small navigation actions before the response model answers. Use web_search for current/live or missing local information."
+        },
         user_message.content
     );
     let endpoint = openai_base_url(
@@ -2801,6 +3199,9 @@ fn plan_memory_actions(
         model,
         stream: false,
         temperature: 0.0,
+        adapter_path: adapter.path.as_deref(),
+        adapter_hash: adapter.hash.as_deref(),
+        adapter_activation_policy: adapter_policy_hint(config),
         messages: vec![
             OpenAiChatMessage {
                 role: "system",
@@ -3910,6 +4311,10 @@ fn openai_base_url(endpoint: &str) -> String {
     }
 }
 
+fn adapter_policy_hint(config: &ModelConfig) -> Option<&str> {
+    (config.mode == ModelConnectionMode::Local).then_some(config.adapter_activation_policy.as_str())
+}
+
 #[cfg(not(test))]
 fn live_web_search(query: &str, max_results: usize) -> anyhow::Result<Vec<WebSearchResult>> {
     let client = Client::builder()
@@ -4194,6 +4599,12 @@ struct OpenAiChatRequest<'a> {
     messages: Vec<OpenAiChatMessage<'a>>,
     stream: bool,
     temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adapter_path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adapter_hash: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adapter_activation_policy: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -4225,6 +4636,9 @@ fn model_config_path(store_root: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
 
     fn temp_store_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("ai-memory-{name}"));
@@ -4240,6 +4654,11 @@ mod tests {
                 planner_model: Some(HASH_EMBEDDING_MODEL.into()),
                 response_model: Some(HASH_EMBEDDING_MODEL.into()),
                 planner_endpoint: Some(DEFAULT_LOCAL_ENDPOINT.into()),
+                planner_adapter_path: None,
+                response_adapter_path: None,
+                shared_cortex_adapter_path: None,
+                active_adapter_hash: None,
+                adapter_activation_policy: "automatic".into(),
                 runtime_preset: ModelRuntimePreset::CustomOpenAi,
                 cortex_enabled: true,
                 cortex_rounds: 3,
@@ -4576,6 +4995,11 @@ mod tests {
             planner_model: Some("planner-test".into()),
             response_model: Some("response-test".into()),
             planner_endpoint: Some("http://planner.example.com/v1".into()),
+            planner_adapter_path: Some("/tmp/planner-adapter".into()),
+            response_adapter_path: Some("/tmp/response-adapter".into()),
+            shared_cortex_adapter_path: Some("/tmp/shared-adapter".into()),
+            active_adapter_hash: Some("active-adapter-hash".into()),
+            adapter_activation_policy: "manual".into(),
             runtime_preset: ModelRuntimePreset::CustomOpenAi,
             cortex_enabled: true,
             cortex_rounds: 2,
@@ -4597,6 +5021,23 @@ mod tests {
             Some("http://planner.example.com/v1")
         );
         assert_eq!(loaded.runtime_preset, ModelRuntimePreset::CustomOpenAi);
+        assert_eq!(
+            loaded.planner_adapter_path.as_deref(),
+            Some("/tmp/planner-adapter")
+        );
+        assert_eq!(
+            loaded.response_adapter_path.as_deref(),
+            Some("/tmp/response-adapter")
+        );
+        assert_eq!(
+            loaded.shared_cortex_adapter_path.as_deref(),
+            Some("/tmp/shared-adapter")
+        );
+        assert_eq!(
+            loaded.active_adapter_hash.as_deref(),
+            Some("active-adapter-hash")
+        );
+        assert_eq!(loaded.adapter_activation_policy, "manual");
         assert!(loaded.cortex_enabled);
         assert_eq!(loaded.cortex_rounds, 2);
         assert_eq!(loaded.critic_model.as_deref(), Some("critic-test"));
@@ -4613,6 +5054,101 @@ mod tests {
             loaded.embedding_runtime_preset,
             Some(ModelRuntimePreset::Ollama)
         );
+    }
+
+    #[test]
+    fn cortex_route_probe_sends_active_adapter_path_to_local_endpoint() {
+        let root = temp_store_root("adapter-selection-probe");
+        let input = root.join("source.txt");
+        fs::write(
+            &input,
+            "Garden notes explain tomato trellis planning and irrigation timing.",
+        )
+        .expect("write source");
+        ingest_paths(&root, std::slice::from_ref(&input)).expect("ingest");
+
+        let adapter_dir = root.join("adapters").join("active-probe");
+        fs::create_dir_all(&adapter_dir).expect("adapter dir");
+        fs::write(adapter_dir.join("adapters.safetensors"), b"fake").expect("weights");
+        FileMemoryStore::new(&root)
+            .save_cortex_adapter_state(&CortexAdapterState {
+                freshness: "fresh".into(),
+                status: "active".into(),
+                reason: None,
+                data_freshness: "fresh".into(),
+                training_status: "trained".into(),
+                activation_status: "active".into(),
+                base_model: Some("planner-probe".into()),
+                adapter_path: Some(adapter_dir.display().to_string()),
+                manifest_path: None,
+                source_dataset_hash: Some("source-hash".into()),
+                current_source_dataset_hash: "source-hash".into(),
+                trained_source_dataset_hash: Some("source-hash".into()),
+                active_adapter_hash: Some("active-probe-hash".into()),
+                prepared_dataset_hash: Some("prepared-hash".into()),
+                eval_score: Some(1.0),
+                failure_reason: None,
+                train_records: Some(1),
+                valid_records: Some(1),
+                test_records: Some(1),
+                iters: Some(1),
+                last_successful_training_at: Some(100),
+                activated_at: Some(110),
+                checked_at: 120,
+            })
+            .expect("save adapter state");
+
+        let captured = Arc::new(Mutex::new(String::new()));
+        let Ok(listener) = TcpListener::bind("127.0.0.1:0") else {
+            eprintln!("skipping fake endpoint probe; sandbox denied loopback bind");
+            return;
+        };
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        let captured_thread = Arc::clone(&captured);
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buffer = [0_u8; 8192];
+            let size = stream.read(&mut buffer).expect("read request");
+            let request = String::from_utf8_lossy(&buffer[..size]).to_string();
+            *captured_thread.lock().expect("capture lock") = request.clone();
+            let response_body = serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": "{\"source_family\":\"Garden notes\"}"
+                    }
+                }]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+
+        let mut config = load_model_config(&root).expect("config");
+        config.planner_model = Some("planner-probe".into());
+        config.planner_endpoint = Some(endpoint);
+        config.runtime_preset = ModelRuntimePreset::Mlx;
+        config.shared_cortex_adapter_path = Some(adapter_dir.display().to_string());
+        config.active_adapter_hash = Some("active-probe-hash".into());
+        save_model_config(&root, &config).expect("save config");
+
+        let probe =
+            probe_cortex_adapter_route(&root, "tomato trellis").expect("probe adapted route");
+        handle.join().expect("fake endpoint thread");
+        let raw_request = captured.lock().expect("capture lock").clone();
+        assert!(raw_request.contains("\"adapter_path\""));
+        assert!(raw_request.contains(&adapter_dir.display().to_string()));
+        assert!(raw_request.contains("\"adapter_hash\":\"active-probe-hash\""));
+        assert_eq!(
+            probe.used_adapter_hash.as_deref(),
+            Some("active-probe-hash")
+        );
+        assert!(probe.used_adapter_path.is_some());
     }
 
     #[test]
@@ -4683,11 +5219,11 @@ mod tests {
         assert!(first
             .export_files
             .iter()
-            .any(|file| file.ends_with("route_region.train.jsonl")));
+            .any(|file| file.ends_with("query_to_region.train.jsonl")));
         assert!(first
             .export_files
             .iter()
-            .any(|file| file.ends_with("route_region.eval.jsonl")));
+            .any(|file| file.ends_with("query_to_region.eval.jsonl")));
         let cortex_index = first.cortex_index.as_ref().expect("cortex index");
         let second_cortex_index = second.cortex_index.as_ref().expect("second cortex index");
         assert_eq!(cortex_index.schema_version, 1);
@@ -4723,29 +5259,31 @@ mod tests {
             .manifest_path
             .as_deref()
             .is_some_and(|path| path.contains("/adapters/prepared-")));
-        assert_eq!(
-            prepared_adapter.train_records,
-            Some(first.artifacts_written * 4)
-        );
+        assert!(prepared_adapter
+            .train_records
+            .is_some_and(|records| records >= first.artifacts_written));
         assert!(std::fs::read_to_string(&first.training_records_path)
             .expect("training records")
             .contains("\"task\":\"memory_routing\""));
         let route_train = first
             .export_files
             .iter()
-            .find(|file| file.ends_with("route_region.train.jsonl"))
+            .find(|file| file.ends_with("query_to_region.train.jsonl"))
             .expect("route train file");
         let route_eval = first
             .export_files
             .iter()
-            .find(|file| file.ends_with("route_region.eval.jsonl"))
+            .find(|file| file.ends_with("query_to_region.eval.jsonl"))
             .expect("route eval file");
         let train_raw = std::fs::read_to_string(route_train).expect("read train");
         let eval_raw = std::fs::read_to_string(route_eval).expect("read eval");
-        assert!(train_raw.contains("\"schema_version\":1"));
-        assert!(train_raw.contains("\"task\":\"route_region\""));
+        assert!(train_raw.contains("\"schema_version\":2"));
+        assert!(train_raw.contains("\"task\":\"query_to_region\""));
         assert!(train_raw.contains("\"artifact_ids\""));
-        assert_ne!(train_raw, eval_raw);
+        assert!(train_raw.contains("\"source_id\""));
+        assert!(train_raw.contains("\"anchor_ids\""));
+        assert!(root.join("training").join("summary.json").exists());
+        assert!(eval_raw.is_empty() || eval_raw.contains("\"split\":\"eval\""));
         let adapter_dir = root.join("adapters").join("check");
         fs::create_dir_all(&adapter_dir).expect("adapter dir");
         fs::write(

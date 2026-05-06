@@ -565,6 +565,10 @@ pub struct CortexAdapterState {
     pub test_records: Option<usize>,
     #[serde(default)]
     pub iters: Option<usize>,
+    #[serde(default)]
+    pub last_successful_training_at: Option<u64>,
+    #[serde(default)]
+    pub activated_at: Option<u64>,
     pub checked_at: u64,
 }
 
@@ -584,6 +588,8 @@ fn default_adapter_activation_status() -> String {
 pub struct CortexAdapterSnapshot {
     #[serde(default)]
     pub adapter_state: Option<CortexAdapterState>,
+    #[serde(default)]
+    pub recent_jobs: Vec<CortexAdapterJob>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

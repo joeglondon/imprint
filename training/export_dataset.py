@@ -9,6 +9,14 @@ from pathlib import Path
 
 
 REQUIRED = {"schema_version", "task", "split", "id", "input", "target", "artifact_ids", "source_refs"}
+V2_REQUIRED = REQUIRED | {
+    "source_id",
+    "anchor_ids",
+    "source_type",
+    "visibility",
+    "redacted",
+    "excluded_or_stale",
+}
 
 
 def load_records(path: Path) -> list[dict]:
@@ -20,6 +28,8 @@ def load_records(path: Path) -> list[dict]:
             continue
         record = json.loads(line)
         missing = REQUIRED - record.keys()
+        if record.get("schema_version") == 2:
+            missing |= V2_REQUIRED - record.keys()
         if missing:
             raise SystemExit(f"{path}:{line_number} missing fields: {sorted(missing)}")
         records.append(record)
@@ -34,10 +44,23 @@ def main() -> None:
     training_dir = Path(args.store) / "training"
     files = sorted(training_dir.glob("*.jsonl"))
     summary = {}
+    task_counts = {}
+    split_counts = {}
+    source_types = {}
     for path in files:
         records = load_records(path)
         summary[path.name] = len(records)
-    print(json.dumps({"training_dir": str(training_dir), "files": summary}, indent=2, sort_keys=True))
+        for record in records:
+            task_counts[record.get("task", "unknown")] = task_counts.get(record.get("task", "unknown"), 0) + 1
+            split_counts[record.get("split", "unknown")] = split_counts.get(record.get("split", "unknown"), 0) + 1
+            source_types[record.get("source_type", "unknown")] = source_types.get(record.get("source_type", "unknown"), 0) + 1
+    print(json.dumps({
+        "training_dir": str(training_dir),
+        "files": summary,
+        "task_counts": task_counts,
+        "split_counts": split_counts,
+        "source_types": source_types,
+    }, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

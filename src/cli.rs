@@ -147,6 +147,7 @@ enum CortexCommand {
         #[arg(long)]
         queue_only: bool,
     },
+    Dataset,
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -281,6 +282,11 @@ pub fn run() -> anyhow::Result<()> {
                     !queue_only,
                 )?;
                 println!("{}", serde_json::to_string_pretty(&job)?);
+            }
+            CortexCommand::Dataset => {
+                let summary =
+                    crate::training::summarize_training_dataset(&store.root().join("training"))?;
+                println!("{}", serde_json::to_string_pretty(&summary)?);
             }
         },
         Command::Compile => {

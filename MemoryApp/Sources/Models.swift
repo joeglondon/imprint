@@ -94,6 +94,11 @@ struct ModelConfig: Codable, Equatable {
     var plannerModel: String?
     var responseModel: String?
     var plannerEndpoint: String?
+    var plannerAdapterPath: String?
+    var responseAdapterPath: String?
+    var sharedCortexAdapterPath: String?
+    var activeAdapterHash: String?
+    var adapterActivationPolicy: String
     var runtimePreset: ModelRuntimePreset
     var cortexEnabled: Bool
     var cortexRounds: Int
@@ -114,6 +119,11 @@ struct ModelConnectionTestRequest: Codable {
     var plannerModel: String?
     var responseModel: String?
     var plannerEndpoint: String?
+    var plannerAdapterPath: String?
+    var responseAdapterPath: String?
+    var sharedCortexAdapterPath: String?
+    var activeAdapterHash: String?
+    var adapterActivationPolicy: String
     var runtimePreset: ModelRuntimePreset
     var cortexEnabled: Bool
     var cortexRounds: Int
@@ -413,11 +423,47 @@ struct CortexAdapterState: Codable, Equatable {
     var validRecords: Int?
     var testRecords: Int?
     var iters: Int?
+    var lastSuccessfulTrainingAt: UInt64?
+    var activatedAt: UInt64?
     var checkedAt: UInt64
 }
 
 struct CortexAdapterSnapshot: Codable, Equatable {
     var adapterState: CortexAdapterState?
+    var recentJobs: [CortexAdapterJob]
+}
+
+struct CortexRouteProbeResult: Codable, Equatable {
+    var query: String
+    var expectedSourceFamily: String
+    var modelSourceFamily: String?
+    var matched: Bool
+    var usedAdapterPath: String?
+    var usedAdapterHash: String?
+    var warning: String?
+    var rawResponse: String?
+}
+
+struct CortexAdapterJob: Codable, Equatable, Identifiable {
+    var id: String
+    var status: String
+    var sourceDatasetHash: String
+    var preparedDatasetHash: String?
+    var baseModel: String?
+    var adapterOutputPath: String
+    var manifestPath: String?
+    var trainRecords: Int?
+    var validRecords: Int?
+    var testRecords: Int?
+    var iters: Int?
+    var command: [String]
+    var logPath: String?
+    var failureReason: String?
+    var payload: [String: String]
+    var createdAt: UInt64
+    var updatedAt: UInt64
+    var startedAt: UInt64?
+    var finishedAt: UInt64?
 }
 
 struct ChatTurnRequest: Codable, Equatable {

@@ -140,6 +140,26 @@ enum RustBridge {
         try decode(ai_memory_load_cortex_adapter_snapshot(storePath))
     }
 
+    static func retryCortexAdapterJob(storePath: String, jobId: String) throws -> CortexAdapterJob {
+        try decode(ai_memory_retry_cortex_adapter_job(storePath, jobId))
+    }
+
+    static func trainCortexAdapterNow(storePath: String) throws -> CortexAdapterJob {
+        try decode(ai_memory_train_cortex_adapter_now(storePath))
+    }
+
+    static func activateLastTrainedCortexAdapter(storePath: String) throws -> CortexAdapterState {
+        try decode(ai_memory_activate_last_trained_cortex_adapter(storePath))
+    }
+
+    static func disableCortexAdapter(storePath: String) throws -> ModelConfig {
+        try decode(ai_memory_disable_cortex_adapter(storePath))
+    }
+
+    static func probeCortexAdapterRoute(storePath: String, query: String) throws -> CortexRouteProbeResult {
+        try decode(ai_memory_probe_cortex_adapter_route(storePath, query))
+    }
+
     private static func decode<T: Decodable>(_ ptr: UnsafeMutablePointer<CChar>?) throws -> T {
         guard let ptr else {
             throw RustBridgeError.invalidResponse

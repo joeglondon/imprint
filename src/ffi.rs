@@ -373,6 +373,45 @@ pub extern "C" fn ai_memory_load_cortex_adapter_snapshot(store_path: *const c_ch
     respond(|| app::load_cortex_adapter_snapshot(&path_arg(store_path)?))
 }
 
+#[no_mangle]
+pub extern "C" fn ai_memory_retry_cortex_adapter_job(
+    store_path: *const c_char,
+    job_id: *const c_char,
+) -> *mut c_char {
+    respond(|| {
+        crate::training::retry_cortex_adapter_training_job(
+            &path_arg(store_path)?,
+            &string_arg(job_id)?,
+            false,
+        )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn ai_memory_train_cortex_adapter_now(store_path: *const c_char) -> *mut c_char {
+    respond(|| app::train_cortex_adapter_now(&path_arg(store_path)?))
+}
+
+#[no_mangle]
+pub extern "C" fn ai_memory_activate_last_trained_cortex_adapter(
+    store_path: *const c_char,
+) -> *mut c_char {
+    respond(|| app::activate_last_trained_cortex_adapter(&path_arg(store_path)?))
+}
+
+#[no_mangle]
+pub extern "C" fn ai_memory_disable_cortex_adapter(store_path: *const c_char) -> *mut c_char {
+    respond(|| app::disable_cortex_adapter(&path_arg(store_path)?))
+}
+
+#[no_mangle]
+pub extern "C" fn ai_memory_probe_cortex_adapter_route(
+    store_path: *const c_char,
+    query: *const c_char,
+) -> *mut c_char {
+    respond(|| app::probe_cortex_adapter_route(&path_arg(store_path)?, &string_arg(query)?))
+}
+
 fn respond<T: Serialize>(f: impl FnOnce() -> anyhow::Result<T>) -> *mut c_char {
     let payload: FfiResponse<Value> = match f() {
         Ok(data) => FfiResponse {

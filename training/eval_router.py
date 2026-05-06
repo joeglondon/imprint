@@ -32,13 +32,25 @@ def main() -> None:
     for record in eval_records:
         target = record.get("target", "").lower()
         text = record.get("input", "").lower()
-        if "route" in record.get("task", "") and "region" in target and "region" in text:
+        if record.get("task") in {"route_region", "query_to_region"} and "region" in target:
             correct += 1
-        elif "tool" in record.get("task", "") and "memory_search" in target:
+        elif record.get("task") == "query_to_source_family" and target.startswith("source_family:"):
             correct += 1
-        elif "critique" in record.get("task", "") and "anchor" in target:
+        elif record.get("task") in {"choose_tool", "query_to_tool_plan"} and "memory_search" in target:
             correct += 1
-        elif "collaboration" in record.get("task", "") and "planner" in target:
+        elif record.get("task") in {"critique_evidence", "weak_evidence_to_next_action"} and (
+            "anchor" in target or "weak_evidence" in target
+        ):
+            correct += 1
+        elif record.get("task") == "collaboration_pattern" and "planner" in target:
+            correct += 1
+        elif record.get("task") == "chunk_to_semantic_address" and "anchor:" in target:
+            correct += 1
+        elif record.get("task") == "snippet_set_to_citation_boundary" and "cite_anchor_ids" in target:
+            correct += 1
+        elif record.get("task") == "deleted_or_stale_memory_to_caution" and "caution:" in target:
+            correct += 1
+        elif record.get("task") == "web_needed_or_not" and "web_search_" in target:
             correct += 1
     print(json.dumps({
         "records": len(eval_records),

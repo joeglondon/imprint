@@ -15,6 +15,11 @@ final class AppState: ObservableObject {
         plannerModel: "LiquidAI/LFM2.5-350M-MLX-8bit",
         responseModel: "mlx-community/LFM2.5-1.2B-Instruct-8bit",
         plannerEndpoint: "http://127.0.0.1:8082/v1",
+        plannerAdapterPath: nil,
+        responseAdapterPath: nil,
+        sharedCortexAdapterPath: nil,
+        activeAdapterHash: nil,
+        adapterActivationPolicy: "automatic",
         runtimePreset: .mlx,
         cortexEnabled: true,
         cortexRounds: 3,
@@ -40,6 +45,8 @@ final class AppState: ObservableObject {
     @Published var derivedMemories: [DerivedMemory] = []
     @Published var workspaceConnections = WorkspaceConnection.defaults
     @Published var cortexAdapterState: CortexAdapterState?
+    @Published var cortexAdapterJobs: [CortexAdapterJob] = []
+    @Published var cortexRouteProbe: CortexRouteProbeResult?
     @Published var statusMessage = "Load files to begin building memory."
     @Published var isBusy = false
     @Published var operationProgress: OperationProgress?
@@ -63,7 +70,9 @@ final class AppState: ObservableObject {
             modelConfig = try RustBridge.loadModelConfig(storePath: storePath)
             summary = try RustBridge.getSummary(storePath: storePath)
             snapshot = try? RustBridge.getSnapshot(storePath: storePath)
-            cortexAdapterState = try? RustBridge.loadCortexAdapterSnapshot(storePath: storePath).adapterState
+            if let adapterSnapshot = try? RustBridge.loadCortexAdapterSnapshot(storePath: storePath) {
+                applyAdapterSnapshot(adapterSnapshot)
+            }
             loadChatState()
         } catch {
             statusMessage = error.localizedDescription
@@ -196,6 +205,7 @@ final class AppState: ObservableObject {
                 self.summary = snapshot.summary
                 self.snapshot = snapshot
                 self.cortexAdapterState = result.adapterState
+                self.refreshAdapterSnapshotQuietly()
                 if let adapterState = result.adapterState {
                     self.statusMessage = "Imported \(result.importedCount), reused \(result.reusedEmbeddingCount), embedded \(result.embeddedCount). Adapter \(adapterState.freshness)."
                 } else {
@@ -220,6 +230,7 @@ final class AppState: ObservableObject {
                 self.summary = snapshot.summary
                 self.snapshot = snapshot
                 self.cortexAdapterState = result.adapterState
+                self.refreshAdapterSnapshotQuietly()
                 if let adapterState = result.adapterState {
                     self.statusMessage = "Memory rebuilt: reused \(result.reusedEmbeddingCount), embedded \(result.embeddedCount). Adapter \(adapterState.freshness)."
                 } else {
@@ -240,6 +251,7 @@ final class AppState: ObservableObject {
             },
             apply: { [weak self] result, snapshot in
                 guard let self else { return }
+                self.applyAdapterSnapshot(snapshot)
                 self.cortexAdapterState = snapshot.adapterState ?? result.adapterState
                 if let adapterState = self.cortexAdapterState {
                     self.statusMessage = "Compiled \(result.artifactsWritten) artifacts. Adapter \(adapterState.freshness)."
@@ -264,9 +276,109 @@ final class AppState: ObservableObject {
                 guard let self else { return }
                 self.summary = summary
                 self.snapshot = snapshot
-                self.cortexAdapterState = adapterSnapshot.adapterState
+                self.applyAdapterSnapshot(adapterSnapshot)
             }
         )
+    }
+
+    func retryLatestCortexAdapterJob() {
+        guard let job = cortexAdapterJobs.first(where: { $0.status == "failed" || $0.status == "cancelled" || $0.status == "eval_failed" }) else {
+            statusMessage = "No retryable cortex adapter job."
+            return
+        }
+        let storePath = self.storePath
+        runTask(
+            message: "Queueing cortex adapter retry…",
+            operation: {
+                let retry = try RustBridge.retryCortexAdapterJob(storePath: storePath, jobId: job.id)
+                let snapshot = try RustBridge.loadCortexAdapterSnapshot(storePath: storePath)
+                return (retry, snapshot)
+            },
+            apply: { [weak self] retry, snapshot in
+                guard let self else { return }
+                self.applyAdapterSnapshot(snapshot)
+                self.statusMessage = "Queued cortex adapter retry \(retry.id)."
+            }
+        )
+    }
+
+    func trainCortexAdapterNow() {
+        let storePath = self.storePath
+        runTask(
+            message: "Queueing cortex adapter training...",
+            operation: {
+                let job = try RustBridge.trainCortexAdapterNow(storePath: storePath)
+                let snapshot = try RustBridge.loadCortexAdapterSnapshot(storePath: storePath)
+                return (job, snapshot)
+            },
+            apply: { [weak self] job, snapshot in
+                guard let self else { return }
+                self.applyAdapterSnapshot(snapshot)
+                self.statusMessage = "Queued cortex adapter training \(job.id)."
+            }
+        )
+    }
+
+    func activateLastTrainedCortexAdapter() {
+        let storePath = self.storePath
+        runTask(
+            message: "Activating trained cortex adapter...",
+            operation: {
+                let state = try RustBridge.activateLastTrainedCortexAdapter(storePath: storePath)
+                let config = try RustBridge.loadModelConfig(storePath: storePath)
+                let snapshot = try RustBridge.loadCortexAdapterSnapshot(storePath: storePath)
+                return (state, config, snapshot)
+            },
+            apply: { [weak self] state, config, snapshot in
+                guard let self else { return }
+                self.modelConfig = config
+                self.applyAdapterSnapshot(snapshot)
+                self.cortexAdapterState = state
+                self.statusMessage = "Activated cortex adapter."
+            }
+        )
+    }
+
+    func disableCortexAdapter() {
+        let storePath = self.storePath
+        runTask(
+            message: "Disabling cortex adapter...",
+            operation: {
+                try RustBridge.disableCortexAdapter(storePath: storePath)
+            },
+            apply: { [weak self] config in
+                guard let self else { return }
+                self.modelConfig = config
+                self.statusMessage = "Cortex adapter disabled for model calls."
+            }
+        )
+    }
+
+    func compareBaseVsAdaptedRouting() {
+        let query = searchText.isEmpty ? "Which source family should answer this memory question?" : searchText
+        let storePath = self.storePath
+        runTask(
+            message: "Probing adapted route selection...",
+            operation: {
+                try RustBridge.probeCortexAdapterRoute(storePath: storePath, query: query)
+            },
+            apply: { [weak self] result in
+                guard let self else { return }
+                self.cortexRouteProbe = result
+                self.statusMessage = result.matched ? "Adapter route probe matched \(result.expectedSourceFamily)." : "Adapter route probe needs review."
+            }
+        )
+    }
+
+    private func refreshAdapterSnapshotQuietly() {
+        if let adapterSnapshot = try? RustBridge.loadCortexAdapterSnapshot(storePath: storePath) {
+            applyAdapterSnapshot(adapterSnapshot)
+        }
+    }
+
+    private func applyAdapterSnapshot(_ snapshot: CortexAdapterSnapshot) {
+        cortexAdapterState = snapshot.adapterState
+        cortexAdapterJobs = snapshot.recentJobs
     }
 
     func saveModelConfig() {
@@ -302,6 +414,11 @@ final class AppState: ObservableObject {
             plannerModel: self.modelConfig.plannerModel,
             responseModel: self.modelConfig.responseModel,
             plannerEndpoint: self.modelConfig.plannerEndpoint,
+            plannerAdapterPath: self.modelConfig.plannerAdapterPath,
+            responseAdapterPath: self.modelConfig.responseAdapterPath,
+            sharedCortexAdapterPath: self.modelConfig.sharedCortexAdapterPath,
+            activeAdapterHash: self.modelConfig.activeAdapterHash,
+            adapterActivationPolicy: self.modelConfig.adapterActivationPolicy,
             runtimePreset: self.modelConfig.runtimePreset,
             cortexEnabled: self.modelConfig.cortexEnabled,
             cortexRounds: self.modelConfig.cortexRounds,
