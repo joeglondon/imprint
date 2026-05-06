@@ -1078,19 +1078,34 @@ private struct AdapterStateSummary: View {
             }
 
             if let state {
-                DetailRow(label: "Status", value: state.status)
+                DetailRow(label: "Data", value: state.dataFreshness)
+                DetailRow(label: "Training", value: state.trainingStatus)
+                DetailRow(label: "Activation", value: state.activationStatus)
                 if let baseModel = state.baseModel {
                     DetailRow(label: "Base", value: baseModel)
                 }
                 DetailRow(label: "Source Hash", value: shortHash(state.currentSourceDatasetHash))
+                if let trainedSourceDatasetHash = state.trainedSourceDatasetHash {
+                    DetailRow(label: "Trained Hash", value: shortHash(trainedSourceDatasetHash))
+                }
                 if let preparedDatasetHash = state.preparedDatasetHash {
                     DetailRow(label: "Prepared Hash", value: shortHash(preparedDatasetHash))
+                }
+                if let evalScore = state.evalScore {
+                    DetailRow(label: "Eval", value: String(format: "%.3f", evalScore))
                 }
                 if let reason = state.reason {
                     Text(reason)
                         .font(.system(size: 11.5))
                         .lineSpacing(2)
                         .foregroundStyle(theme.ink.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let failureReason = state.failureReason {
+                    Text(failureReason)
+                        .font(.system(size: 11.5))
+                        .lineSpacing(2)
+                        .foregroundStyle(theme.accents.d)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             } else {

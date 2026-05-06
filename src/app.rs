@@ -4637,6 +4637,11 @@ mod tests {
         let prepared_adapter = first.adapter_state.as_ref().expect("adapter state");
         assert_eq!(prepared_adapter.freshness, "fresh");
         assert_eq!(prepared_adapter.status, "prepared");
+        assert_eq!(prepared_adapter.data_freshness, "fresh");
+        assert_eq!(prepared_adapter.training_status, "prepared");
+        assert_eq!(prepared_adapter.activation_status, "inactive");
+        assert_eq!(prepared_adapter.trained_source_dataset_hash, None);
+        assert_eq!(prepared_adapter.active_adapter_hash, None);
         assert_eq!(
             prepared_adapter.base_model.as_deref(),
             Some(HASH_EMBEDDING_MODEL)
@@ -4673,11 +4678,15 @@ mod tests {
         fs::write(
             adapter_dir.join("adapter_manifest.json"),
             serde_json::json!({
-                "status": "prepared",
+                "status": "active",
                 "base_model": "tiny-memory-model",
                 "adapter_path": adapter_dir.display().to_string(),
                 "dataset_hash": "prepared-hash",
                 "source_dataset_hash": prepared_adapter.current_source_dataset_hash,
+                "trained_source_dataset_hash": prepared_adapter.current_source_dataset_hash,
+                "active_adapter_hash": "adapter-file-hash",
+                "activation_status": "active",
+                "eval_score": 0.875,
                 "train_records": 1,
                 "valid_records": 1,
                 "test_records": 1,
@@ -4689,7 +4698,19 @@ mod tests {
         let with_adapter = compile_memory_brain(&root).expect("compile with adapter");
         let adapter_state = with_adapter.adapter_state.as_ref().expect("adapter state");
         assert_eq!(adapter_state.freshness, "fresh");
-        assert_eq!(adapter_state.status, "prepared");
+        assert_eq!(adapter_state.status, "active");
+        assert_eq!(adapter_state.data_freshness, "fresh");
+        assert_eq!(adapter_state.training_status, "trained");
+        assert_eq!(adapter_state.activation_status, "active");
+        assert_eq!(
+            adapter_state.trained_source_dataset_hash.as_deref(),
+            Some(prepared_adapter.current_source_dataset_hash.as_str())
+        );
+        assert_eq!(
+            adapter_state.active_adapter_hash.as_deref(),
+            Some("adapter-file-hash")
+        );
+        assert_eq!(adapter_state.eval_score, Some(0.875));
         assert_eq!(
             adapter_state.base_model.as_deref(),
             Some("tiny-memory-model")

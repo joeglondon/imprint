@@ -396,12 +396,19 @@ struct CortexAdapterState: Codable, Equatable {
     var freshness: String
     var status: String
     var reason: String?
+    var dataFreshness: String
+    var trainingStatus: String
+    var activationStatus: String
     var baseModel: String?
     var adapterPath: String?
     var manifestPath: String?
     var sourceDatasetHash: String?
     var currentSourceDatasetHash: String
+    var trainedSourceDatasetHash: String?
+    var activeAdapterHash: String?
     var preparedDatasetHash: String?
+    var evalScore: Double?
+    var failureReason: String?
     var trainRecords: Int?
     var validRecords: Int?
     var testRecords: Int?

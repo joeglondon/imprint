@@ -122,12 +122,19 @@ pub fn read_cortex_adapter_state(
             freshness: "missing".into(),
             status: "missing".into(),
             reason: Some("No adapter_manifest.json found under store adapters directory".into()),
+            data_freshness: "missing".into(),
+            training_status: "missing".into(),
+            activation_status: "inactive".into(),
             base_model: None,
             adapter_path: None,
             manifest_path: None,
             source_dataset_hash: None,
             current_source_dataset_hash,
+            trained_source_dataset_hash: None,
+            active_adapter_hash: None,
             prepared_dataset_hash: None,
+            eval_score: None,
+            failure_reason: None,
             train_records: None,
             valid_records: None,
             test_records: None,
@@ -142,6 +149,13 @@ pub fn read_cortex_adapter_state(
         .with_context(|| format!("parsing {}", manifest_path.display()))?;
     let source_dataset_hash = string_field(&manifest, "source_dataset_hash");
     let status = string_field(&manifest, "status").unwrap_or_else(|| "unknown".into());
+    let training_status = adapter_training_status(&status);
+    let activation_status = adapter_activation_status(&status, &manifest);
+    let trained_source_dataset_hash = string_field(&manifest, "trained_source_dataset_hash")
+        .or_else(|| match status.as_str() {
+            "trained" | "active" => source_dataset_hash.clone(),
+            _ => None,
+        });
     let freshness = match source_dataset_hash.as_deref() {
         Some(hash) if hash == current_source_dataset_hash => "fresh",
         Some(_) => "stale",
@@ -155,15 +169,23 @@ pub fn read_cortex_adapter_state(
     };
 
     Ok(CortexAdapterState {
-        freshness,
+        freshness: freshness.clone(),
         status,
         reason,
+        data_freshness: freshness,
+        training_status,
+        activation_status,
         base_model: string_field(&manifest, "base_model"),
         adapter_path: string_field(&manifest, "adapter_path"),
         manifest_path: Some(manifest_path.display().to_string()),
         source_dataset_hash,
         current_source_dataset_hash,
+        trained_source_dataset_hash,
+        active_adapter_hash: string_field(&manifest, "active_adapter_hash")
+            .or_else(|| string_field(&manifest, "adapter_hash")),
         prepared_dataset_hash: string_field(&manifest, "dataset_hash"),
+        eval_score: f64_field(&manifest, "eval_score"),
+        failure_reason: string_field(&manifest, "failure_reason"),
         train_records: usize_field(&manifest, "train_records"),
         valid_records: usize_field(&manifest, "valid_records"),
         test_records: usize_field(&manifest, "test_records"),
@@ -285,6 +307,35 @@ fn usize_field(value: &serde_json::Value, key: &str) -> Option<usize> {
         .get(key)?
         .as_u64()
         .and_then(|number| number.try_into().ok())
+}
+
+fn f64_field(value: &serde_json::Value, key: &str) -> Option<f64> {
+    value.get(key)?.as_f64()
+}
+
+fn adapter_training_status(status: &str) -> String {
+    match status {
+        "missing" => "missing",
+        "prepared" => "prepared",
+        "queued" => "queued",
+        "training" => "training",
+        "trained" | "active" => "trained",
+        "eval_failed" => "eval_failed",
+        "failed" => "failed",
+        _ => "unknown",
+    }
+    .into()
+}
+
+fn adapter_activation_status(status: &str, manifest: &serde_json::Value) -> String {
+    if let Some(value) = string_field(manifest, "activation_status") {
+        return value;
+    }
+    match status {
+        "active" => "active",
+        _ => "inactive",
+    }
+    .into()
 }
 
 fn training_record(task: &str, split: &str, artifact: &BrainArtifact) -> serde_json::Value {

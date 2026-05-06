@@ -509,7 +509,7 @@ pub struct ChatContextTrace {
     pub created_at: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BrainCompileResult {
     pub artifacts_written: usize,
     pub artifact_ids: Vec<String>,
@@ -523,12 +523,20 @@ pub struct BrainCompileResult {
     pub cortex_index: Option<CortexIndex>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CortexAdapterState {
+    /// Compatibility summary: missing/fresh/stale/unknown.
     pub freshness: String,
+    /// Compatibility summary: the raw manifest status when available.
     pub status: String,
     #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default = "default_adapter_data_freshness")]
+    pub data_freshness: String,
+    #[serde(default = "default_adapter_training_status")]
+    pub training_status: String,
+    #[serde(default = "default_adapter_activation_status")]
+    pub activation_status: String,
     #[serde(default)]
     pub base_model: Option<String>,
     #[serde(default)]
@@ -539,7 +547,15 @@ pub struct CortexAdapterState {
     pub source_dataset_hash: Option<String>,
     pub current_source_dataset_hash: String,
     #[serde(default)]
+    pub trained_source_dataset_hash: Option<String>,
+    #[serde(default)]
+    pub active_adapter_hash: Option<String>,
+    #[serde(default)]
     pub prepared_dataset_hash: Option<String>,
+    #[serde(default)]
+    pub eval_score: Option<f64>,
+    #[serde(default)]
+    pub failure_reason: Option<String>,
     #[serde(default)]
     pub train_records: Option<usize>,
     #[serde(default)]
@@ -551,7 +567,19 @@ pub struct CortexAdapterState {
     pub checked_at: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+fn default_adapter_data_freshness() -> String {
+    "unknown".into()
+}
+
+fn default_adapter_training_status() -> String {
+    "missing".into()
+}
+
+fn default_adapter_activation_status() -> String {
+    "inactive".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CortexAdapterSnapshot {
     #[serde(default)]
     pub adapter_state: Option<CortexAdapterState>,
