@@ -155,6 +155,7 @@ Do not optimize for dumping whole corpora into prompt context. Optimize for surg
 - MLX cortex adapter training is not yet a core import/rebuild step.
 - MLX adapter preparation now writes an inspectable `adapter_manifest.json` with base model, dataset path, dataset hash, record counts, status, and iteration target, but the Rust app does not yet persist or read that manifest as adapter freshness state.
 - True latent RecursiveLink-style planner/critic/retriever/solver loops are not implemented; current recursion is trace/text/tool mediated.
+- Routing now returns a structured `RoutePlan` with candidate regions, scores, matched terms, and suggested next tool steps. It is still lexical over `MemoryMap`; it needs embedding-aware routing and a stronger recursive-agent policy contract.
 - Vector search is in-memory and approximate, not yet a scalable ANN store.
 - Source anchors target extracted text offsets, not exact rendered PDF or original-file deep links.
 - Original source files are referenced by path but not managed as durable artifacts.
@@ -169,6 +170,10 @@ Do not optimize for dumping whole corpora into prompt context. Optimize for surg
 ## Recent Incremental Improvements
 
 - 2026-05-05: Added a unit-tested MLX adapter preparation manifest in `training/train_mlx_lora.py`. Dry runs and completed training now share one manifest path, making prepared datasets inspectable before optional MLX dependencies are used for real training.
+
+## Recent Improvements
+
+- 2026-05-06: `RoutedQuery` now carries a typed route plan for LLM clients: ranked region candidates, lexical matched terms, per-candidate reasons, and next tool steps that preserve the route -> search -> open/surf -> expand/cite workflow. Swift mirror models were updated to keep the FFI/UI contract aligned. Remaining drawback: candidate scoring is still lexical and string-contained, so semantically related regions without shared words can be missed.
 
 ## Validation
 

@@ -16,35 +16,68 @@ impl Router for MemoryQueryEngine {
             .entries
             .iter()
             .map(|entry| {
-                let mut score = 0usize;
+                let label = entry.label.to_lowercase();
+                let summary = entry.summary.to_lowercase();
+                let filter_values = entry
+                    .filters
+                    .values()
+                    .map(|value| value.to_lowercase())
+                    .collect::<Vec<_>>();
+                let mut score = 0.0f32;
+                let mut matched_terms = Vec::new();
                 for token in &tokens {
-                    if entry.label.contains(token) || entry.summary.contains(token) {
-                        score += 2;
+                    let mut matched = false;
+                    if label.contains(token) || summary.contains(token) {
+                        score += 2.0;
+                        matched = true;
                     }
-                    if entry.filters.values().any(|value| value.contains(token)) {
-                        score += 1;
+                    if filter_values.iter().any(|value| value.contains(token)) {
+                        score += 1.0;
+                        matched = true;
+                    }
+                    if matched {
+                        matched_terms.push(token.clone());
                     }
                 }
-                (entry.region_id.clone(), entry.label.clone(), score)
+                RouteCandidate {
+                    region_id: entry.region_id.clone(),
+                    label: entry.label.clone(),
+                    score,
+                    matched_terms,
+                    reason: format!("{} matched route score {score:.1}", entry.label),
+                }
             })
             .collect::<Vec<_>>();
-        scored.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.0.cmp(&right.0)));
-        let chosen = scored
+        scored.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.region_id.cmp(&right.region_id))
+        });
+        let candidates = scored
             .into_iter()
             .take(request.max_regions.max(1))
-            .map(|(id, label, score)| (id, format!("{label} matched score {score}")))
             .collect::<Vec<_>>();
-        let region_ids = chosen.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
-        let rationale = chosen
+        let region_ids = candidates
             .iter()
-            .map(|(_, why)| why.clone())
+            .map(|candidate| candidate.region_id.clone())
+            .collect::<Vec<_>>();
+        let rationale = candidates
+            .iter()
+            .map(|candidate| candidate.reason.clone())
             .collect::<Vec<_>>()
             .join("; ");
+        let next_steps = route_next_steps(&candidates);
         RoutedQuery {
             query: request.text.clone(),
             region_ids,
             filters: request.filters.clone(),
             rationale,
+            route_plan: RoutePlan {
+                candidates,
+                next_steps,
+            },
         }
     }
 }
@@ -208,6 +241,22 @@ fn lexical_overlap_score(left: &str, right: &str) -> f32 {
     overlap / left.len().max(1) as f32
 }
 
+fn route_next_steps(candidates: &[RouteCandidate]) -> Vec<String> {
+    if candidates.is_empty() {
+        return vec!["memory_search with a broader query before opening source context".into()];
+    }
+    let region_list = candidates
+        .iter()
+        .map(|candidate| candidate.region_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    vec![
+        format!("memory_search within candidate regions: {region_list}"),
+        "memory_open the strongest hit, then memory_neighbors for surfable links".into(),
+        "memory_expand or memory_jump_to_anchor before citing source truth".into(),
+    ]
+}
+
 fn excerpt_window(text: &str, start: usize, end: usize, pad: usize) -> String {
     let chars = text.chars().collect::<Vec<_>>();
     let left = start.saturating_sub(pad);
@@ -218,4 +267,58 @@ fn excerpt_window(text: &str, start: usize, end: usize, pad: usize) -> String {
 #[allow(dead_code)]
 fn _region_score(query_embedding: &[f32], region: &Region) -> f32 {
     cosine_similarity(query_embedding, &region.centroid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(region_id: &str, label: &str, summary: &str) -> MapEntry {
+        MapEntry {
+            region_id: region_id.into(),
+            label: label.into(),
+            summary: summary.into(),
+            filters: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn route_returns_structured_candidates_for_agent_planning() {
+        let memory_map = MemoryMap {
+            budget_bytes: 2048,
+            serialized: String::new(),
+            entries: vec![
+                entry(
+                    "source-truth",
+                    "Source Truth",
+                    "Anchored citations and original documents",
+                ),
+                entry(
+                    "agent-routing",
+                    "Agent Routing",
+                    "Tool contracts for memory navigation",
+                ),
+            ],
+        };
+        let request = QueryRequest {
+            text: "How should an agent navigate source citations?".into(),
+            filters: BTreeMap::new(),
+            max_regions: 2,
+            max_chunks: 5,
+        };
+
+        let routed = MemoryQueryEngine.route(&memory_map, &request);
+
+        assert_eq!(routed.route_plan.candidates.len(), 2);
+        assert_eq!(routed.route_plan.candidates[0].region_id, "source-truth");
+        assert!(routed.route_plan.candidates[0].score > 0.0);
+        assert!(routed.route_plan.candidates[0]
+            .matched_terms
+            .contains(&"source".into()));
+        assert!(routed
+            .route_plan
+            .next_steps
+            .iter()
+            .any(|step| step.contains("memory_search")));
+    }
 }
