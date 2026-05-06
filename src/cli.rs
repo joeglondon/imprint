@@ -131,6 +131,14 @@ enum CortexCommand {
         #[arg(long)]
         log: Option<PathBuf>,
     },
+    Eval {
+        #[arg(long, default_value_t = crate::training::DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE)]
+        minimum_score: f64,
+    },
+    Activate {
+        #[arg(long, default_value_t = crate::training::DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE)]
+        minimum_score: f64,
+    },
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -222,6 +230,36 @@ pub fn run() -> anyhow::Result<()> {
                     },
                 )?;
                 println!("{}", serde_json::to_string_pretty(&job)?);
+            }
+            CortexCommand::Eval { minimum_score } => {
+                let compile = crate::app::compile_memory_brain(store.root())?;
+                let adapter_state = compile
+                    .adapter_state
+                    .as_ref()
+                    .context("compile did not return adapter state")?;
+                let report = crate::training::evaluate_cortex_adapter(
+                    store.root(),
+                    &adapter_state.current_source_dataset_hash,
+                    minimum_score,
+                )?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
+            CortexCommand::Activate { minimum_score } => {
+                let compile = crate::app::compile_memory_brain(store.root())?;
+                let adapter_state = compile
+                    .adapter_state
+                    .as_ref()
+                    .context("compile did not return adapter state")?;
+                let (eval, adapter_state) = crate::training::activate_cortex_adapter(
+                    store.root(),
+                    &adapter_state.current_source_dataset_hash,
+                    minimum_score,
+                )?;
+                let payload = serde_json::json!({
+                    "eval": eval,
+                    "adapter_state": adapter_state,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
             }
         },
         Command::Compile => {

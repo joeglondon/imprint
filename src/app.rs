@@ -4938,6 +4938,87 @@ mod tests {
     }
 
     #[test]
+    fn cortex_adapter_eval_gates_activation() {
+        let root = temp_store_root("adapter-activation");
+        let input = root.join("source.txt");
+        fs::write(
+            &input,
+            "Adapter activation should require route, source expansion, critique, and source boundary eval records.",
+        )
+        .expect("write source");
+        ingest_paths(&root, std::slice::from_ref(&input)).expect("ingest");
+        let compile = compile_memory_brain(&root).expect("compile");
+        let source_hash = compile
+            .adapter_state
+            .as_ref()
+            .expect("adapter state")
+            .current_source_dataset_hash
+            .clone();
+
+        assert!(crate::training::activate_cortex_adapter(&root, &source_hash, 0.8).is_err());
+
+        let trained_dir = root.join("adapters").join("trained-check");
+        fs::create_dir_all(&trained_dir).expect("trained dir");
+        fs::write(
+            trained_dir.join("adapters.safetensors"),
+            b"fake trained weights",
+        )
+        .expect("adapter weights");
+        fs::write(
+            trained_dir.join("adapter_manifest.json"),
+            serde_json::json!({
+                "status": "trained",
+                "base_model": "tiny-memory-model",
+                "adapter_path": trained_dir.display().to_string(),
+                "dataset_hash": "prepared-hash",
+                "prepared_dataset_hash": "prepared-hash",
+                "source_dataset_hash": source_hash,
+                "adapter_file_hash": "trained-file-hash",
+                "train_records": 4,
+                "valid_records": 4,
+                "test_records": 4,
+                "iters": 25
+            })
+            .to_string(),
+        )
+        .expect("trained manifest");
+
+        let report =
+            crate::training::evaluate_cortex_adapter(&root, &source_hash, 0.8).expect("eval");
+        assert!(report.passed);
+        assert_eq!(report.score, 1.0);
+        assert_eq!(report.gates.get("source_expansion_behavior"), Some(&true));
+        assert_eq!(report.gates.get("critique_evidence_behavior"), Some(&true));
+        assert_eq!(report.gates.get("source_ref_boundary"), Some(&true));
+
+        let (_report, state) = crate::training::activate_cortex_adapter(&root, &source_hash, 0.8)
+            .expect("activate adapter");
+        assert_eq!(state.status, "active");
+        assert_eq!(state.training_status, "trained");
+        assert_eq!(state.activation_status, "active");
+        assert_eq!(state.eval_score, Some(1.0));
+        assert_eq!(
+            state.active_adapter_hash.as_deref(),
+            Some("trained-file-hash")
+        );
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(trained_dir.join("adapter_manifest.json"))
+                .expect("read active manifest"),
+        )
+        .expect("parse active manifest");
+        assert_eq!(
+            manifest.get("status").and_then(|value| value.as_str()),
+            Some("active")
+        );
+        assert_eq!(
+            FileMemoryStore::new(&root)
+                .load_cortex_adapter_state()
+                .expect("load adapter state"),
+            Some(state)
+        );
+    }
+
+    #[test]
     fn chat_turns_are_persisted_indexed_hot_and_survive_rebuilds() {
         let root = temp_store_root("chat-memory");
         let session = create_chat_session(&root, Some("Milestone A".into())).expect("create chat");

@@ -1,6 +1,7 @@
 use crate::store::FileMemoryStore;
 use crate::types::{BrainArtifact, BrainArtifactKind, CortexAdapterJob, CortexAdapterState};
-use anyhow::Context;
+use anyhow::{anyhow, Context};
+use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -13,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const TRAINING_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_ADAPTER_ITERS: usize = 100;
 const DEFAULT_ADAPTER_TRAINING_TIMEOUT_MILLIS: u64 = 30 * 60 * 1000;
+pub const DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE: f64 = 0.8;
 
 #[derive(Debug, Clone)]
 pub struct CortexAdapterTrainingOptions {
@@ -37,6 +39,30 @@ impl Default for CortexAdapterTrainingOptions {
             log_path: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CortexAdapterEvalTaskScore {
+    pub records: usize,
+    pub passed: usize,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CortexAdapterEvalReport {
+    pub status: String,
+    pub passed: bool,
+    pub score: f64,
+    pub minimum_score: f64,
+    pub records: usize,
+    pub source_ref_records: usize,
+    pub task_scores: BTreeMap<String, CortexAdapterEvalTaskScore>,
+    pub gates: BTreeMap<String, bool>,
+    pub manifest_path: Option<String>,
+    pub adapter_path: Option<String>,
+    pub source_dataset_hash: String,
+    pub evaluated_at: u64,
+    pub failure_reason: Option<String>,
 }
 
 pub fn write_training_exports(
@@ -282,6 +308,187 @@ pub fn run_cortex_adapter_training_job(
     Ok(job)
 }
 
+pub fn evaluate_cortex_adapter(
+    store_root: &Path,
+    current_source_dataset_hash: &str,
+    minimum_score: f64,
+) -> anyhow::Result<CortexAdapterEvalReport> {
+    let evaluated_at = now_millis();
+    let Some(manifest_path) = newest_adapter_manifest_matching(
+        &store_root.join("adapters"),
+        &["trained", "active"],
+        Some(current_source_dataset_hash),
+    )?
+    else {
+        return Ok(CortexAdapterEvalReport {
+            status: "missing".into(),
+            passed: false,
+            score: 0.0,
+            minimum_score,
+            records: 0,
+            source_ref_records: 0,
+            task_scores: BTreeMap::new(),
+            gates: BTreeMap::from([
+                ("trained_adapter_manifest".into(), false),
+                ("overall_score".into(), false),
+            ]),
+            manifest_path: None,
+            adapter_path: None,
+            source_dataset_hash: current_source_dataset_hash.into(),
+            evaluated_at,
+            failure_reason: Some(
+                "No trained adapter manifest matches the current source dataset hash".into(),
+            ),
+        });
+    };
+
+    let manifest = read_manifest(&manifest_path)?;
+    let status = string_field(&manifest, "status").unwrap_or_else(|| "unknown".into());
+    let adapter_path = string_field(&manifest, "adapter_path");
+    let records = training_records_for_split(&store_root.join("training"), "eval")?;
+    let mut task_counts: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut source_ref_records = 0;
+    for record in &records {
+        let task = record
+            .get("task")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let passes = eval_record_passes_gate(record);
+        let entry = task_counts.entry(task).or_insert((0, 0));
+        entry.0 += 1;
+        if passes {
+            entry.1 += 1;
+        }
+        if record
+            .get("source_refs")
+            .and_then(|value| value.as_array())
+            .is_some_and(|refs| !refs.is_empty())
+        {
+            source_ref_records += 1;
+        }
+    }
+
+    let mut task_scores = BTreeMap::new();
+    let mut passed_records = 0;
+    for (task, (total, passed)) in task_counts {
+        passed_records += passed;
+        task_scores.insert(
+            task,
+            CortexAdapterEvalTaskScore {
+                records: total,
+                passed,
+                score: ratio(passed, total),
+            },
+        );
+    }
+    let score = ratio(passed_records, records.len());
+    let route_score = task_scores
+        .get("route_region")
+        .map(|task| task.score)
+        .unwrap_or_default();
+    let tool_score = task_scores
+        .get("choose_tool")
+        .map(|task| task.score)
+        .unwrap_or_default();
+    let critique_score = task_scores
+        .get("critique_evidence")
+        .map(|task| task.score)
+        .unwrap_or_default();
+    let source_refs_gate = !records.is_empty() && source_ref_records == records.len();
+    let adapter_hash_gate = string_field(&manifest, "adapter_file_hash")
+        .or_else(|| string_field(&manifest, "active_adapter_hash"))
+        .is_some();
+    let gates = BTreeMap::from([
+        (
+            "trained_adapter_manifest".into(),
+            status == "trained" || status == "active",
+        ),
+        ("adapter_file_hash".into(), adapter_hash_gate),
+        ("overall_score".into(), score >= minimum_score),
+        ("route_region_behavior".into(), route_score >= minimum_score),
+        (
+            "source_expansion_behavior".into(),
+            tool_score >= minimum_score,
+        ),
+        (
+            "critique_evidence_behavior".into(),
+            critique_score >= minimum_score,
+        ),
+        ("source_ref_boundary".into(), source_refs_gate),
+    ]);
+    let passed = gates.values().all(|value| *value);
+    Ok(CortexAdapterEvalReport {
+        status: if passed { "passed" } else { "failed" }.into(),
+        passed,
+        score,
+        minimum_score,
+        records: records.len(),
+        source_ref_records,
+        task_scores,
+        gates,
+        manifest_path: Some(manifest_path.display().to_string()),
+        adapter_path,
+        source_dataset_hash: current_source_dataset_hash.into(),
+        evaluated_at,
+        failure_reason: (!passed).then(|| {
+            "Adapter did not satisfy all activation gates; leaving activation unchanged".into()
+        }),
+    })
+}
+
+pub fn activate_cortex_adapter(
+    store_root: &Path,
+    current_source_dataset_hash: &str,
+    minimum_score: f64,
+) -> anyhow::Result<(CortexAdapterEvalReport, CortexAdapterState)> {
+    let report = evaluate_cortex_adapter(store_root, current_source_dataset_hash, minimum_score)?;
+    if !report.passed {
+        return Err(anyhow!(
+            "{}",
+            report
+                .failure_reason
+                .clone()
+                .unwrap_or_else(|| "adapter evaluation failed".into())
+        ));
+    }
+    let manifest_path = report
+        .manifest_path
+        .as_deref()
+        .map(PathBuf::from)
+        .context("adapter eval report did not include manifest path")?;
+    let mut manifest = read_manifest(&manifest_path)?;
+    let adapter_path = string_field(&manifest, "adapter_path")
+        .map(PathBuf::from)
+        .context("trained adapter manifest does not include adapter_path")?;
+    let adapter_hash = string_field(&manifest, "adapter_file_hash")
+        .or_else(|| adapter_output_hash(&adapter_path).ok().flatten())
+        .context("trained adapter has no adapter_file_hash and no adapter files to hash")?;
+    let activated_at = now_millis();
+    if let Some(object) = manifest.as_object_mut() {
+        object.insert("status".into(), json!("active"));
+        object.insert("activation_status".into(), json!("active"));
+        object.insert("active_adapter_hash".into(), json!(adapter_hash));
+        object.insert(
+            "trained_source_dataset_hash".into(),
+            json!(current_source_dataset_hash),
+        );
+        object.insert("eval_score".into(), json!(report.score));
+        object.insert("eval_records".into(), json!(report.records));
+        object.insert("evaluated_at".into(), json!(report.evaluated_at));
+        object.insert("activated_at".into(), json!(activated_at));
+    }
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).context("serializing active adapter manifest")?,
+    )
+    .with_context(|| format!("writing {}", manifest_path.display()))?;
+    let state =
+        read_cortex_adapter_state(store_root, current_source_dataset_hash.into(), activated_at)?;
+    FileMemoryStore::new(store_root).save_cortex_adapter_state(&state)?;
+    Ok((report, state))
+}
+
 pub fn read_cortex_adapter_state(
     store_root: &Path,
     current_source_dataset_hash: String,
@@ -415,6 +622,37 @@ fn mlx_records_for_split(
                     .and_then(|value| value.as_str())
                     .unwrap_or(""),
             }));
+        }
+    }
+    Ok(records)
+}
+
+fn training_records_for_split(
+    training_dir: &Path,
+    split: &str,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let suffix = format!(".{split}.jsonl");
+    let mut files = jsonl_files(training_dir)?
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(&suffix))
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+
+    let mut records = Vec::new();
+    for path in files {
+        for line in fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+        {
+            records.push(
+                serde_json::from_str(line)
+                    .with_context(|| format!("parsing {}", path.display()))?,
+            );
         }
     }
     Ok(records)
@@ -591,6 +829,32 @@ fn newest_adapter_manifest(adapters_dir: &Path) -> anyhow::Result<Option<PathBuf
     Ok(manifests.pop())
 }
 
+fn newest_adapter_manifest_matching(
+    adapters_dir: &Path,
+    statuses: &[&str],
+    source_dataset_hash: Option<&str>,
+) -> anyhow::Result<Option<PathBuf>> {
+    let mut manifests = Vec::new();
+    collect_adapter_manifests(adapters_dir, &mut manifests)?;
+    let mut eligible = Vec::new();
+    for path in manifests {
+        let manifest = read_manifest(&path)?;
+        let status = string_field(&manifest, "status").unwrap_or_else(|| "unknown".into());
+        let source_matches = source_dataset_hash.is_none_or(|expected| {
+            string_field(&manifest, "source_dataset_hash").as_deref() == Some(expected)
+        });
+        if statuses.contains(&status.as_str()) && source_matches {
+            eligible.push(path);
+        }
+    }
+    eligible.sort_by_key(|path| {
+        fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    });
+    Ok(eligible.pop())
+}
+
 fn collect_adapter_manifests(dir: &Path, manifests: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     if !dir.exists() {
         return Ok(());
@@ -619,6 +883,87 @@ fn usize_field(value: &serde_json::Value, key: &str) -> Option<usize> {
 
 fn f64_field(value: &serde_json::Value, key: &str) -> Option<f64> {
     value.get(key)?.as_f64()
+}
+
+fn ratio(passed: usize, total: usize) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+    ((passed as f64 / total as f64) * 10_000.0).round() / 10_000.0
+}
+
+fn eval_record_passes_gate(record: &serde_json::Value) -> bool {
+    let task = record
+        .get("task")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let target = record
+        .get("target")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let input = record
+        .get("input")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    match task {
+        "route_region" => target.starts_with("route to ") && !input.trim().is_empty(),
+        "choose_tool" => target.contains("memory_search") && target.contains("memory_expand"),
+        "critique_evidence" => target.contains("source anchors") && target.contains("weak"),
+        "collaboration_pattern" => {
+            target.contains("planner") && target.contains("critic") && target.contains("answers")
+        }
+        _ => false,
+    }
+}
+
+fn adapter_output_hash(output: &Path) -> anyhow::Result<Option<String>> {
+    if !output.exists() {
+        return Ok(None);
+    }
+    let mut files = Vec::new();
+    collect_adapter_hash_files(output, output, &mut files)?;
+    if files.is_empty() {
+        return Ok(None);
+    }
+    files.sort();
+    let mut digest = Sha256::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(output)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
+        digest.update(relative.as_bytes());
+        digest.update(b"\0");
+        digest.update(fs::read(&path).with_context(|| format!("reading {}", path.display()))?);
+        digest.update(b"\0");
+    }
+    Ok(Some(format!("{:x}", digest.finalize())))
+}
+
+fn collect_adapter_hash_files(
+    root: &Path,
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+) -> anyhow::Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let path = entry?.path();
+        if path.is_dir() {
+            if path.strip_prefix(root).ok().is_some_and(|relative| {
+                relative
+                    .components()
+                    .any(|part| part.as_os_str() == "mlx-data")
+            }) {
+                continue;
+            }
+            collect_adapter_hash_files(root, &path, files)?;
+        } else if path.file_name().and_then(|name| name.to_str()) != Some("adapter_manifest.json") {
+            files.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn now_millis() -> u64 {

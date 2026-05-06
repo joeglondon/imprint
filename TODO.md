@@ -81,13 +81,13 @@ Goal: cross from "better cortex-aware retrieval" into "some semantic memory is i
   - [x] training iters
   - [x] command/version metadata
   - [x] created/finished timestamps
-- [ ] Add a small adapter evaluation suite before activation.
+- [x] Add a small adapter evaluation suite before activation.
 - [ ] Define minimum activation gates:
   - [ ] route-region accuracy above baseline
-  - [ ] source-expansion behavior present
-  - [ ] critique-evidence behavior present
-  - [ ] no regression on "answer only from source" tests
-- [ ] Mark adapter `active` only after eval passes.
+  - [x] source-expansion behavior present
+  - [x] critique-evidence behavior present
+  - [x] no regression on "answer only from source" tests
+- [x] Mark adapter `active` only after eval passes.
 - [ ] Surface adapter lifecycle in Swift:
   - [ ] queued/training progress
   - [ ] fresh/stale/trained/active distinction
@@ -97,8 +97,8 @@ Goal: cross from "better cortex-aware retrieval" into "some semantic memory is i
   - [x] `cortex status`
   - [x] `cortex compile`
   - [x] `cortex train`
-  - [ ] `cortex eval`
-  - [ ] `cortex activate`
+  - [x] `cortex eval`
+  - [x] `cortex activate`
 - [x] Keep old `compile`/`map` commands as compatibility aliases.
 
 ## Phase 2: Load The Personal Adapter Into The Model Path
