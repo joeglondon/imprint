@@ -563,9 +563,27 @@ fn apply_recall_score(
                 &chunk.region_id,
             ))
             .copied()
-            .unwrap_or_default();
+            .unwrap_or_default()
+        + chat_session_attention_score(document, chunk, attention_scores);
     let source_signal = source_recall_signal(document, chunk, now);
     (base_score + boost.clamp(-0.45, 0.55) + source_signal).max(0.001)
+}
+
+fn chat_session_attention_score(
+    document: &Document,
+    chunk: &Chunk,
+    attention_scores: &HashMap<String, f32>,
+) -> f32 {
+    metadata_value(document, chunk, "chat_session_id")
+        .and_then(|session_id| {
+            attention_scores
+                .get(&attention_key(
+                    &AttentionTargetKind::ChatSession,
+                    &session_id,
+                ))
+                .copied()
+        })
+        .unwrap_or_default()
 }
 
 fn source_recall_signal(document: &Document, chunk: &Chunk, now: u64) -> f32 {
@@ -1162,6 +1180,102 @@ mod tests {
         assert_eq!(
             result.hits.first().map(|hit| hit.chunk_id.as_str()),
             Some("chunk-b")
+        );
+        assert!(result.hits[0].score > result.hits[1].score);
+    }
+
+    #[test]
+    fn execute_uses_active_chat_session_attention_as_context() {
+        let embedder = crate::index::HashEmbedder::default();
+        let text = "shared project memory about recursive recall";
+        let embedding = embedder.embed(text).expect("embedding");
+        let document = |id: &str, session_id: &str| {
+            let mut metadata = BTreeMap::new();
+            metadata.insert("source_type".into(), "chat".into());
+            metadata.insert("chat_session_id".into(), session_id.into());
+            Document {
+                id: id.into(),
+                title: id.into(),
+                text: text.into(),
+                metadata,
+                source_anchor: None,
+                content_hash: None,
+                parser_version: None,
+            }
+        };
+        let chunk = |id: &str, document_id: &str, ordinal: usize| Chunk {
+            id: id.into(),
+            document_id: document_id.into(),
+            region_id: "region".into(),
+            ordinal,
+            start: 0,
+            end: text.chars().count(),
+            text: text.into(),
+            metadata: BTreeMap::new(),
+            source_anchor: None,
+            embedding: embedding.clone(),
+            embedding_text_hash: None,
+            embedding_provider: None,
+            embedding_model: None,
+            embedding_endpoint: None,
+            embedding_dimension: None,
+            chunking_version: None,
+        };
+        let memory = PersistedMemory {
+            documents: vec![
+                document("doc-old-session", "session-old"),
+                document("doc-active-session", "session-active"),
+            ],
+            chunks: vec![
+                chunk("chunk-old-session", "doc-old-session", 0),
+                chunk("chunk-active-session", "doc-active-session", 1),
+            ],
+            regions: vec![Region {
+                id: "region".into(),
+                label: "Region".into(),
+                summary: text.into(),
+                filters: BTreeMap::new(),
+                chunk_ids: vec!["chunk-old-session".into(), "chunk-active-session".into()],
+                centroid: embedding,
+                neighbors: Vec::new(),
+            }],
+            links: Vec::new(),
+            memory_map: Some(MemoryMap {
+                budget_bytes: 2048,
+                serialized: String::new(),
+                entries: vec![entry("region", "Region", text)],
+            }),
+        };
+        let ann = crate::index::RegionIndexer.rebuild(&memory.chunks, &memory.regions);
+        let marks = vec![AttentionMark {
+            id: "attention-active-session".into(),
+            target_id: "session-active".into(),
+            target_kind: AttentionTargetKind::ChatSession,
+            action: AttentionAction::Active,
+            reason: "Current conversation should shape nearby memory recall.".into(),
+            actor: "test".into(),
+            created_at: 1,
+            reverted_at: None,
+        }];
+
+        let result = MemoryQueryEngine
+            .execute_with_attention(
+                &embedder,
+                &memory,
+                &ann,
+                QueryRequest {
+                    text: text.into(),
+                    filters: BTreeMap::new(),
+                    max_regions: 1,
+                    max_chunks: 2,
+                },
+                &marks,
+            )
+            .expect("query");
+
+        assert_eq!(
+            result.hits.first().map(|hit| hit.chunk_id.as_str()),
+            Some("chunk-active-session")
         );
         assert!(result.hits[0].score > result.hits[1].score);
     }
