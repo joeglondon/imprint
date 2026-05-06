@@ -1040,9 +1040,11 @@ pub fn compile_memory_brain(store_root: &Path) -> anyhow::Result<BrainCompileRes
         memory: compile_memory.clone(),
         artifacts: artifacts.clone(),
         cortex_index: Some(cortex_index.clone()),
+        derived_memories: store.list_derived_memories(None).unwrap_or_default(),
         web_findings: store.list_web_findings(None).unwrap_or_default(),
         attention_marks: store.list_attention_marks(None).unwrap_or_default(),
         memory_accesses: store.list_memory_accesses(None, None).unwrap_or_default(),
+        chat_context_traces: store.list_all_chat_context_traces().unwrap_or_default(),
     };
     let export_files = crate::training::write_training_exports(store_root, &export_context)?;
     let source_dataset_hash = crate::training::training_source_hash(&store_root.join("training"))?;
@@ -5265,25 +5267,23 @@ mod tests {
         assert!(std::fs::read_to_string(&first.training_records_path)
             .expect("training records")
             .contains("\"task\":\"memory_routing\""));
-        let route_train = first
-            .export_files
-            .iter()
-            .find(|file| file.ends_with("query_to_region.train.jsonl"))
-            .expect("route train file");
-        let route_eval = first
-            .export_files
-            .iter()
-            .find(|file| file.ends_with("query_to_region.eval.jsonl"))
-            .expect("route eval file");
-        let train_raw = std::fs::read_to_string(route_train).expect("read train");
-        let eval_raw = std::fs::read_to_string(route_eval).expect("read eval");
-        assert!(train_raw.contains("\"schema_version\":2"));
-        assert!(train_raw.contains("\"task\":\"query_to_region\""));
-        assert!(train_raw.contains("\"artifact_ids\""));
-        assert!(train_raw.contains("\"source_id\""));
-        assert!(train_raw.contains("\"anchor_ids\""));
+        let route_raw = ["train", "eval", "test"]
+            .into_iter()
+            .filter_map(|split| {
+                first
+                    .export_files
+                    .iter()
+                    .find(|file| file.ends_with(&format!("query_to_region.{split}.jsonl")))
+            })
+            .map(|file| std::fs::read_to_string(file).expect("read route split"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(route_raw.contains("\"schema_version\":2"));
+        assert!(route_raw.contains("\"task\":\"query_to_region\""));
+        assert!(route_raw.contains("\"artifact_ids\""));
+        assert!(route_raw.contains("\"source_id\""));
+        assert!(route_raw.contains("\"anchor_ids\""));
         assert!(root.join("training").join("summary.json").exists());
-        assert!(eval_raw.is_empty() || eval_raw.contains("\"split\":\"eval\""));
         let adapter_dir = root.join("adapters").join("check");
         fs::create_dir_all(&adapter_dir).expect("adapter dir");
         fs::write(

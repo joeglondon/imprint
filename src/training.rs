@@ -1,7 +1,9 @@
+use crate::recursive;
 use crate::store::FileMemoryStore;
 use crate::types::{
-    AttentionAction, AttentionMark, AttentionTargetKind, BrainArtifact, Chunk, CortexAdapterJob,
-    CortexAdapterState, CortexIndex, Document, LinkType, MemoryAccess, PersistedMemory, WebFinding,
+    AttentionAction, AttentionMark, AttentionTargetKind, BrainArtifact, ChatContextTrace, Chunk,
+    CortexAdapterJob, CortexAdapterState, CortexIndex, DerivedMemory, DerivedMemoryKind, Document,
+    LinkType, MemoryAccess, PersistedMemory, WebFinding,
 };
 use anyhow::{anyhow, Context};
 use serde::Serialize;
@@ -18,7 +20,7 @@ const TRAINING_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_ADAPTER_ITERS: usize = 100;
 const DEFAULT_ADAPTER_TRAINING_TIMEOUT_MILLIS: u64 = 30 * 60 * 1000;
 pub const DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE: f64 = 0.8;
-const TRAINING_TASKS: [&str; 8] = [
+const TRAINING_TASKS: [&str; 11] = [
     "query_to_region",
     "query_to_source_family",
     "query_to_tool_plan",
@@ -27,6 +29,9 @@ const TRAINING_TASKS: [&str; 8] = [
     "snippet_set_to_citation_boundary",
     "deleted_or_stale_memory_to_caution",
     "web_needed_or_not",
+    "recursive_role_trace",
+    "recursive_sufficiency_eval",
+    "recursive_efficiency_eval",
 ];
 
 #[derive(Debug, Clone)]
@@ -97,9 +102,11 @@ pub struct CortexTrainingExportContext {
     pub memory: PersistedMemory,
     pub artifacts: Vec<BrainArtifact>,
     pub cortex_index: Option<CortexIndex>,
+    pub derived_memories: Vec<DerivedMemory>,
     pub web_findings: Vec<WebFinding>,
     pub attention_marks: Vec<AttentionMark>,
     pub memory_accesses: Vec<MemoryAccess>,
+    pub chat_context_traces: Vec<ChatContextTrace>,
 }
 
 pub fn write_training_exports(
@@ -1307,6 +1314,21 @@ fn eval_record_passes_gate(record: &serde_json::Value) -> bool {
         "web_needed_or_not" => {
             target.contains("web_search_needed") || target.contains("web_search_not_needed")
         }
+        "recursive_role_trace" => {
+            target.contains("roles:")
+                && target.contains("planner")
+                && target.contains("critic")
+                && target.contains("latent_status:research_only")
+        }
+        "recursive_sufficiency_eval" => {
+            target.contains("sufficient:true") && target.contains("cite_anchor_ids:")
+                || target.contains("sufficient:false") && target.contains("next_action:")
+        }
+        "recursive_efficiency_eval" => {
+            target.contains("efficiency:")
+                && target.contains("tool_calls:")
+                && target.contains("source_grounded:")
+        }
         _ => false,
     }
 }
@@ -1584,6 +1606,28 @@ fn build_training_records(context: &CortexTrainingExportContext) -> Vec<serde_js
                 ),
                 "web_search_not_needed:local_source_anchor_is_available".into(),
                 &artifact_ids,
+                source_refs.clone(),
+                anchor
+                    .iter()
+                    .map(|anchor| anchor.id.clone())
+                    .collect::<Vec<_>>(),
+                &source_type,
+                &visibility,
+                false,
+            ));
+            records.push(training_example(
+                "weak_evidence_to_next_action",
+                split,
+                &source_id,
+                format!(
+                    "A route hint suggests misleading source family '{}' for '{}'.",
+                    misleading_source_family(&source_family),
+                    document.title
+                ),
+                format!(
+                    "weak_evidence:reject_misleading_source_family;prefer_source_family:{source_family};search_and_expand_anchor"
+                ),
+                &artifact_ids,
                 source_refs,
                 anchor
                     .iter()
@@ -1594,6 +1638,52 @@ fn build_training_records(context: &CortexTrainingExportContext) -> Vec<serde_js
                 false,
             ));
         }
+    }
+
+    for memory in &context.derived_memories {
+        if !matches!(
+            memory.kind,
+            DerivedMemoryKind::Decision | DerivedMemoryKind::Task
+        ) {
+            continue;
+        }
+        let source_id = memory.id.clone();
+        let split = split_for_source(&source_id);
+        let source_refs = if memory.provenance.source_refs.is_empty() {
+            vec![format!("imprint://derived/{}", memory.id)]
+        } else {
+            memory.provenance.source_refs.clone()
+        };
+        records.push(training_example(
+            "query_to_tool_plan",
+            split,
+            &source_id,
+            format!(
+                "Chat {:?}: {}",
+                memory.kind,
+                bounded_text(&memory.text)
+            ),
+            "memory_search(chat decision/task) -> memory_expand(source_message_anchor) -> preserve provenance".into(),
+            &[],
+            source_refs.clone(),
+            Vec::new(),
+            "chat_decision_task",
+            "private",
+            false,
+        ));
+        records.push(training_example(
+            "query_to_source_family",
+            split,
+            &source_id,
+            format!("Which source family stores this chat {:?}?", memory.kind),
+            "source_family:chat_decision_task".into(),
+            &[],
+            source_refs,
+            Vec::new(),
+            "chat_decision_task",
+            "private",
+            false,
+        ));
     }
 
     for artifact in &context.artifacts {
@@ -1741,6 +1831,25 @@ fn build_training_records(context: &CortexTrainingExportContext) -> Vec<serde_js
             "private",
             false,
         ));
+    }
+
+    for trace in context.chat_context_traces.iter().take(32) {
+        for example in recursive::trace_dataset_examples(trace) {
+            let split = split_for_source(&example.source_trace_id);
+            records.push(training_example(
+                &example.task,
+                split,
+                &example.source_trace_id,
+                example.input,
+                example.target,
+                &[],
+                example.source_refs,
+                example.anchor_ids,
+                "chat_context_trace",
+                "private",
+                !example.source_grounded && example.task == "recursive_sufficiency_eval",
+            ));
+        }
     }
 
     for link in &context.memory.links {
@@ -1979,6 +2088,15 @@ fn source_family(document: &Document) -> String {
                 .to_string()
         })
         .unwrap_or(source_type)
+}
+
+fn misleading_source_family(actual: &str) -> &'static str {
+    match actual {
+        "web_finding" => "local_file",
+        "chat" | "chat_decision_task" => "web_finding",
+        "derived_memory" => "trusted_original_source",
+        _ => "unrelated_web_finding",
+    }
 }
 
 fn visibility(document: &Document) -> String {

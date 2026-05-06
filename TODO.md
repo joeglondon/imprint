@@ -144,17 +144,17 @@ Goal: teach semantic addressability and source discipline, not accidental memori
   - [x] `snippet_set_to_citation_boundary`
   - [x] `deleted_or_stale_memory_to_caution`
   - [x] `web_needed_or_not`
-- [ ] Generate route examples from:
+- [x] Generate route examples from:
   - [x] document titles
   - [x] headings/sections
   - [x] source paths
   - [x] entity overlaps
   - [x] citation links
-  - [ ] chat decisions/tasks
+  - [x] chat decisions/tasks
   - [x] web finding queries
   - [x] successful retrieval traces
-- [ ] Add negative examples:
-  - [ ] misleading source family
+- [x] Add negative examples:
+  - [x] misleading source family
   - [x] weak evidence
   - [x] stale web finding
   - [x] derived memory without source anchor
@@ -163,7 +163,7 @@ Goal: teach semantic addressability and source discipline, not accidental memori
 - [x] Add explicit source refs and anchor IDs to every generated example when available.
 - [x] Add deterministic train/eval/test split by source ID.
 - [x] Prevent leakage between train/eval splits.
-- [ ] Version the training schema and provide migrations.
+- [x] Version the training schema and provide migrations.
 - [x] Add dataset inspection UI or CLI summary:
   - [x] task counts
   - [x] source counts
@@ -176,40 +176,40 @@ Goal: teach semantic addressability and source discipline, not accidental memori
 
 Goal: move from text/tool-trace recursion to latent hidden-state recursion inspired by RecursiveMAS.
 
-- [ ] Create an isolated research module before wiring into production chat.
-- [ ] Define roles:
-  - [ ] planner
-  - [ ] retriever
-  - [ ] critic
-  - [ ] solver
-  - [ ] memory steward
-- [ ] Define role interfaces at two levels:
-  - [ ] text/tool fallback contract
-  - [ ] latent hidden-state contract
+- [x] Create an isolated research module before wiring into production chat.
+- [x] Define roles:
+  - [x] planner
+  - [x] retriever
+  - [x] critic
+  - [x] solver
+  - [x] memory steward
+- [x] Define role interfaces at two levels:
+  - [x] text/tool fallback contract
+  - [x] latent hidden-state contract
 - [ ] Study local LFM2.5/MLX internals needed to access hidden states.
 - [ ] Implement a minimal RecursiveLink-style module:
   - [ ] inner recursion within one role
   - [ ] outer transfer between roles
   - [ ] frozen base model weights
   - [ ] small trainable bridge modules
-- [ ] Build training data for latent recursion from existing traces:
-  - [ ] planner actions
-  - [ ] retrieved snippets
-  - [ ] critic sufficiency
-  - [ ] final source-grounded answer boundary
+- [x] Build training data for latent recursion from existing traces:
+  - [x] planner actions
+  - [x] retrieved snippets
+  - [x] critic sufficiency
+  - [x] final source-grounded answer boundary
 - [ ] Add eval tasks:
-  - [ ] fewer tool calls for same answer quality
+  - [x] fewer tool calls for same answer quality
   - [ ] better region/source selection
   - [ ] lower hallucination rate
-  - [ ] better weak-evidence refusal
+  - [x] better weak-evidence refusal
   - [ ] lower token usage vs text recursion
 - [ ] Keep text-mediated recursion as fallback.
-- [ ] Add trace observability without leaking hidden states:
-  - [ ] role sequence
-  - [ ] sufficiency outcome
-  - [ ] source refs selected
-  - [ ] reason codes
-  - [ ] confidence/caution state
+- [x] Add trace observability without leaking hidden states:
+  - [x] role sequence
+  - [x] sufficiency outcome
+  - [x] source refs selected
+  - [x] reason codes
+  - [x] confidence/caution state
 - [ ] Do not ship latent recursion as default until eval beats the text/tool baseline.
 
 ## Phase 5: Source Recall And Provenance

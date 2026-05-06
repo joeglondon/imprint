@@ -604,6 +604,16 @@ impl FileMemoryStore {
         collect_rows(rows)
     }
 
+    pub fn list_all_chat_context_traces(&self) -> Result<Vec<ChatContextTrace>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, session_id, user_message_id, snippets_json, tool_trace_json, created_at, cortex_trace_json
+             FROM chat_context_traces ORDER BY created_at DESC, id",
+        )?;
+        let rows = statement.query_map([], chat_context_trace_from_row)?;
+        collect_rows(rows)
+    }
+
     fn connection(&self) -> Result<Connection> {
         fs::create_dir_all(&self.root)
             .with_context(|| format!("creating store root {}", self.root.display()))?;
