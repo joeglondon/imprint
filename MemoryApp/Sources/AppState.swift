@@ -470,6 +470,7 @@ final class AppState: ObservableObject {
                 self.inspector.passages = opened.passages
                 self.inspector.excerpt = opened.excerpt
                 self.inspector.sourceAnchor = opened.sourceAnchor
+                self.inspector.openTarget = opened.openTarget
                 self.inspector.expansion = nil
             }
         )
@@ -488,6 +489,7 @@ final class AppState: ObservableObject {
                 self.inspector.expansion = expansion
                 self.inspector.excerpt = expansion.excerpt
                 self.inspector.sourceAnchor = expansion.sourceAnchor
+                self.inspector.openTarget = expansion.openTarget
                 self.statusMessage = "Expanded \(mode.rawValue.lowercased()) context."
             }
         )

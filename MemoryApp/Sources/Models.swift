@@ -179,6 +179,30 @@ struct SourceArtifact: Codable, Equatable, Identifiable {
     var provenance: ProvenanceRecord
 }
 
+enum SourceOpenTargetKind: String, Codable, Equatable {
+    case textOffset = "TextOffset"
+    case markdownHeading = "MarkdownHeading"
+    case pdfPage = "PdfPage"
+    case url = "Url"
+    case emailThread = "EmailThread"
+    case generated = "Generated"
+}
+
+struct SourceOpenTarget: Codable, Equatable {
+    var kind: SourceOpenTargetKind
+    var uri: String
+    var path: String?
+    var originalPath: String?
+    var managedPath: String?
+    var sourceArtifactId: String?
+    var textStart: Int
+    var textEnd: Int
+    var markdownHeading: String?
+    var pdfPage: Int?
+    var browserUrl: String?
+    var locationHint: String
+}
+
 struct ImportResult: Codable, Equatable {
     var summary: MemorySummary
     var importedPaths: [String]
@@ -736,6 +760,7 @@ struct SurfOpenResult: Codable, Equatable {
     var label: String
     var excerpt: String
     var sourceAnchor: SourceAnchor?
+    var openTarget: SourceOpenTarget?
     var passages: [SurfPassage]
     var links: [LinkRecord]
 }
@@ -754,6 +779,7 @@ struct SurfPassage: Codable, Equatable, Identifiable {
     var end: Int
     var score: Float
     var sourceAnchor: SourceAnchor?
+    var openTarget: SourceOpenTarget?
     var role: SurfPassageRole
 
     var id: String { "\(node.id):\(role.rawValue):\(start):\(end)" }
@@ -765,6 +791,7 @@ struct SurfNeighbor: Codable, Equatable, Identifiable {
     var label: String
     var excerpt: String
     var sourceAnchor: SourceAnchor?
+    var openTarget: SourceOpenTarget?
     var linkType: LinkType?
 
     var id: String { node.id }
@@ -777,6 +804,7 @@ struct SurfExpansion: Codable, Equatable {
     var start: Int
     var end: Int
     var sourceAnchor: SourceAnchor?
+    var openTarget: SourceOpenTarget?
 }
 
 struct InspectorState {
@@ -786,6 +814,7 @@ struct InspectorState {
     var passages: [SurfPassage] = []
     var excerpt: String?
     var sourceAnchor: SourceAnchor?
+    var openTarget: SourceOpenTarget?
     var expansion: SurfExpansion?
     var grepHits: [ExtractHit] = []
     var queryResult: QueryResult?

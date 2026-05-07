@@ -613,6 +613,12 @@ private struct MapInspector: View {
                             .lineLimit(3)
                             .padding(.top, 6)
                     }
+                    if let target = appState.inspector.openTarget {
+                        Text(openTargetLine(target))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(theme.ink.quaternary)
+                            .lineLimit(3)
+                    }
                     HStack(spacing: 8) {
                         TextField("Grep or search selection", text: $appState.grepText)
                             .textFieldStyle(.plain)
@@ -771,6 +777,16 @@ private struct MapInspector: View {
             parts.append(section)
         }
         parts.append("\(anchor.start)-\(anchor.end)")
+        return parts.joined(separator: " · ")
+    }
+
+    private func openTargetLine(_ target: SourceOpenTarget) -> String {
+        var parts = [target.kind.rawValue, target.locationHint]
+        if let path = target.path {
+            parts.append(path)
+        } else if let url = target.browserUrl {
+            parts.append(url)
+        }
         return parts.joined(separator: " · ")
     }
 }
@@ -1800,6 +1816,9 @@ private struct PassageRow: View {
             if let section = anchor.section {
                 parts.append(section)
             }
+        }
+        if let target = passage.openTarget {
+            parts.append(target.locationHint)
         }
         parts.append("\(passage.start)-\(passage.end)")
         return parts.joined(separator: " · ")

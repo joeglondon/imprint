@@ -1788,7 +1788,12 @@ fn create_managed_source_copy(
         if let Some(parent) = managed_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        if !managed_path.exists() {
+        let managed_copy_current = managed_path.exists()
+            && file_content_hash(&managed_path)
+                .ok()
+                .as_deref()
+                .is_some_and(|hash| hash == file_hash);
+        if !managed_copy_current {
             std::fs::copy(&source_path_buf, &managed_path).with_context(|| {
                 format!(
                     "copying source artifact {} to {}",
@@ -1853,6 +1858,16 @@ fn source_file_hash(document: &Document) -> Option<&str> {
         .or_else(|| document.metadata.get("content_hash"))
         .map(String::as_str)
         .or(document.content_hash.as_deref())
+}
+
+fn file_content_hash(path: &Path) -> anyhow::Result<String> {
+    let bytes = std::fs::read(path)?;
+    let mut hash = 14695981039346656037u64;
+    for byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    Ok(format!("{hash:016x}"))
 }
 
 fn write_progress(
@@ -5107,6 +5122,7 @@ mod tests {
             .find(|artifact| artifact.source_type == "local_file")
             .expect("first local artifact");
         let first_managed_path = first_artifact.current_path.clone().expect("managed path");
+        fs::write(&first_managed_path, "stale managed copy").expect("corrupt managed copy");
 
         fs::rename(&first_path, &second_path).expect("rename source");
         let second =
@@ -5159,6 +5175,10 @@ mod tests {
             Some(first_managed_path.as_str())
         );
         assert!(Path::new(&first_managed_path).is_file());
+        assert_eq!(
+            fs::read_to_string(&first_managed_path).expect("managed copy content"),
+            body
+        );
     }
 
     #[test]
@@ -6634,6 +6654,100 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
                 .and_then(|anchor| anchor.section.as_deref()),
             Some("Alpha")
         );
+    }
+
+    #[test]
+    fn surf_results_include_durable_markdown_open_targets() {
+        let root = temp_store_root("surf-open-target-markdown");
+        let input = root.join("notes.md");
+        fs::write(
+            &input,
+            "# Alpha\nalpha memory foot ankle heel\n\n# Beta\nbeta cortex neuron synapse",
+        )
+        .expect("write input");
+        ingest_paths(&root, std::slice::from_ref(&input)).expect("ingest");
+
+        let store = FileMemoryStore::new(&root);
+        let memory = store.load().expect("load memory");
+        let chunk = memory
+            .chunks
+            .iter()
+            .find(|chunk| chunk.metadata.get("section").map(String::as_str) == Some("Alpha"))
+            .expect("alpha chunk");
+        let opened = surf_open(&root, &NodeRef::Chunk(chunk.id.clone())).expect("open chunk");
+        let target = opened.open_target.as_ref().expect("open target");
+
+        assert_eq!(target.kind, SourceOpenTargetKind::MarkdownHeading);
+        assert_eq!(
+            target.original_path.as_deref(),
+            Some(input.to_str().unwrap())
+        );
+        assert!(target
+            .managed_path
+            .as_deref()
+            .is_some_and(|path| path.contains(".source-artifacts")));
+        assert!(target.uri.starts_with("file://"));
+        assert_eq!(target.text_start, chunk.start);
+        assert_eq!(target.text_end, chunk.end);
+        assert_eq!(target.markdown_heading.as_deref(), Some("Alpha"));
+        assert!(target.location_hint.contains("chars"));
+        assert!(opened
+            .passages
+            .iter()
+            .all(|passage| passage.open_target.is_some()));
+    }
+
+    #[test]
+    fn surf_results_include_pdf_page_open_targets() {
+        let root = temp_store_root("surf-open-target-pdf");
+        let input = root.join("memory.pdf");
+        fs::write(&input, simple_pdf("Hello PDF memory alpha")).expect("write pdf");
+        ingest_paths(&root, std::slice::from_ref(&input)).expect("ingest");
+
+        let store = FileMemoryStore::new(&root);
+        let memory = store.load().expect("load memory");
+        let chunk = memory.chunks.first().expect("chunk");
+        let opened = surf_open(&root, &NodeRef::Chunk(chunk.id.clone())).expect("open chunk");
+        let target = opened.open_target.as_ref().expect("open target");
+
+        assert_eq!(target.kind, SourceOpenTargetKind::PdfPage);
+        assert_eq!(target.pdf_page, Some(1));
+        assert!(target
+            .path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("memory.pdf")));
+        assert!(target.location_hint.contains("page 1"));
+    }
+
+    #[test]
+    fn web_findings_include_url_open_targets() {
+        let root = temp_store_root("surf-open-target-web");
+        let finding = write_web_finding(
+            &root,
+            WebFindingWrite {
+                session_id: None,
+                query: "imprint provenance".into(),
+                url: "https://example.com/imprint".into(),
+                title: "Imprint provenance".into(),
+                summary: "Web findings keep URL provenance for source recall.".into(),
+                retrieved_at: 42,
+                confidence: 0.8,
+                actor: "assistant".into(),
+            },
+        )
+        .expect("write finding");
+
+        let opened = surf_open(&root, &NodeRef::Document(web_finding_document_id(&finding)))
+            .expect("open web");
+        let target = opened.open_target.as_ref().expect("open target");
+
+        assert_eq!(target.kind, SourceOpenTargetKind::Url);
+        assert_eq!(target.uri, "https://example.com/imprint");
+        assert_eq!(
+            target.browser_url.as_deref(),
+            Some("https://example.com/imprint")
+        );
+        assert!(target.location_hint.contains("chars"));
     }
 
     #[test]

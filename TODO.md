@@ -2,7 +2,7 @@
 
 This is the remaining work to reach the full imprint vision: a personal memory filesystem where the model has useful latent familiarity with the user's world, while exact claims remain grounded in source recall.
 
-Last repo-grounded status check: 2026-05-06.
+Last repo-grounded status check: 2026-05-07.
 
 ## North Star
 
@@ -31,6 +31,7 @@ Already implemented or partially implemented:
 - [x] Attention marks, access history, source metadata, and active chat sessions influence recall ranking.
 - [x] Source artifacts are persisted as first-class provenance records with stable file-hash IDs for local imports.
 - [x] Local imports keep a hidden managed source copy and reconcile moves/renames by content hash.
+- [x] Surf/open/expand results carry durable source open targets for local offsets, Markdown headings, PDF pages, and web URLs.
 - [x] Rust tests pass as of 2026-05-06.
 - [x] macOS build passes as of 2026-05-06.
 
@@ -232,12 +233,12 @@ Goal: make exact recall trustworthy, deep-linkable, and reversible.
 - [x] Add source artifact migration for existing documents.
 - [x] Preserve stable IDs across moves/renames when content hash matches.
 - [ ] Add durable file opening:
-  - [ ] text offset
-  - [ ] Markdown heading
-  - [ ] PDF page
+  - [x] text offset
+  - [x] Markdown heading
+  - [x] PDF page
   - [ ] PDF text selection or bounding box when possible
   - [ ] email/thread location
-  - [ ] browser URL/archive location
+  - [x] browser URL/archive location
 - [ ] Improve `SourceAnchor` precision:
   - [ ] rendered page metadata
   - [ ] section hierarchy

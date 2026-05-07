@@ -3,6 +3,7 @@ use crate::navigation::{MemoryNavigator, Navigator};
 use crate::types::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExpandMode {
@@ -19,6 +20,8 @@ pub struct SurfOpenResult {
     pub excerpt: String,
     #[serde(default)]
     pub source_anchor: Option<SourceAnchor>,
+    #[serde(default)]
+    pub open_target: Option<SourceOpenTarget>,
     #[serde(default)]
     pub passages: Vec<SurfPassage>,
     pub links: Vec<Link>,
@@ -41,6 +44,8 @@ pub struct SurfPassage {
     pub score: f32,
     #[serde(default)]
     pub source_anchor: Option<SourceAnchor>,
+    #[serde(default)]
+    pub open_target: Option<SourceOpenTarget>,
     pub role: SurfPassageRole,
 }
 
@@ -52,6 +57,8 @@ pub struct SurfNeighbor {
     pub excerpt: String,
     #[serde(default)]
     pub source_anchor: Option<SourceAnchor>,
+    #[serde(default)]
+    pub open_target: Option<SourceOpenTarget>,
     #[serde(default)]
     pub link_type: Option<LinkType>,
 }
@@ -65,6 +72,8 @@ pub struct SurfExpansion {
     pub end: usize,
     #[serde(default)]
     pub source_anchor: Option<SourceAnchor>,
+    #[serde(default)]
+    pub open_target: Option<SourceOpenTarget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -100,6 +109,9 @@ pub fn open(memory: &PersistedMemory, node: &NodeRef) -> Option<SurfOpenResult> 
                     0,
                 ),
                 source_anchor: document.source_anchor.clone(),
+                open_target: document.source_anchor.as_ref().and_then(|anchor| {
+                    source_open_target(memory, anchor, 0, document.text.chars().count())
+                }),
                 passages,
                 links,
             })
@@ -121,7 +133,16 @@ pub fn open(memory: &PersistedMemory, node: &NodeRef) -> Option<SurfOpenResult> 
                     .unwrap_or_else(|| chunk.id.clone()),
                 excerpt,
                 source_anchor: chunk.source_anchor.clone(),
-                passages: vec![chunk_passage(chunk, 1.0, SurfPassageRole::SelectedChunk)],
+                open_target: chunk
+                    .source_anchor
+                    .as_ref()
+                    .and_then(|anchor| source_open_target(memory, anchor, chunk.start, chunk.end)),
+                passages: vec![chunk_passage(
+                    memory,
+                    chunk,
+                    1.0,
+                    SurfPassageRole::SelectedChunk,
+                )],
                 links,
             })
         }
@@ -133,6 +154,7 @@ pub fn open(memory: &PersistedMemory, node: &NodeRef) -> Option<SurfOpenResult> 
                 label: region.label.clone(),
                 excerpt: region.summary.clone(),
                 source_anchor: None,
+                open_target: None,
                 passages,
                 links,
             })
@@ -161,6 +183,7 @@ pub fn neighbors(
                     label: opened.label,
                     excerpt: opened.excerpt,
                     source_anchor: opened.source_anchor,
+                    open_target: opened.open_target,
                     link_type: Some(link.link_type),
                 });
             }
@@ -199,6 +222,9 @@ pub fn neighbors(
                             .unwrap_or_else(|| candidate.id.clone()),
                         excerpt: candidate.text.clone(),
                         source_anchor: candidate.source_anchor.clone(),
+                        open_target: candidate.source_anchor.as_ref().and_then(|anchor| {
+                            source_open_target(memory, anchor, candidate.start, candidate.end)
+                        }),
                         link_type: Some(LinkType::SemanticNeighbor),
                     });
                 }
@@ -230,7 +256,7 @@ fn document_passages(memory: &PersistedMemory, document_id: &str) -> Vec<SurfPas
     chunks
         .into_iter()
         .take(5)
-        .map(|chunk| chunk_passage(chunk, 1.0, SurfPassageRole::DocumentChunk))
+        .map(|chunk| chunk_passage(memory, chunk, 1.0, SurfPassageRole::DocumentChunk))
         .collect()
 }
 
@@ -255,11 +281,18 @@ fn representative_region_passages(
     chunks
         .into_iter()
         .take(max_results.max(1))
-        .map(|(chunk, score)| chunk_passage(chunk, score, SurfPassageRole::RepresentativeChunk))
+        .map(|(chunk, score)| {
+            chunk_passage(memory, chunk, score, SurfPassageRole::RepresentativeChunk)
+        })
         .collect()
 }
 
-fn chunk_passage(chunk: &Chunk, score: f32, role: SurfPassageRole) -> SurfPassage {
+fn chunk_passage(
+    memory: &PersistedMemory,
+    chunk: &Chunk,
+    score: f32,
+    role: SurfPassageRole,
+) -> SurfPassage {
     SurfPassage {
         node: NodeRef::Chunk(chunk.id.clone()),
         label: chunk
@@ -272,6 +305,10 @@ fn chunk_passage(chunk: &Chunk, score: f32, role: SurfPassageRole) -> SurfPassag
         end: chunk.end,
         score,
         source_anchor: chunk.source_anchor.clone(),
+        open_target: chunk
+            .source_anchor
+            .as_ref()
+            .and_then(|anchor| source_open_target(memory, anchor, chunk.start, chunk.end)),
         role,
     }
 }
@@ -300,25 +337,146 @@ pub fn expand_chunk(
         }
         ExpandMode::Document => (0, document.text.chars().count()),
     };
+    let source_anchor = chunk.source_anchor.as_ref().map(|anchor| SourceAnchor {
+        id: format!("{}:expanded", anchor.id),
+        document_id: anchor.document_id.clone(),
+        chunk_id: anchor.chunk_id.clone(),
+        path: anchor.path.clone(),
+        content_hash: anchor.content_hash.clone(),
+        start,
+        end,
+        page: anchor.page,
+        section: anchor.section.clone(),
+        parser_version: anchor.parser_version,
+    });
+    let open_target = source_anchor
+        .as_ref()
+        .and_then(|anchor| source_open_target(memory, anchor, start, end));
     Some(SurfExpansion {
         chunk_id: chunk.id.clone(),
         mode,
         excerpt: excerpt_window(&document.text, start, end, 0),
         start,
         end,
-        source_anchor: chunk.source_anchor.as_ref().map(|anchor| SourceAnchor {
-            id: format!("{}:expanded", anchor.id),
-            document_id: anchor.document_id.clone(),
-            chunk_id: anchor.chunk_id.clone(),
-            path: anchor.path.clone(),
-            content_hash: anchor.content_hash.clone(),
-            start,
-            end,
-            page: anchor.page,
-            section: anchor.section.clone(),
-            parser_version: anchor.parser_version,
-        }),
+        source_anchor,
+        open_target,
     })
+}
+
+fn source_open_target(
+    memory: &PersistedMemory,
+    anchor: &SourceAnchor,
+    text_start: usize,
+    text_end: usize,
+) -> Option<SourceOpenTarget> {
+    let document = memory
+        .documents
+        .iter()
+        .find(|document| document.id == anchor.document_id);
+    let metadata = document.map(|document| &document.metadata);
+    let source_type = metadata
+        .and_then(|metadata| metadata.get("source_type"))
+        .map(String::as_str);
+    let browser_url = metadata
+        .and_then(|metadata| metadata.get("url").or_else(|| metadata.get("source_url")))
+        .cloned()
+        .or_else(|| {
+            (anchor.path.starts_with("http://") || anchor.path.starts_with("https://"))
+                .then(|| anchor.path.clone())
+        });
+
+    if let Some(url) = browser_url {
+        return Some(SourceOpenTarget {
+            kind: SourceOpenTargetKind::Url,
+            uri: url.clone(),
+            path: None,
+            original_path: None,
+            managed_path: None,
+            source_artifact_id: metadata
+                .and_then(|metadata| metadata.get("source_artifact_id"))
+                .cloned(),
+            text_start,
+            text_end,
+            markdown_heading: anchor.section.clone(),
+            pdf_page: anchor.page,
+            browser_url: Some(url),
+            location_hint: location_hint(anchor, text_start, text_end),
+        });
+    }
+
+    let original_path = metadata
+        .and_then(|metadata| {
+            metadata
+                .get("original_path")
+                .or_else(|| metadata.get("path"))
+        })
+        .cloned()
+        .or_else(|| Some(anchor.path.clone()));
+    let managed_path = metadata
+        .and_then(|metadata| {
+            metadata
+                .get("managed_path")
+                .or_else(|| metadata.get("managed_copy_path"))
+        })
+        .cloned();
+    let current_path = metadata
+        .and_then(|metadata| metadata.get("current_path"))
+        .cloned();
+    let path = current_path
+        .clone()
+        .or_else(|| managed_path.clone())
+        .or_else(|| original_path.clone())?;
+    let extension = Path::new(&path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase());
+    let is_markdown = matches!(extension.as_deref(), Some("md" | "markdown" | "mdown"));
+    let is_pdf = matches!(extension.as_deref(), Some("pdf"));
+    let kind = if is_pdf && anchor.page.is_some() {
+        SourceOpenTargetKind::PdfPage
+    } else if is_markdown && anchor.section.is_some() {
+        SourceOpenTargetKind::MarkdownHeading
+    } else {
+        match source_type {
+            Some("chat" | "derived_memory" | "brain_artifact") => SourceOpenTargetKind::Generated,
+            _ => SourceOpenTargetKind::TextOffset,
+        }
+    };
+    Some(SourceOpenTarget {
+        kind,
+        uri: file_uri(&path),
+        path: Some(path),
+        original_path,
+        managed_path,
+        source_artifact_id: metadata
+            .and_then(|metadata| metadata.get("source_artifact_id"))
+            .cloned(),
+        text_start,
+        text_end,
+        markdown_heading: anchor.section.clone().filter(|_| is_markdown),
+        pdf_page: anchor.page.filter(|_| is_pdf),
+        browser_url: None,
+        location_hint: location_hint(anchor, text_start, text_end),
+    })
+}
+
+fn location_hint(anchor: &SourceAnchor, text_start: usize, text_end: usize) -> String {
+    let mut parts = Vec::new();
+    if let Some(page) = anchor.page {
+        parts.push(format!("page {page}"));
+    }
+    if let Some(section) = &anchor.section {
+        parts.push(format!("section {section}"));
+    }
+    parts.push(format!("chars {text_start}-{text_end}"));
+    parts.join(", ")
+}
+
+fn file_uri(path: &str) -> String {
+    if path.starts_with("file://") || path.starts_with("imprint://") || path.contains("://") {
+        return path.to_string();
+    }
+    format!("file://{}", path)
 }
 
 pub fn jump_to_anchor(
