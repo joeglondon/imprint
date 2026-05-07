@@ -671,6 +671,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             storage_mode_json TEXT NOT NULL,
             original_path TEXT NOT NULL,
             current_path TEXT,
+            managed_path TEXT,
             file_hash TEXT NOT NULL,
             parser_version INTEGER NOT NULL,
             imported_at INTEGER NOT NULL,
@@ -923,6 +924,12 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             [],
         )?;
     }
+    if !table_has_column(connection, "source_artifacts", "managed_path")? {
+        connection.execute(
+            "ALTER TABLE source_artifacts ADD COLUMN managed_path TEXT",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -1092,15 +1099,16 @@ fn insert_anchor(connection: &Connection, anchor: &SourceAnchor) -> Result<()> {
 fn insert_source_artifact(connection: &Connection, artifact: &SourceArtifact) -> Result<()> {
     connection.execute(
         "INSERT OR REPLACE INTO source_artifacts (
-            id, source_type, storage_mode_json, original_path, current_path, file_hash,
-            parser_version, imported_at, provenance_json
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            id, source_type, storage_mode_json, original_path, current_path, managed_path,
+            file_hash, parser_version, imported_at, provenance_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             artifact.id,
             artifact.source_type,
             to_json(&artifact.storage_mode)?,
             artifact.original_path,
             artifact.current_path,
+            artifact.managed_path,
             artifact.file_hash,
             artifact.parser_version as i64,
             artifact.imported_at as i64,
@@ -1112,7 +1120,7 @@ fn insert_source_artifact(connection: &Connection, artifact: &SourceArtifact) ->
 
 fn list_source_artifacts(connection: &Connection) -> Result<Vec<SourceArtifact>> {
     let mut statement = connection.prepare(
-        "SELECT id, source_type, storage_mode_json, original_path, current_path, file_hash,
+        "SELECT id, source_type, storage_mode_json, original_path, current_path, managed_path, file_hash,
             parser_version, imported_at, provenance_json FROM source_artifacts ORDER BY id",
     )?;
     let rows = statement.query_map([], source_artifact_from_row)?;
@@ -1132,10 +1140,11 @@ fn source_artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceA
         storage_mode: from_json(row.get::<_, String>(2)?)?,
         original_path: row.get(3)?,
         current_path: row.get(4)?,
-        file_hash: row.get(5)?,
-        parser_version: row.get::<_, i64>(6)? as u32,
-        imported_at: row.get::<_, i64>(7)? as u64,
-        provenance: from_json(row.get::<_, String>(8)?)?,
+        managed_path: row.get(5)?,
+        file_hash: row.get(6)?,
+        parser_version: row.get::<_, i64>(7)? as u32,
+        imported_at: row.get::<_, i64>(8)? as u64,
+        provenance: from_json(row.get::<_, String>(9)?)?,
     })
 }
 
@@ -1153,7 +1162,8 @@ fn source_artifact_from_document(document: &Document) -> Option<SourceArtifact> 
     let anchor = document.source_anchor.as_ref();
     let metadata = &document.metadata;
     let original_path = metadata
-        .get("path")
+        .get("original_path")
+        .or_else(|| metadata.get("path"))
         .or_else(|| metadata.get("source_path"))
         .cloned()
         .or_else(|| anchor.map(|anchor| anchor.path.clone()))?;
@@ -1189,8 +1199,13 @@ fn source_artifact_from_document(document: &Document) -> Option<SourceArtifact> 
             metadata
                 .get("current_path")
                 .cloned()
+                .or_else(|| metadata.get("path").cloned())
                 .unwrap_or(original_path.clone()),
         ),
+        managed_path: metadata
+            .get("managed_path")
+            .or_else(|| metadata.get("managed_copy_path"))
+            .cloned(),
         file_hash,
         parser_version,
         imported_at: metadata
@@ -1210,13 +1225,23 @@ fn source_artifact_from_document(document: &Document) -> Option<SourceArtifact> 
                 .get("imported_at")
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(0),
-            source_refs: vec![document.id.clone(), original_path],
+            source_refs: {
+                let mut refs = vec![document.id.clone(), original_path];
+                if let Some(managed_path) = metadata
+                    .get("managed_path")
+                    .or_else(|| metadata.get("managed_copy_path"))
+                {
+                    refs.push(managed_path.clone());
+                }
+                refs
+            },
         },
     })
 }
 
 fn source_storage_mode(metadata: &BTreeMap<String, String>) -> SourceStorageMode {
     match metadata.get("storage_mode").map(String::as_str) {
+        Some("reference_with_managed_copy") => SourceStorageMode::ReferenceWithManagedCopy,
         Some("managed_copy") => SourceStorageMode::ManagedCopy,
         Some("external") => SourceStorageMode::External,
         Some("generated") => SourceStorageMode::Generated,

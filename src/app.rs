@@ -40,6 +40,7 @@ const MEMORY_ACCESS_HORIZON_MILLIS: u64 = 30 * 24 * 60 * 60 * 1000;
 #[cfg(not(test))]
 const MAX_WEB_BODY_CHARS: usize = 12_000;
 const MAX_WEB_SUMMARY_CHARS: usize = 16_000;
+const MANAGED_SOURCE_ARTIFACTS_DIR: &str = ".source-artifacts";
 
 fn default_runtime_preset() -> ModelRuntimePreset {
     ModelRuntimePreset::Mlx
@@ -293,23 +294,26 @@ pub fn ingest_paths(store_root: &Path, paths: &[PathBuf]) -> anyhow::Result<Impo
         .filter(|document| !is_compiler_generated_document(document))
         .cloned()
         .collect::<Vec<_>>();
+    let mut incoming_documents = batch.documents;
+    prepare_source_documents_for_storage(
+        store_root,
+        &mut incoming_documents,
+        &existing_source_documents,
+    )?;
     let existing_ids = existing_source_documents
         .iter()
         .map(|document| document.id.clone())
         .collect::<HashSet<_>>();
-    let incoming_ids = batch
-        .documents
+    let incoming_ids = incoming_documents
         .iter()
         .map(|document| document.id.clone())
         .collect::<HashSet<_>>();
-    let replaced_paths = batch
-        .documents
+    let replaced_paths = incoming_documents
         .iter()
         .filter(|document| existing_ids.contains(&document.id))
         .filter_map(|document| document.metadata.get("path").cloned())
         .collect::<Vec<_>>();
-    let imported_paths = batch
-        .documents
+    let imported_paths = incoming_documents
         .iter()
         .filter(|document| !existing_ids.contains(&document.id))
         .filter_map(|document| document.metadata.get("path").cloned())
@@ -319,7 +323,7 @@ pub fn ingest_paths(store_root: &Path, paths: &[PathBuf]) -> anyhow::Result<Impo
         .into_iter()
         .filter(|document| !incoming_ids.contains(&document.id))
         .collect::<Vec<_>>();
-    documents.extend(batch.documents);
+    documents.extend(incoming_documents);
     let (memory, stats) = rebuild_from_documents(store_root, documents, &existing.chunks, &config)?;
     write_progress(store_root, "save", 99, 100, "Saving memory store")?;
     store.save(&memory)?;
@@ -362,11 +366,12 @@ pub fn rebuild_memory(store_root: &Path) -> anyhow::Result<ImportResult> {
     if memory.documents.is_empty() {
         return Err(anyhow!("store is empty; ingest files first"));
     }
-    let docs = memory
+    let mut docs = memory
         .documents
         .into_iter()
         .filter(|document| !is_compiler_generated_document(document))
         .collect::<Vec<_>>();
+    prepare_source_documents_for_storage(store_root, &mut docs, &[])?;
     let reusable_chunks = memory.chunks;
     let config = load_model_config(store_root)?;
     let (rebuilt, stats) = rebuild_from_documents(store_root, docs, &reusable_chunks, &config)?;
@@ -1681,6 +1686,173 @@ fn rebuild_from_documents(
     write_progress(store_root, "map", 98, 100, "Building memory map")?;
     memory.memory_map = Some(MapBuilder::default().build(&memory.regions));
     Ok((memory, stats))
+}
+
+fn prepare_source_documents_for_storage(
+    store_root: &Path,
+    documents: &mut [Document],
+    existing_documents: &[Document],
+) -> anyhow::Result<()> {
+    let existing_by_hash = existing_documents
+        .iter()
+        .filter_map(|document| source_file_hash(document).map(|hash| (hash.to_string(), document)))
+        .collect::<BTreeMap<_, _>>();
+
+    for document in documents {
+        if let Some(file_hash) = source_file_hash(document).map(str::to_string) {
+            if let Some(existing) = existing_by_hash.get(&file_hash) {
+                reconcile_document_identity(document, existing);
+            }
+            if document.metadata.get("source_type").map(String::as_str) == Some("local_file") {
+                create_managed_source_copy(store_root, document, &file_hash)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reconcile_document_identity(document: &mut Document, existing: &Document) {
+    let incoming_id = document.id.clone();
+    if document.id != existing.id {
+        document.id = existing.id.clone();
+        if let Some(anchor) = document.source_anchor.as_mut() {
+            anchor.document_id = document.id.clone();
+            anchor.id = format!("{}:document", document.id);
+        }
+        document
+            .metadata
+            .insert("reconciled_from_document_id".into(), incoming_id);
+        document
+            .metadata
+            .insert("reconciliation_key".into(), "file_hash".into());
+    }
+
+    if let Some(original_path) = existing
+        .metadata
+        .get("original_path")
+        .or_else(|| existing.metadata.get("path"))
+        .cloned()
+    {
+        document
+            .metadata
+            .insert("original_path".into(), original_path);
+    }
+    if let Some(imported_at) = existing.metadata.get("imported_at").cloned() {
+        if let Some(last_seen_at) = document.metadata.get("imported_at").cloned() {
+            document
+                .metadata
+                .insert("last_seen_at".into(), last_seen_at);
+        }
+        document.metadata.insert("imported_at".into(), imported_at);
+    }
+    if let Some(managed_copy_path) = existing
+        .metadata
+        .get("managed_path")
+        .or_else(|| existing.metadata.get("managed_copy_path"))
+        .or_else(|| existing.metadata.get("current_path"))
+        .cloned()
+    {
+        document
+            .metadata
+            .insert("managed_path".into(), managed_copy_path.clone());
+        document
+            .metadata
+            .insert("managed_copy_path".into(), managed_copy_path.clone());
+        document
+            .metadata
+            .insert("current_path".into(), managed_copy_path);
+    }
+}
+
+fn create_managed_source_copy(
+    store_root: &Path,
+    document: &mut Document,
+    file_hash: &str,
+) -> anyhow::Result<()> {
+    let Some(source_path) = document.metadata.get("path").cloned() else {
+        return Ok(());
+    };
+    let source_path_buf = PathBuf::from(&source_path);
+    if !source_path_buf.is_file() {
+        return Ok(());
+    }
+    let managed_path = document
+        .metadata
+        .get("managed_path")
+        .or_else(|| document.metadata.get("managed_copy_path"))
+        .or_else(|| document.metadata.get("current_path"))
+        .map(PathBuf::from)
+        .filter(|path| path.starts_with(store_root.join(MANAGED_SOURCE_ARTIFACTS_DIR)))
+        .unwrap_or_else(|| managed_source_artifact_path(store_root, file_hash, &source_path_buf));
+    if source_path_buf != managed_path {
+        if let Some(parent) = managed_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if !managed_path.exists() {
+            std::fs::copy(&source_path_buf, &managed_path).with_context(|| {
+                format!(
+                    "copying source artifact {} to {}",
+                    source_path_buf.display(),
+                    managed_path.display()
+                )
+            })?;
+        }
+    }
+
+    document
+        .metadata
+        .entry("original_path".into())
+        .or_insert(source_path.clone());
+    document
+        .metadata
+        .insert("reference_path".into(), source_path);
+    document
+        .metadata
+        .insert("storage_mode".into(), "reference_with_managed_copy".into());
+    document
+        .metadata
+        .insert("current_path".into(), managed_path.display().to_string());
+    document
+        .metadata
+        .insert("managed_path".into(), managed_path.display().to_string());
+    document.metadata.insert(
+        "managed_copy_path".into(),
+        managed_path.display().to_string(),
+    );
+    Ok(())
+}
+
+fn managed_source_artifact_path(store_root: &Path, file_hash: &str, source_path: &Path) -> PathBuf {
+    let prefix = file_hash.chars().take(2).collect::<String>();
+    let file_name = source_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(sanitize_managed_file_name)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "source".into());
+    store_root
+        .join(MANAGED_SOURCE_ARTIFACTS_DIR)
+        .join(prefix)
+        .join(file_hash)
+        .join(file_name)
+}
+
+fn sanitize_managed_file_name(name: &str) -> String {
+    name.chars()
+        .map(|character| match character {
+            '/' | '\\' | ':' | '\0' => '_',
+            _ => character,
+        })
+        .collect()
+}
+
+fn source_file_hash(document: &Document) -> Option<&str> {
+    document
+        .metadata
+        .get("file_hash")
+        .or_else(|| document.metadata.get("content_hash"))
+        .map(String::as_str)
+        .or(document.content_hash.as_deref())
 }
 
 fn write_progress(
@@ -4884,12 +5056,15 @@ mod tests {
         assert_eq!(local_artifacts.len(), 1);
         let artifact = local_artifacts[0];
         assert_eq!(artifact.source_type, "local_file");
-        assert_eq!(artifact.storage_mode, SourceStorageMode::ReferenceInPlace);
-        assert_eq!(artifact.original_path, input.display().to_string());
         assert_eq!(
-            artifact.current_path.as_deref(),
-            Some(input.to_str().unwrap())
+            artifact.storage_mode,
+            SourceStorageMode::ReferenceWithManagedCopy
         );
+        assert_eq!(artifact.original_path, input.display().to_string());
+        let current_path = artifact.current_path.as_deref().expect("current path");
+        assert!(current_path.contains(".source-artifacts"));
+        assert!(Path::new(current_path).is_file());
+        assert_eq!(artifact.managed_path.as_deref(), Some(current_path));
         assert!(!artifact.file_hash.is_empty());
         assert_eq!(artifact.parser_version, crate::ingest::PARSER_VERSION);
         assert!(artifact.imported_at > 0);
@@ -4898,6 +5073,92 @@ mod tests {
             .source_refs
             .iter()
             .any(|source_ref| source_ref == &input.display().to_string()));
+    }
+
+    #[test]
+    fn moved_local_import_reconciles_by_file_hash_and_updates_managed_copy() {
+        let root = temp_store_root("source-artifact-reconcile");
+        let first_dir = root.join("first");
+        let second_dir = root.join("second");
+        fs::create_dir_all(&first_dir).expect("first dir");
+        fs::create_dir_all(&second_dir).expect("second dir");
+        let first_path = first_dir.join("memory.md");
+        let second_path = second_dir.join("renamed.md");
+        let body = "# Move\n\nStable content keeps the same source artifact identity.";
+        fs::write(&first_path, body).expect("write first");
+
+        let first = ingest_paths(&root, std::slice::from_ref(&first_path)).expect("first ingest");
+        assert_eq!(first.imported_count, 1);
+        let store = FileMemoryStore::new(&root);
+        let first_document_id = store
+            .load()
+            .expect("first memory")
+            .documents
+            .into_iter()
+            .find(|document| {
+                document.metadata.get("source_type").map(String::as_str) == Some("local_file")
+            })
+            .expect("first document")
+            .id;
+        let first_artifact = store
+            .list_source_artifacts()
+            .expect("first artifacts")
+            .into_iter()
+            .find(|artifact| artifact.source_type == "local_file")
+            .expect("first local artifact");
+        let first_managed_path = first_artifact.current_path.clone().expect("managed path");
+
+        fs::rename(&first_path, &second_path).expect("rename source");
+        let second =
+            ingest_paths(&root, std::slice::from_ref(&second_path)).expect("second ingest");
+        assert_eq!(second.imported_count, 0);
+        assert_eq!(second.replaced_count, 1);
+        assert_eq!(second.summary.documents, 1);
+
+        let second_document = store
+            .load()
+            .expect("second memory")
+            .documents
+            .into_iter()
+            .find(|document| {
+                document.metadata.get("source_type").map(String::as_str) == Some("local_file")
+            })
+            .expect("second document");
+        assert_eq!(second_document.id, first_document_id);
+        assert_eq!(
+            second_document.metadata.get("original_path"),
+            Some(&first_path.display().to_string())
+        );
+        assert_eq!(
+            second_document.metadata.get("reference_path"),
+            Some(&second_path.display().to_string())
+        );
+        assert_eq!(
+            second_document
+                .metadata
+                .get("reconciliation_key")
+                .map(String::as_str),
+            Some("file_hash")
+        );
+
+        let artifacts = store.list_source_artifacts().expect("second artifacts");
+        let local_artifacts = artifacts
+            .iter()
+            .filter(|artifact| artifact.source_type == "local_file")
+            .collect::<Vec<_>>();
+        assert_eq!(local_artifacts.len(), 1);
+        let artifact = local_artifacts[0];
+        assert_eq!(artifact.id, first_artifact.id);
+        assert_eq!(artifact.original_path, first_path.display().to_string());
+        assert_eq!(
+            artifact.current_path.as_deref(),
+            Some(first_managed_path.as_str())
+        );
+        assert_eq!(
+            artifact.managed_path.as_deref(),
+            Some(first_managed_path.as_str())
+        );
+        assert!(Path::new(&first_managed_path).is_file());
     }
 
     #[test]

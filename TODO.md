@@ -30,6 +30,7 @@ Already implemented or partially implemented:
 - [x] Adapter state exposes separate data freshness, training status, and activation status.
 - [x] Attention marks, access history, source metadata, and active chat sessions influence recall ranking.
 - [x] Source artifacts are persisted as first-class provenance records with stable file-hash IDs for local imports.
+- [x] Local imports keep a hidden managed source copy and reconcile moves/renames by content hash.
 - [x] Rust tests pass as of 2026-05-06.
 - [x] macOS build passes as of 2026-05-06.
 
@@ -40,7 +41,7 @@ Important gaps:
 - [x] Adapter freshness is split from trained/active selection and source recall fallback.
 - [ ] True latent RecursiveMAS/RecursiveLink is not implemented.
 - [ ] CLI/MCP/UI still expose legacy map language in places.
-- [ ] Human library, managed-copy source artifacts, exact deep links, and import queue are still early.
+- [ ] Human library, exact deep links, and import queue are still early.
 
 ## Phase 1: Make Cortex Adapter Training Real
 
@@ -224,12 +225,12 @@ Goal: make exact recall trustworthy, deep-linkable, and reversible.
   - [x] parser version
   - [x] import timestamp
   - [x] user-visible provenance
-- [ ] Decide storage modes:
-  - [ ] reference in place
-  - [ ] copy into managed local store
-  - [ ] both, with reconciliation
+- [x] Decide storage modes:
+  - [x] reference in place
+  - [x] copy into managed local store
+  - [x] both, with reconciliation
 - [x] Add source artifact migration for existing documents.
-- [ ] Preserve stable IDs across moves/renames when content hash matches.
+- [x] Preserve stable IDs across moves/renames when content hash matches.
 - [ ] Add durable file opening:
   - [ ] text offset
   - [ ] Markdown heading
@@ -508,7 +509,7 @@ Goal: measure whether cortex, adapters, and recursion actually improve outcomes.
 
 Goal: preserve local-first behavior while preparing for a cloud-backed memory library.
 
-- [ ] Define local managed storage layout.
+- [x] Define local managed storage layout.
 - [ ] Define cloud sync object model:
   - [ ] source artifacts
   - [ ] extracted text

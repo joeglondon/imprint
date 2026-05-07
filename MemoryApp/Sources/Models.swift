@@ -161,6 +161,7 @@ struct SourceAnchor: Codable, Equatable, Identifiable {
 enum SourceStorageMode: String, Codable, Equatable {
     case referenceInPlace = "ReferenceInPlace"
     case managedCopy = "ManagedCopy"
+    case referenceWithManagedCopy = "ReferenceWithManagedCopy"
     case external = "External"
     case generated = "Generated"
 }
@@ -171,6 +172,7 @@ struct SourceArtifact: Codable, Equatable, Identifiable {
     var storageMode: SourceStorageMode
     var originalPath: String
     var currentPath: String?
+    var managedPath: String?
     var fileHash: String
     var parserVersion: UInt32
     var importedAt: UInt64

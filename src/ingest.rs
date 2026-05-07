@@ -367,6 +367,8 @@ fn document_from_parsed(
     );
     metadata.insert("source_type".into(), "local_file".into());
     metadata.insert("storage_mode".into(), "reference_in_place".into());
+    metadata.insert("original_path".into(), path.display().to_string());
+    metadata.insert("current_path".into(), path.display().to_string());
     metadata.insert("imported_at".into(), now_millis().to_string());
     metadata.insert(
         PAGE_SPANS_KEY.into(),

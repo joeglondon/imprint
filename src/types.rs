@@ -24,6 +24,7 @@ pub type SourceArtifactId = String;
 pub enum SourceStorageMode {
     ReferenceInPlace,
     ManagedCopy,
+    ReferenceWithManagedCopy,
     External,
     Generated,
 }
@@ -36,10 +37,45 @@ pub struct SourceArtifact {
     pub original_path: String,
     #[serde(default)]
     pub current_path: Option<String>,
+    #[serde(default)]
+    pub managed_path: Option<String>,
     pub file_hash: String,
     pub parser_version: u32,
     pub imported_at: u64,
     pub provenance: ProvenanceRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SourceOpenTargetKind {
+    TextOffset,
+    MarkdownHeading,
+    PdfPage,
+    Url,
+    EmailThread,
+    Generated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceOpenTarget {
+    pub kind: SourceOpenTargetKind,
+    pub uri: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub original_path: Option<String>,
+    #[serde(default)]
+    pub managed_path: Option<String>,
+    #[serde(default)]
+    pub source_artifact_id: Option<SourceArtifactId>,
+    pub text_start: usize,
+    pub text_end: usize,
+    #[serde(default)]
+    pub markdown_heading: Option<String>,
+    #[serde(default)]
+    pub pdf_page: Option<usize>,
+    #[serde(default)]
+    pub browser_url: Option<String>,
+    pub location_hint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
