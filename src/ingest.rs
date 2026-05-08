@@ -1,7 +1,7 @@
 use crate::index::{cosine_similarity, tokenize, Embedder, EmbedderIdentity};
 use crate::types::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -747,88 +747,370 @@ fn derive_vector_regions(chunks: &mut [Chunk]) -> Vec<Region> {
     if chunks.is_empty() {
         return Vec::new();
     }
-    let cluster_count = ((chunks.len() as f64).sqrt().ceil() as usize).clamp(1, 8);
-    let seeds = choose_region_seeds(chunks, cluster_count);
-    let mut assignments = vec![0usize; chunks.len()];
-    for (index, chunk) in chunks.iter().enumerate() {
-        assignments[index] = seeds
-            .iter()
-            .enumerate()
-            .map(|(seed_index, chunk_index)| {
-                (
-                    seed_index,
-                    cosine_similarity(&chunk.embedding, &chunks[*chunk_index].embedding),
-                )
-            })
-            .max_by(|left, right| {
-                left.1
-                    .partial_cmp(&right.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map(|(seed_index, _)| seed_index)
-            .unwrap_or(0);
-    }
 
     let mut regions = Vec::new();
-    for cluster in 0..cluster_count {
-        let member_indexes = assignments
-            .iter()
-            .enumerate()
-            .filter_map(|(index, assigned)| (*assigned == cluster).then_some(index))
-            .collect::<Vec<_>>();
-        if member_indexes.is_empty() {
-            continue;
+    let mut used_ids = HashSet::<String>::new();
+    for (source_family, family_indexes) in source_family_groups(chunks) {
+        let cluster_count = ((family_indexes.len() as f64).sqrt().ceil() as usize).clamp(1, 4);
+        let seeds = choose_region_seeds_for_indexes(chunks, &family_indexes, cluster_count);
+        let mut assignments = vec![0usize; family_indexes.len()];
+        for (position, index) in family_indexes.iter().enumerate() {
+            assignments[position] = seeds
+                .iter()
+                .enumerate()
+                .map(|(seed_index, chunk_index)| {
+                    (
+                        seed_index,
+                        cosine_similarity(
+                            &chunks[*index].embedding,
+                            &chunks[*chunk_index].embedding,
+                        ),
+                    )
+                })
+                .max_by(|left, right| {
+                    left.1
+                        .partial_cmp(&right.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| right.0.cmp(&left.0))
+                })
+                .map(|(seed_index, _)| seed_index)
+                .unwrap_or(0);
         }
-        let region_id = format!("region-{}", regions.len() + 1);
-        for index in &member_indexes {
-            chunks[*index].region_id = region_id.clone();
+
+        for cluster in 0..cluster_count {
+            let member_indexes = assignments
+                .iter()
+                .enumerate()
+                .filter_map(|(position, assigned)| {
+                    (*assigned == cluster).then_some(family_indexes[position])
+                })
+                .collect::<Vec<_>>();
+            if member_indexes.is_empty() {
+                continue;
+            }
+            regions.push(build_region(
+                chunks,
+                &member_indexes,
+                &source_family,
+                &mut used_ids,
+            ));
         }
-        let chunk_ids = member_indexes
-            .iter()
-            .map(|index| chunks[*index].id.clone())
-            .collect::<Vec<_>>();
-        let centroid = centroid_for_indexes(chunks, &member_indexes);
-        let terms = top_terms_for_indexes(chunks, &member_indexes, 4);
-        let label = format_region_label(&terms);
-        let mut filters = BTreeMap::new();
-        filters.insert("topic".into(), label.clone());
-        let summary = if terms.is_empty() {
-            "Vector region around related chunks".into()
-        } else {
-            format!("Vector region around {}", terms.join(", "))
-        };
-        regions.push(Region {
-            id: region_id,
-            label,
-            summary,
-            filters,
-            chunk_ids,
-            centroid,
-            neighbors: Vec::new(),
-        });
     }
+    regions.sort_by(|left, right| left.id.cmp(&right.id));
     connect_vector_regions(&mut regions);
     regions
 }
 
-fn choose_region_seeds(chunks: &[Chunk], cluster_count: usize) -> Vec<usize> {
+fn source_family_groups(chunks: &[Chunk]) -> Vec<(String, Vec<usize>)> {
+    let mut grouped = BTreeMap::<String, Vec<usize>>::new();
+    for (index, chunk) in chunks.iter().enumerate() {
+        grouped.entry(source_family(chunk)).or_default().push(index);
+    }
+    for indexes in grouped.values_mut() {
+        indexes.sort_by(|left, right| chunks[*left].id.cmp(&chunks[*right].id));
+    }
+    grouped.into_iter().collect()
+}
+
+fn source_family(chunk: &Chunk) -> String {
+    chunk
+        .metadata
+        .get("source_type")
+        .or_else(|| chunk.metadata.get("source"))
+        .map(|value| slugify(value))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn build_region(
+    chunks: &mut [Chunk],
+    member_indexes: &[usize],
+    source_family: &str,
+    used_ids: &mut HashSet<String>,
+) -> Region {
+    let terms = top_terms_for_indexes(chunks, member_indexes, 5);
+    let source_types = unique_metadata_values(chunks, member_indexes, "source_type");
+    let document_titles = unique_metadata_values(chunks, member_indexes, "document_title");
+    let sections = unique_metadata_values(chunks, member_indexes, "section");
+    let label = region_label(
+        chunks,
+        member_indexes,
+        &terms,
+        &source_types,
+        &document_titles,
+        &sections,
+    );
+    let region_id = stable_region_id(source_family, member_indexes, chunks, used_ids);
+    for index in member_indexes {
+        chunks[*index].region_id = region_id.clone();
+    }
+    let chunk_ids = member_indexes
+        .iter()
+        .map(|index| chunks[*index].id.clone())
+        .collect::<Vec<_>>();
+    let centroid = centroid_for_indexes(chunks, member_indexes);
+    let mut filters = BTreeMap::new();
+    filters.insert("topic".into(), label.clone());
+    filters.insert("region_level".into(), "leaf".into());
+    filters.insert("source_family".into(), source_family.to_string());
+    filters.insert(
+        "parent_region_id".into(),
+        format!("source-type:{source_family}"),
+    );
+    if !source_types.is_empty() {
+        filters.insert("source_type".into(), source_types[0].clone());
+        filters.insert("source_types".into(), source_types.join(","));
+    }
+    if let Some(folder) = common_workspace_folder(chunks, member_indexes) {
+        filters.insert("workspace_folder".into(), folder);
+        filters.insert("active_workspace_overlay".into(), "true".into());
+    }
+    apply_active_context_filters(&mut filters, chunks, member_indexes);
+    filters.insert(
+        "hierarchy".into(),
+        format!(
+            "{} > {}",
+            source_family_label(source_family, &source_types),
+            label
+        ),
+    );
+    let summary = region_summary(&terms, &source_types, &document_titles, &sections);
+    Region {
+        id: region_id,
+        label,
+        summary,
+        filters,
+        chunk_ids,
+        centroid,
+        neighbors: Vec::new(),
+    }
+}
+
+fn stable_region_id(
+    source_family: &str,
+    member_indexes: &[usize],
+    chunks: &[Chunk],
+    used_ids: &mut HashSet<String>,
+) -> String {
+    let mut parts = member_indexes
+        .iter()
+        .filter_map(|index| chunks.get(*index))
+        .map(|chunk| {
+            format!(
+                "{}:{}:{}",
+                chunk.document_id,
+                chunk.ordinal,
+                chunk.embedding_text_hash.as_deref().unwrap_or("")
+            )
+        })
+        .collect::<Vec<_>>();
+    parts.sort();
+    let hash = chunk_hash(&parts.join("\n"));
+    let base = format!("region-{source_family}-{}", &hash[..8.min(hash.len())]);
+    if used_ids.insert(base.clone()) {
+        return base;
+    }
+    for suffix in 2usize.. {
+        let candidate = format!("{base}-{suffix}");
+        if used_ids.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("region id suffix loop should always return")
+}
+
+fn unique_metadata_values(chunks: &[Chunk], indexes: &[usize], key: &str) -> Vec<String> {
+    indexes
+        .iter()
+        .filter_map(|index| chunks.get(*index))
+        .filter_map(|chunk| chunk.metadata.get(key))
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn region_label(
+    chunks: &[Chunk],
+    indexes: &[usize],
+    terms: &[String],
+    source_types: &[String],
+    document_titles: &[String],
+    sections: &[String],
+) -> String {
+    if indexes.len() == 1 {
+        if let Some(section) = sections.first() {
+            if section != "document" {
+                return truncate_label(section);
+            }
+        }
+        if let Some(title) = document_titles.first() {
+            return truncate_label(title);
+        }
+    }
+    let topic = if terms.is_empty() {
+        document_titles
+            .first()
+            .or_else(|| sections.first())
+            .cloned()
+            .unwrap_or_else(|| "general".into())
+    } else {
+        format_region_label(terms)
+    };
+    let family = source_family_label(
+        &indexes
+            .first()
+            .and_then(|index| chunks.get(*index))
+            .map(source_family)
+            .unwrap_or_else(|| "unknown".into()),
+        source_types,
+    );
+    truncate_label(&format!("{family}: {topic}"))
+}
+
+fn source_family_label(source_family: &str, source_types: &[String]) -> String {
+    source_types
+        .first()
+        .map(|value| {
+            value
+                .split(['_', '-'])
+                .filter(|part| !part.is_empty())
+                .map(|part| {
+                    let mut chars = part.chars();
+                    match chars.next() {
+                        Some(first) => {
+                            format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+                        }
+                        None => String::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| source_family.replace('-', " "))
+}
+
+fn truncate_label(value: &str) -> String {
+    value.chars().take(72).collect()
+}
+
+fn region_summary(
+    terms: &[String],
+    source_types: &[String],
+    document_titles: &[String],
+    sections: &[String],
+) -> String {
+    let mut parts = Vec::new();
+    if !terms.is_empty() {
+        parts.push(format!("semantic terms {}", terms.join(", ")));
+    }
+    if !document_titles.is_empty() {
+        parts.push(format!(
+            "sources {}",
+            document_titles
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    let section_refs = sections
+        .iter()
+        .filter(|section| section.as_str() != "document")
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !section_refs.is_empty() {
+        parts.push(format!("sections {}", section_refs.join("; ")));
+    }
+    if !source_types.is_empty() {
+        parts.push(format!("source type {}", source_types.join(",")));
+    }
+    if parts.is_empty() {
+        "Hierarchical source-aware region for related chunks".into()
+    } else {
+        format!("Hierarchical source-aware region with {}", parts.join("; "))
+    }
+}
+
+fn common_workspace_folder(chunks: &[Chunk], indexes: &[usize]) -> Option<String> {
+    let mut folders = indexes
+        .iter()
+        .filter_map(|index| chunks.get(*index))
+        .filter_map(|chunk| {
+            chunk
+                .metadata
+                .get("path")
+                .or_else(|| chunk.metadata.get("current_path"))
+        })
+        .filter_map(|path| Path::new(path).parent())
+        .filter_map(|path| path.file_name().and_then(|value| value.to_str()))
+        .filter(|folder| !folder.is_empty())
+        .collect::<BTreeSet<_>>();
+    if folders.len() == 1 {
+        folders.pop_first().map(ToOwned::to_owned)
+    } else {
+        None
+    }
+}
+
+fn apply_active_context_filters(
+    filters: &mut BTreeMap<String, String>,
+    chunks: &[Chunk],
+    indexes: &[usize],
+) {
+    for (key, filter_key, overlay_key) in [
+        ("chat_session_id", "chat_session_id", "active_chat_overlay"),
+        ("session_id", "session_id", "active_session_overlay"),
+        ("project_id", "project_id", "active_project_overlay"),
+        ("workspace_id", "workspace_id", "active_workspace_overlay"),
+        (
+            "collection_id",
+            "collection_id",
+            "active_collection_overlay",
+        ),
+        ("task_id", "task_id", "active_task_overlay"),
+    ] {
+        let values = unique_metadata_values(chunks, indexes, key);
+        if values.len() == 1 {
+            filters.insert(filter_key.into(), values[0].clone());
+            filters.insert(overlay_key.into(), "true".into());
+            continue;
+        }
+    }
+}
+
+fn choose_region_seeds_for_indexes(
+    chunks: &[Chunk],
+    indexes: &[usize],
+    cluster_count: usize,
+) -> Vec<usize> {
+    if indexes.is_empty() {
+        return Vec::new();
+    }
     let mut seeds = vec![0usize];
-    while seeds.len() < cluster_count && seeds.len() < chunks.len() {
-        let next = chunks
+    seeds[0] = indexes[0];
+    while seeds.len() < cluster_count && seeds.len() < indexes.len() {
+        let next = indexes
             .iter()
-            .enumerate()
-            .filter(|(index, _)| !seeds.contains(index))
-            .map(|(index, chunk)| {
+            .filter(|index| !seeds.contains(index))
+            .map(|index| {
+                let chunk = &chunks[*index];
                 let nearest = seeds
                     .iter()
                     .map(|seed| cosine_similarity(&chunk.embedding, &chunks[*seed].embedding))
                     .fold(f32::NEG_INFINITY, f32::max);
-                (index, nearest)
+                (*index, nearest)
             })
             .min_by(|left, right| {
                 left.1
                     .partial_cmp(&right.1)
                     .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| left.0.cmp(&right.0))
             })
             .map(|(index, _)| index);
         if let Some(index) = next {
@@ -1177,5 +1459,132 @@ fn skip(path: &Path, reason: impl Into<String>) -> ImportSkip {
     ImportSkip {
         path: path.display().to_string(),
         reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn region_derivation_uses_stable_source_aware_region_ids() {
+        let mut first_order = vec![
+            test_chunk("a1", "doc-a", 0, "local_file", vec![1.0, 0.0]),
+            test_chunk("a2", "doc-a", 1, "local_file", vec![0.95, 0.05]),
+            test_chunk("b1", "doc-b", 0, "local_file", vec![0.0, 1.0]),
+            test_chunk("b2", "doc-b", 1, "local_file", vec![0.05, 0.95]),
+        ];
+        let mut reversed = first_order.iter().cloned().rev().collect::<Vec<_>>();
+
+        let first_regions = derive_vector_regions(&mut first_order);
+        let reversed_regions = derive_vector_regions(&mut reversed);
+
+        let first_ids = first_regions
+            .iter()
+            .map(|region| region.id.clone())
+            .collect::<BTreeSet<_>>();
+        let reversed_ids = reversed_regions
+            .iter()
+            .map(|region| region.id.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(first_ids, reversed_ids);
+        assert!(first_ids
+            .iter()
+            .all(|id| id.starts_with("region-local-file-")));
+
+        let first_assignment = first_order
+            .iter()
+            .map(|chunk| (chunk.id.clone(), chunk.region_id.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let reversed_assignment = reversed
+            .iter()
+            .map(|chunk| (chunk.id.clone(), chunk.region_id.clone()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(first_assignment, reversed_assignment);
+    }
+
+    #[test]
+    fn region_derivation_records_hierarchy_source_type_and_context_overlays() {
+        let mut chunks = vec![
+            test_chunk("local", "doc-local", 0, "local_file", vec![1.0, 0.0]),
+            test_chunk("chat", "doc-chat", 0, "chat", vec![0.0, 1.0]),
+        ];
+        chunks[0]
+            .metadata
+            .insert("path".into(), "/tmp/imprint/Project Alpha/source.md".into());
+        chunks[1]
+            .metadata
+            .insert("chat_session_id".into(), "session-123".into());
+        chunks[1]
+            .metadata
+            .insert("document_title".into(), "Planner decisions".into());
+
+        let regions = derive_vector_regions(&mut chunks);
+        let chat_region = regions
+            .iter()
+            .find(|region| region.filters.get("source_type").map(String::as_str) == Some("chat"))
+            .expect("chat source-type region");
+
+        assert_eq!(
+            chat_region
+                .filters
+                .get("parent_region_id")
+                .map(String::as_str),
+            Some("source-type:chat")
+        );
+        assert_eq!(
+            chat_region.filters.get("region_level").map(String::as_str),
+            Some("leaf")
+        );
+        assert_eq!(
+            chat_region
+                .filters
+                .get("chat_session_id")
+                .map(String::as_str),
+            Some("session-123")
+        );
+        assert_eq!(
+            chat_region
+                .filters
+                .get("active_chat_overlay")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert!(chat_region
+            .filters
+            .get("hierarchy")
+            .is_some_and(|value| value.starts_with("Chat > ")));
+        assert!(chat_region.summary.contains("source type chat"));
+    }
+
+    fn test_chunk(
+        id: &str,
+        document_id: &str,
+        ordinal: usize,
+        source_type: &str,
+        embedding: Vec<f32>,
+    ) -> Chunk {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("source_type".into(), source_type.into());
+        metadata.insert("document_title".into(), document_id.into());
+        metadata.insert("section".into(), "document".into());
+        Chunk {
+            id: id.into(),
+            document_id: document_id.into(),
+            region_id: "unassigned".into(),
+            ordinal,
+            start: 0,
+            end: 32,
+            text: format!("{document_id} access policy memory region evidence"),
+            metadata,
+            source_anchor: None,
+            embedding,
+            embedding_text_hash: Some(format!("{id}-hash")),
+            embedding_provider: Some("test".into()),
+            embedding_model: Some("test".into()),
+            embedding_endpoint: Some("local".into()),
+            embedding_dimension: Some(2),
+            chunking_version: Some(CHUNKING_VERSION),
+        }
     }
 }

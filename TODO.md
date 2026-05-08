@@ -2,7 +2,7 @@
 
 This is the remaining work to reach the full imprint vision: a personal memory filesystem where the model has useful latent familiarity with the user's world, while exact claims remain grounded in source recall.
 
-Last repo-grounded status check: 2026-05-07.
+Last repo-grounded status check: 2026-05-08.
 
 ## North Star
 
@@ -277,12 +277,12 @@ Goal: scale beyond in-memory approximate region search while making memory surfa
   - [x] corpus hash
   - [x] index version
   - [x] last rebuild time
-- [ ] Improve region derivation:
-  - [ ] stable clustering
-  - [ ] better labels
-  - [ ] hierarchical regions
-  - [ ] source-type-aware regions
-  - [ ] active project/session overlays
+- [x] Improve region derivation:
+  - [x] stable clustering
+  - [x] better labels
+  - [x] hierarchical regions
+  - [x] source-type-aware regions
+  - [x] active project/session overlays
 - [ ] Improve graph links:
   - [ ] citation/reference parser quality
   - [ ] entity extraction
