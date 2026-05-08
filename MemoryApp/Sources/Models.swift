@@ -879,6 +879,7 @@ struct InspectorState {
     var links: [LinkRecord] = []
     var neighbors: [SurfNeighbor] = []
     var passages: [SurfPassage] = []
+    var attentionMarks: [AttentionMark] = []
     var excerpt: String?
     var sourceAnchor: SourceAnchor?
     var openTarget: SourceOpenTarget?

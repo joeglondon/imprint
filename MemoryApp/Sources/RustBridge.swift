@@ -132,6 +132,14 @@ enum RustBridge {
         try decode(ai_memory_apply_attention_mark(storePath, jsonString(write)))
     }
 
+    static func listAttentionMarks(storePath: String, targetId: String?) throws -> [AttentionMark] {
+        try decode(ai_memory_list_attention_marks(storePath, targetId ?? ""))
+    }
+
+    static func revertAttentionMark(storePath: String, markId: String, actor: String) throws -> AttentionMark {
+        try decode(ai_memory_revert_attention_mark(storePath, markId, actor))
+    }
+
     static func compileMemoryBrain(storePath: String) throws -> BrainCompileResult {
         try decode(ai_memory_compile_memory_brain(storePath))
     }

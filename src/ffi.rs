@@ -364,6 +364,35 @@ pub extern "C" fn ai_memory_apply_attention_mark(
 }
 
 #[no_mangle]
+pub extern "C" fn ai_memory_list_attention_marks(
+    store_path: *const c_char,
+    target_id: *const c_char,
+) -> *mut c_char {
+    respond(|| {
+        let store = path_arg(store_path)?;
+        let target = string_arg(target_id)?;
+        let target = if target.is_empty() {
+            None
+        } else {
+            Some(target)
+        };
+        app::list_attention_marks(&store, target)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn ai_memory_revert_attention_mark(
+    store_path: *const c_char,
+    mark_id: *const c_char,
+    actor: *const c_char,
+) -> *mut c_char {
+    respond(|| {
+        let store = path_arg(store_path)?;
+        app::revert_attention_mark(&store, &string_arg(mark_id)?, string_arg(actor)?)
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn ai_memory_compile_memory_brain(store_path: *const c_char) -> *mut c_char {
     respond(|| app::compile_memory_brain(&path_arg(store_path)?))
 }

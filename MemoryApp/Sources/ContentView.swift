@@ -599,6 +599,52 @@ private struct MapInspector: View {
                 InspectorDivider()
 
                 InspectorBlock {
+                    SectionLabel("Attention") {
+                        if !appState.inspector.attentionMarks.isEmpty {
+                            Text("\(activeAttentionCount)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(theme.ink.quaternary)
+                        }
+                    }
+                    if appState.inspector.selectedNode == nil {
+                        EmptyHint("Select a node to pin, promote, suppress, or set hotness.")
+                    } else {
+                        HStack(spacing: 6) {
+                            GraphiteButton("Pin", systemImage: "pin", style: .ghost) { appState.applySelectionAttention(.pin) }
+                            GraphiteButton("Promote", systemImage: "arrow.up", style: .ghost) { appState.applySelectionAttention(.promote) }
+                            GraphiteButton("Suppress", systemImage: "eye.slash", style: .ghost) { appState.applySelectionAttention(.suppress) }
+                        }
+                        HStack(spacing: 6) {
+                            GraphiteButton("Hot", systemImage: "flame", style: .ghost) { appState.applySelectionAttention(.hot) }
+                            GraphiteButton("Warm", systemImage: "thermometer.medium", style: .ghost) { appState.applySelectionAttention(.warm) }
+                            GraphiteButton("Cold", systemImage: "snowflake", style: .ghost) { appState.applySelectionAttention(.cold) }
+                        }
+                        .padding(.top, 4)
+                        .disabled(appState.isBusy)
+                        Text(selectedAttentionTargetLine)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(theme.ink.quaternary)
+                            .lineLimit(2)
+                            .padding(.top, 4)
+                        if appState.inspector.attentionMarks.isEmpty {
+                            EmptyHint("No attention marks on this target yet.")
+                                .padding(.top, 4)
+                        } else {
+                            VStack(spacing: 5) {
+                                ForEach(appState.inspector.attentionMarks.prefix(6)) { mark in
+                                    AttentionMarkRow(mark: mark) {
+                                        appState.revertAttentionMark(mark)
+                                    }
+                                }
+                            }
+                            .padding(.top, 6)
+                        }
+                    }
+                }
+
+                InspectorDivider()
+
+                InspectorBlock {
                     SectionLabel("Excerpt")
                     if let excerpt = appState.inspector.excerpt, !excerpt.isEmpty {
                         HighlightedText(excerpt)
@@ -688,6 +734,39 @@ private struct MapInspector: View {
                 InspectorDivider()
 
                 InspectorBlock {
+                    SectionLabel("Ranking")
+                    if let query = appState.inspector.queryResult {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(query.routed.routePlan.candidates.prefix(3)) { candidate in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack {
+                                        Text(candidate.label)
+                                            .font(.system(size: 11.5, weight: .medium))
+                                            .foregroundStyle(theme.ink.primary)
+                                            .lineLimit(1)
+                                        Spacer()
+                                        Text(String(format: "%.2f", candidate.score))
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .foregroundStyle(theme.ink.quaternary)
+                                    }
+                                    Text(candidate.reason)
+                                        .font(.system(size: 10.5))
+                                        .foregroundStyle(theme.ink.tertiary)
+                                        .lineLimit(3)
+                                }
+                            }
+                            ForEach(query.hits.prefix(3)) { hit in
+                                DetailRow(label: "Hit", value: "\(hit.chunkId) · score \(String(format: "%.2f", hit.score))")
+                            }
+                        }
+                    } else {
+                        EmptyHint("Run a route to see why regions and source hits ranked.")
+                    }
+                }
+
+                InspectorDivider()
+
+                InspectorBlock {
                     SectionLabel("Nearby")
                     if appState.inspector.neighbors.isEmpty {
                         EmptyHint("No neighbors loaded.")
@@ -769,6 +848,22 @@ private struct MapInspector: View {
         case .region: return .ai
         case .document: return .human
         case .chunk: return .d
+        }
+    }
+
+    private var activeAttentionCount: Int {
+        appState.inspector.attentionMarks.filter { $0.revertedAt == nil }.count
+    }
+
+    private var selectedAttentionTargetLine: String {
+        guard let node = appState.inspector.selectedNode else { return "" }
+        switch node.nodeRef {
+        case .document(let id):
+            return "document · \(id)"
+        case .chunk(let id):
+            return "chunk · \(id)"
+        case .region(let id):
+            return "region · \(id)"
         }
     }
 
@@ -1271,6 +1366,56 @@ private struct DetailRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
+    }
+}
+
+private struct AttentionMarkRow: View {
+    @Environment(\.memoryTheme) private var theme
+    let mark: AttentionMark
+    let revert: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Tag(mark.action.rawValue, tone: tone)
+                Text(mark.revertedAt == nil ? "active" : "reverted")
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(mark.revertedAt == nil ? theme.accents.success : theme.ink.quaternary)
+                Spacer()
+                IconButton("Revert Mark", systemImage: "arrow.uturn.backward") {
+                    revert()
+                }
+                .disabled(mark.revertedAt != nil)
+            }
+            Text(mark.reason)
+                .font(.system(size: 10.5))
+                .foregroundStyle(theme.ink.secondary)
+                .lineLimit(2)
+            Text("\(mark.actor) · \(mark.targetKind.rawValue) · \(mark.targetId) · \(timeLabel(mark.createdAt))")
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundStyle(theme.ink.quaternary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(8)
+        .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
+    }
+
+    private var tone: ThemeTone {
+        switch mark.action {
+        case .pin, .hot, .active:
+            return .ai
+        case .promote, .warm:
+            return .human
+        case .suppress, .cold, .decay:
+            return .d
+        }
+    }
+
+    private func timeLabel(_ millis: UInt64) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(millis) / 1000)
+        return date.formatted(date: .abbreviated, time: .shortened)
     }
 }
 

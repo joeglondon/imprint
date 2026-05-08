@@ -301,18 +301,18 @@ Goal: scale beyond in-memory approximate region search while making memory surfa
 
 Goal: make attention inspectable, reversible, and useful instead of hidden scoring magic.
 
-- [ ] Add user-facing attention controls:
-  - [ ] pin
-  - [ ] promote
-  - [ ] suppress
-  - [ ] mark hot/warm/cold
-  - [ ] explain why ranked
-- [ ] Add attention inspector:
-  - [ ] who set mark
-  - [ ] why
-  - [ ] when
-  - [ ] source target
-  - [ ] revert action
+- [x] Add user-facing attention controls:
+  - [x] pin
+  - [x] promote
+  - [x] suppress
+  - [x] mark hot/warm/cold
+  - [x] explain why ranked
+- [x] Add attention inspector:
+  - [x] who set mark
+  - [x] why
+  - [x] when
+  - [x] source target
+  - [x] revert action
 - [ ] Add active context models:
   - [ ] active chat
   - [ ] active project

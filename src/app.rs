@@ -1117,6 +1117,24 @@ pub fn list_attention_marks(
     FileMemoryStore::new(store_root).list_attention_marks(target_id.as_deref())
 }
 
+pub fn revert_attention_mark(
+    store_root: &Path,
+    mark_id: &str,
+    actor: String,
+) -> anyhow::Result<AttentionMark> {
+    let store = FileMemoryStore::new(store_root);
+    let reverted = store.revert_attention_mark(mark_id, now_millis())?;
+    audit_write(
+        &store,
+        attention_target_session_id(&store, &reverted.target_kind, &reverted.target_id)?,
+        "attention.revert",
+        &reverted.target_id,
+        &actor,
+        &reverted,
+    )?;
+    Ok(reverted)
+}
+
 pub fn list_agent_links(store_root: &Path) -> anyhow::Result<Vec<AgentLinkMemory>> {
     FileMemoryStore::new(store_root).list_agent_links()
 }
@@ -6686,6 +6704,12 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
         )
         .expect("attention mark");
         assert_eq!(mark.action, AttentionAction::Promote);
+        let reverted = revert_attention_mark(&root, &mark.id, "assistant".into())
+            .expect("revert attention mark");
+        assert!(reverted.reverted_at.is_some());
+        let marks = list_attention_marks(&root, Some(summary.id.clone())).expect("list marks");
+        assert_eq!(marks[0].id, mark.id);
+        assert!(marks[0].reverted_at.is_some());
 
         let audit = list_audit_events(&root, Some(session.id)).expect("audit");
         assert!(audit
@@ -6697,6 +6721,9 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
         assert!(audit
             .iter()
             .any(|event| event.event_type == "attention.mark"));
+        assert!(audit
+            .iter()
+            .any(|event| event.event_type == "attention.revert"));
     }
 
     #[test]

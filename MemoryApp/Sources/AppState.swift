@@ -454,6 +454,7 @@ final class AppState: ObservableObject {
         inspector.selectedNode = node
         inspector.breadcrumbs.append(node.label)
         inspector.passages = []
+        inspector.attentionMarks = []
         session.current = node.nodeRef
         let storePath = self.storePath
         runTask(
@@ -461,17 +462,68 @@ final class AppState: ObservableObject {
             operation: {
                 let opened = try RustBridge.surfOpen(storePath: storePath, node: node.nodeRef)
                 let neighbors = try RustBridge.surfNeighbors(storePath: storePath, node: node.nodeRef, maxResults: 8)
-                return (opened, neighbors)
+                let marks = try RustBridge.listAttentionMarks(storePath: storePath, targetId: attentionTargetId(for: node.nodeRef))
+                return (opened, neighbors, marks)
             },
-            apply: { [weak self] opened, neighbors in
+            apply: { [weak self] opened, neighbors, marks in
                 guard let self else { return }
                 self.inspector.links = opened.links
                 self.inspector.neighbors = neighbors
                 self.inspector.passages = opened.passages
+                self.inspector.attentionMarks = marks
                 self.inspector.excerpt = opened.excerpt
                 self.inspector.sourceAnchor = opened.sourceAnchor
                 self.inspector.openTarget = opened.openTarget
                 self.inspector.expansion = nil
+            }
+        )
+    }
+
+    func applySelectionAttention(_ action: AttentionAction) {
+        guard let node = inspector.selectedNode else { return }
+        let storePath = self.storePath
+        let targetId = attentionTargetId(for: node.nodeRef)
+        let targetKind = attentionTargetKind(for: node.nodeRef)
+        let reason = "\(action.rawValue) from macOS selection inspector for \(node.label)"
+        runTask(
+            message: "Marking attention…",
+            operation: {
+                let mark = try RustBridge.applyAttentionMark(
+                    storePath: storePath,
+                    write: AttentionMarkWrite(
+                        targetId: targetId,
+                        targetKind: targetKind,
+                        action: action,
+                        reason: reason,
+                        actor: "human"
+                    )
+                )
+                let marks = try RustBridge.listAttentionMarks(storePath: storePath, targetId: targetId)
+                return (mark, marks)
+            },
+            apply: { [weak self] mark, marks in
+                guard let self else { return }
+                self.inspector.attentionMarks = marks
+                self.statusMessage = "\(mark.action.rawValue) attention mark saved."
+            }
+        )
+    }
+
+    func revertAttentionMark(_ mark: AttentionMark) {
+        guard let node = inspector.selectedNode else { return }
+        let storePath = self.storePath
+        let targetId = attentionTargetId(for: node.nodeRef)
+        runTask(
+            message: "Reverting attention mark…",
+            operation: {
+                let reverted = try RustBridge.revertAttentionMark(storePath: storePath, markId: mark.id, actor: "human")
+                let marks = try RustBridge.listAttentionMarks(storePath: storePath, targetId: targetId)
+                return (reverted, marks)
+            },
+            apply: { [weak self] reverted, marks in
+                guard let self else { return }
+                self.inspector.attentionMarks = marks
+                self.statusMessage = "\(reverted.action.rawValue) attention mark reverted."
             }
         )
     }
@@ -638,5 +690,23 @@ final class AppState: ObservableObject {
     private func updateWorkspaceConnection(_ kind: WorkspaceConnectionKind, status: WorkspaceConnectionStatus) {
         guard let index = workspaceConnections.firstIndex(where: { $0.kind == kind }) else { return }
         workspaceConnections[index].status = status
+    }
+}
+
+private func attentionTargetId(for node: NodeRef) -> String {
+    switch node {
+    case .document(let id), .chunk(let id), .region(let id):
+        return id
+    }
+}
+
+private func attentionTargetKind(for node: NodeRef) -> AttentionTargetKind {
+    switch node {
+    case .document:
+        return .document
+    case .chunk:
+        return .chunk
+    case .region:
+        return .region
     }
 }

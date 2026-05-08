@@ -557,6 +557,21 @@ impl FileMemoryStore {
         }
     }
 
+    pub fn revert_attention_mark(&self, mark_id: &str, reverted_at: u64) -> Result<AttentionMark> {
+        let connection = self.connection()?;
+        connection.execute(
+            "UPDATE attention_marks SET reverted_at = ?2 WHERE id = ?1 AND reverted_at IS NULL",
+            params![mark_id, reverted_at as i64],
+        )?;
+        let mut statement = connection.prepare(
+            "SELECT id, target_id, target_kind_json, action_json, reason, actor, created_at, reverted_at
+             FROM attention_marks WHERE id = ?1",
+        )?;
+        statement
+            .query_row(params![mark_id], attention_mark_from_row)
+            .map_err(Into::into)
+    }
+
     pub fn insert_memory_access(&self, access: &MemoryAccess) -> Result<()> {
         let connection = self.connection()?;
         connection.execute(
