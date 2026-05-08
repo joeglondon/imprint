@@ -703,12 +703,19 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             id TEXT PRIMARY KEY,
             document_id TEXT NOT NULL,
             chunk_id TEXT,
+            source_artifact_id TEXT,
             path TEXT NOT NULL,
             content_hash TEXT NOT NULL,
             start_offset INTEGER NOT NULL,
             end_offset INTEGER NOT NULL,
+            byte_start INTEGER,
+            byte_end INTEGER,
+            char_start INTEGER,
+            char_end INTEGER,
             page INTEGER,
             section TEXT,
+            section_hierarchy_json TEXT,
+            paragraph_index INTEGER,
             parser_version INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_anchors_document ON source_anchors(document_id);
@@ -930,6 +937,22 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             [],
         )?;
     }
+    for (column, definition) in [
+        ("source_artifact_id", "TEXT"),
+        ("byte_start", "INTEGER"),
+        ("byte_end", "INTEGER"),
+        ("char_start", "INTEGER"),
+        ("char_end", "INTEGER"),
+        ("section_hierarchy_json", "TEXT"),
+        ("paragraph_index", "INTEGER"),
+    ] {
+        if !table_has_column(connection, "source_anchors", column)? {
+            connection.execute(
+                &format!("ALTER TABLE source_anchors ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -1078,18 +1101,27 @@ fn save_memory(connection: &mut Connection, memory: &PersistedMemory) -> Result<
 fn insert_anchor(connection: &Connection, anchor: &SourceAnchor) -> Result<()> {
     connection.execute(
         "INSERT OR REPLACE INTO source_anchors (
-            id, document_id, chunk_id, path, content_hash, start_offset, end_offset, page, section, parser_version
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            id, document_id, chunk_id, source_artifact_id, path, content_hash,
+            start_offset, end_offset, byte_start, byte_end, char_start, char_end,
+            page, section, section_hierarchy_json, paragraph_index, parser_version
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             anchor.id,
             anchor.document_id,
             anchor.chunk_id,
+            anchor.source_artifact_id,
             anchor.path,
             anchor.content_hash,
             anchor.start as i64,
             anchor.end as i64,
+            anchor.byte_start.map(|value| value as i64),
+            anchor.byte_end.map(|value| value as i64),
+            anchor.char_start.map(|value| value as i64),
+            anchor.char_end.map(|value| value as i64),
             anchor.page.map(|value| value as i64),
             anchor.section,
+            to_json(&anchor.section_hierarchy)?,
+            anchor.paragraph_index.map(|value| value as i64),
             anchor.parser_version as i64,
         ],
     )?;

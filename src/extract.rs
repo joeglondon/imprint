@@ -62,12 +62,19 @@ impl Extractor for MemoryExtractor {
                     id: format!("{}:hit:{index}", anchor.id),
                     document_id: anchor.document_id.clone(),
                     chunk_id: None,
+                    source_artifact_id: anchor.source_artifact_id.clone(),
                     path: anchor.path.clone(),
                     content_hash: anchor.content_hash.clone(),
                     start,
                     end,
+                    byte_start: Some(byte_offset_for_char(&document.text, start)),
+                    byte_end: Some(byte_offset_for_char(&document.text, end)),
+                    char_start: Some(start),
+                    char_end: Some(end),
                     page: anchor.page,
                     section: anchor.section.clone(),
+                    section_hierarchy: anchor.section_hierarchy.clone(),
+                    paragraph_index: anchor.paragraph_index,
                     parser_version: anchor.parser_version,
                 }),
             })
@@ -209,6 +216,16 @@ fn excerpt(text: &str, start: usize, end: usize, window: usize) -> String {
     let left = start.saturating_sub(window);
     let right = (end + window).min(chars.len());
     chars[left..right].iter().collect()
+}
+
+fn byte_offset_for_char(text: &str, offset: usize) -> usize {
+    if offset == 0 {
+        return 0;
+    }
+    text.char_indices()
+        .nth(offset)
+        .map(|(byte, _)| byte)
+        .unwrap_or(text.len())
 }
 
 #[allow(dead_code)]

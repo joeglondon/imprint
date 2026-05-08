@@ -2483,12 +2483,19 @@ fn chat_session_document(session: &ChatSession, messages: &[ChatMessage]) -> Doc
         id: format!("{id}:document"),
         document_id: id.clone(),
         chunk_id: None,
+        source_artifact_id: None,
         path,
         content_hash: content_hash.clone(),
         start: 0,
         end: text.chars().count(),
+        byte_start: Some(0),
+        byte_end: Some(text.len()),
+        char_start: Some(0),
+        char_end: Some(text.chars().count()),
         page: None,
         section: Some("Chat transcript".into()),
+        section_hierarchy: vec!["Chat transcript".into()],
+        paragraph_index: Some(1),
         parser_version: 1,
     };
     Document {
@@ -2537,12 +2544,19 @@ fn web_finding_document(finding: &WebFinding) -> Document {
         id: format!("{id}:document"),
         document_id: id.clone(),
         chunk_id: None,
+        source_artifact_id: None,
         path: finding.url.clone(),
         content_hash: content_hash.clone(),
         start: 0,
         end: text.chars().count(),
+        byte_start: Some(0),
+        byte_end: Some(text.len()),
+        char_start: Some(0),
+        char_end: Some(text.chars().count()),
         page: None,
         section: Some("Web finding".into()),
+        section_hierarchy: vec!["Web finding".into()],
+        paragraph_index: Some(1),
         parser_version: PARSER_VERSION,
     };
     Document {
@@ -2581,12 +2595,19 @@ fn derived_memory_document(memory: &DerivedMemory) -> Document {
         id: format!("{id}:document"),
         document_id: id.clone(),
         chunk_id: None,
+        source_artifact_id: None,
         path,
         content_hash: content_hash.clone(),
         start: 0,
         end: text.chars().count(),
+        byte_start: Some(0),
+        byte_end: Some(text.len()),
+        char_start: Some(0),
+        char_end: Some(text.chars().count()),
         page: None,
         section: Some("Derived memory".into()),
+        section_hierarchy: vec!["Derived memory".into()],
+        paragraph_index: Some(1),
         parser_version: PARSER_VERSION,
     };
     Document {
@@ -2638,12 +2659,19 @@ fn brain_artifact_document(artifact: &BrainArtifact) -> Document {
         id: format!("{id}:document"),
         document_id: id.clone(),
         chunk_id: None,
+        source_artifact_id: None,
         path,
         content_hash: content_hash.clone(),
         start: 0,
         end: text.chars().count(),
+        byte_start: Some(0),
+        byte_end: Some(text.len()),
+        char_start: Some(0),
+        char_end: Some(text.chars().count()),
         page: None,
         section: Some("Brain artifact".into()),
+        section_hierarchy: vec!["Brain artifact".into()],
+        paragraph_index: Some(1),
         parser_version: PARSER_VERSION,
     };
     Document {
@@ -4455,12 +4483,19 @@ fn chat_source_anchor(
         id: format!("anchor:{message_id}"),
         document_id: chat_document_id(session_id),
         chunk_id: None,
+        source_artifact_id: None,
         path: format!("imprint://chat/{session_id}/{message_id}"),
         content_hash: hash_text(content),
         start: 0,
         end: content.chars().count(),
+        byte_start: Some(0),
+        byte_end: Some(content.len()),
+        char_start: Some(0),
+        char_end: Some(content.chars().count()),
         page: None,
         section: Some("Chat transcript".into()),
+        section_hierarchy: vec!["Chat transcript".into()],
+        paragraph_index: Some(1),
         parser_version: created_at as u32,
     }
 }
@@ -6455,12 +6490,19 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
             id: "anchor:weak-local".into(),
             document_id: "doc:employees".into(),
             chunk_id: Some("chunk:employees".into()),
+            source_artifact_id: None,
             path: "/tmp/xage-employees.csv".into(),
             content_hash: "hash".into(),
             start: 0,
             end: 80,
+            byte_start: Some(0),
+            byte_end: Some(80),
+            char_start: Some(0),
+            char_end: Some(80),
             page: None,
             section: None,
+            section_hierarchy: Vec::new(),
+            paragraph_index: None,
             parser_version: 1,
         };
         let snippets = vec![ChatContextSnippet {
@@ -6485,12 +6527,19 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
             id: "anchor:strong-local".into(),
             document_id: "doc:cached".into(),
             chunk_id: Some("chunk:cached".into()),
+            source_artifact_id: None,
             path: "/tmp/cached.md".into(),
             content_hash: "hash".into(),
             start: 0,
             end: 80,
+            byte_start: Some(0),
+            byte_end: Some(80),
+            char_start: Some(0),
+            char_end: Some(80),
             page: None,
             section: None,
+            section_hierarchy: Vec::new(),
+            paragraph_index: None,
             parser_version: 1,
         };
         let snippets = vec![ChatContextSnippet {
@@ -6695,6 +6744,48 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
             .passages
             .iter()
             .all(|passage| passage.open_target.is_some()));
+    }
+
+    #[test]
+    fn imported_anchors_include_source_precision_metadata() {
+        let root = temp_store_root("source-anchor-precision");
+        let input = root.join("notes.md");
+        let body = format!(
+            "# Alpha\n{}\n## Beta\n{}",
+            "alpha ".repeat(60),
+            "café memory ".repeat(140)
+        );
+        fs::write(&input, body).expect("write input");
+        ingest_paths(&root, std::slice::from_ref(&input)).expect("ingest");
+
+        let store = FileMemoryStore::new(&root);
+        let memory = store.load().expect("load memory");
+        let chunk = memory
+            .chunks
+            .iter()
+            .find(|chunk| {
+                chunk
+                    .source_anchor
+                    .as_ref()
+                    .is_some_and(|anchor| anchor.section.as_deref() == Some("Beta"))
+            })
+            .expect("beta chunk");
+        let anchor = chunk.source_anchor.as_ref().expect("anchor");
+
+        assert_eq!(anchor.char_start, Some(anchor.start));
+        assert_eq!(anchor.char_end, Some(anchor.end));
+        assert!(anchor.byte_start.is_some_and(|byte| byte >= anchor.start));
+        assert!(anchor.byte_end.is_some_and(|byte| byte > anchor.end));
+        assert!(anchor
+            .source_artifact_id
+            .as_deref()
+            .is_some_and(|id| { id.starts_with("source-artifact:") }));
+        assert_eq!(anchor.section_hierarchy, vec!["Alpha", "Beta"]);
+        assert!(anchor.paragraph_index.is_some());
+        assert_eq!(
+            chunk.metadata.get("section_hierarchy").map(String::as_str),
+            Some("Alpha > Beta")
+        );
     }
 
     #[test]

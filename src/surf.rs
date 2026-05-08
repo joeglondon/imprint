@@ -341,12 +341,19 @@ pub fn expand_chunk(
         id: format!("{}:expanded", anchor.id),
         document_id: anchor.document_id.clone(),
         chunk_id: anchor.chunk_id.clone(),
+        source_artifact_id: anchor.source_artifact_id.clone(),
         path: anchor.path.clone(),
         content_hash: anchor.content_hash.clone(),
         start,
         end,
+        byte_start: Some(byte_offset_for_char(&document.text, start)),
+        byte_end: Some(byte_offset_for_char(&document.text, end)),
+        char_start: Some(start),
+        char_end: Some(end),
         page: anchor.page,
         section: anchor.section.clone(),
+        section_hierarchy: anchor.section_hierarchy.clone(),
+        paragraph_index: anchor.paragraph_index,
         parser_version: anchor.parser_version,
     });
     let open_target = source_anchor
@@ -394,7 +401,8 @@ fn source_open_target(
             managed_path: None,
             source_artifact_id: metadata
                 .and_then(|metadata| metadata.get("source_artifact_id"))
-                .cloned(),
+                .cloned()
+                .or_else(|| anchor.source_artifact_id.clone()),
             text_start,
             text_end,
             markdown_heading: anchor.section.clone(),
@@ -450,7 +458,8 @@ fn source_open_target(
         managed_path,
         source_artifact_id: metadata
             .and_then(|metadata| metadata.get("source_artifact_id"))
-            .cloned(),
+            .cloned()
+            .or_else(|| anchor.source_artifact_id.clone()),
         text_start,
         text_end,
         markdown_heading: anchor.section.clone().filter(|_| is_markdown),
@@ -470,6 +479,16 @@ fn location_hint(anchor: &SourceAnchor, text_start: usize, text_end: usize) -> S
     }
     parts.push(format!("chars {text_start}-{text_end}"));
     parts.join(", ")
+}
+
+fn byte_offset_for_char(text: &str, offset: usize) -> usize {
+    if offset == 0 {
+        return 0;
+    }
+    text.char_indices()
+        .nth(offset)
+        .map(|(byte, _)| byte)
+        .unwrap_or(text.len())
 }
 
 fn file_uri(path: &str) -> String {

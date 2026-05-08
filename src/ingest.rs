@@ -24,6 +24,8 @@ const STOPWORDS: &[&str] = &[
 ];
 const PAGE_SPANS_KEY: &str = "_page_spans";
 const SECTION_SPANS_KEY: &str = "_section_spans";
+const SECTION_HIERARCHY_SPANS_KEY: &str = "_section_hierarchy_spans";
+const PARAGRAPH_SPANS_KEY: &str = "_paragraph_spans";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImportSkip {
@@ -104,6 +106,15 @@ impl<E: Embedder> Ingester<E> {
                     }
                     if let Some(section) = &anchor.section {
                         metadata.insert("section".into(), section.clone());
+                    }
+                    if !anchor.section_hierarchy.is_empty() {
+                        metadata.insert(
+                            "section_hierarchy".into(),
+                            anchor.section_hierarchy.join(" > "),
+                        );
+                    }
+                    if let Some(paragraph_index) = anchor.paragraph_index {
+                        metadata.insert("paragraph_index".into(), paragraph_index.to_string());
                     }
                 }
                 chunk_inputs.push(ChunkInput {
@@ -257,6 +268,8 @@ pub fn extract_documents(inputs: &[PathBuf]) -> anyhow::Result<DocumentImportBat
                         parsed.content_hash,
                         parsed.page_spans,
                         parsed.section_spans,
+                        parsed.section_hierarchy_spans,
+                        parsed.paragraph_spans,
                     ));
                 }
                 ReadOutcome::Skip(reason) => skipped_paths.push(skip(&path, reason)),
@@ -299,6 +312,8 @@ struct ParsedText {
     content_hash: String,
     page_spans: Vec<TextSpan>,
     section_spans: Vec<TextSpan>,
+    section_hierarchy_spans: Vec<TextSpan>,
+    paragraph_spans: Vec<TextSpan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -343,6 +358,8 @@ fn document_from_parsed(
     content_hash: String,
     page_spans: Vec<TextSpan>,
     section_spans: Vec<TextSpan>,
+    section_hierarchy_spans: Vec<TextSpan>,
+    paragraph_spans: Vec<TextSpan>,
 ) -> Document {
     let title = path
         .file_stem()
@@ -361,10 +378,8 @@ fn document_from_parsed(
     metadata.insert("content_hash".into(), content_hash.clone());
     metadata.insert("file_hash".into(), content_hash.clone());
     metadata.insert("parser_version".into(), PARSER_VERSION.to_string());
-    metadata.insert(
-        "source_artifact_id".into(),
-        source_artifact_id(&content_hash),
-    );
+    let source_artifact_id = source_artifact_id(&content_hash);
+    metadata.insert("source_artifact_id".into(), source_artifact_id.clone());
     metadata.insert("source_type".into(), "local_file".into());
     metadata.insert("storage_mode".into(), "reference_in_place".into());
     metadata.insert("original_path".into(), path.display().to_string());
@@ -378,18 +393,39 @@ fn document_from_parsed(
         SECTION_SPANS_KEY.into(),
         serde_json::to_string(&section_spans).unwrap_or_else(|_| "[]".into()),
     );
+    metadata.insert(
+        SECTION_HIERARCHY_SPANS_KEY.into(),
+        serde_json::to_string(&section_hierarchy_spans).unwrap_or_else(|_| "[]".into()),
+    );
+    metadata.insert(
+        PARAGRAPH_SPANS_KEY.into(),
+        serde_json::to_string(&paragraph_spans).unwrap_or_else(|_| "[]".into()),
+    );
+    let text_len = text.chars().count();
     let anchor = SourceAnchor {
         id: format!("{doc_id}:document"),
         document_id: doc_id.clone(),
         chunk_id: None,
+        source_artifact_id: Some(source_artifact_id),
         path: path.display().to_string(),
         content_hash: content_hash.clone(),
         start: 0,
-        end: text.chars().count(),
+        end: text_len,
+        byte_start: Some(0),
+        byte_end: Some(text.len()),
+        char_start: Some(0),
+        char_end: Some(text_len),
         page: page_spans
             .first()
             .and_then(|span| span.value.parse::<usize>().ok()),
         section: section_spans.first().map(|span| span.value.clone()),
+        section_hierarchy: section_hierarchy_spans
+            .first()
+            .map(|span| split_hierarchy(&span.value))
+            .unwrap_or_default(),
+        paragraph_index: paragraph_spans
+            .first()
+            .and_then(|span| span.value.parse::<usize>().ok()),
         parser_version: PARSER_VERSION,
     };
     Document {
@@ -446,18 +482,59 @@ fn source_anchor_for_chunk(
                 .and_then(|value| value.parse().ok())
         })
         .unwrap_or(PARSER_VERSION);
+    let source_artifact_id = document.metadata.get("source_artifact_id").cloned();
+    let (byte_start, byte_end) = byte_offsets_for_char_span(&document.text, start, end);
     Some(SourceAnchor {
         id: format!("{chunk_id}:anchor"),
         document_id: document.id.clone(),
         chunk_id: Some(chunk_id.to_string()),
+        source_artifact_id,
         path,
         content_hash,
         start,
         end,
+        byte_start: Some(byte_start),
+        byte_end: Some(byte_end),
+        char_start: Some(start),
+        char_end: Some(end),
         page: span_value_at::<usize>(&document.metadata, PAGE_SPANS_KEY, start),
         section: span_value_at::<String>(&document.metadata, SECTION_SPANS_KEY, start),
+        section_hierarchy: span_value_at::<String>(
+            &document.metadata,
+            SECTION_HIERARCHY_SPANS_KEY,
+            start,
+        )
+        .map(|value| split_hierarchy(&value))
+        .unwrap_or_default(),
+        paragraph_index: span_value_at::<usize>(&document.metadata, PARAGRAPH_SPANS_KEY, start),
         parser_version,
     })
+}
+
+fn byte_offsets_for_char_span(text: &str, start: usize, end: usize) -> (usize, usize) {
+    (
+        byte_offset_for_char(text, start),
+        byte_offset_for_char(text, end),
+    )
+}
+
+fn byte_offset_for_char(text: &str, offset: usize) -> usize {
+    if offset == 0 {
+        return 0;
+    }
+    text.char_indices()
+        .nth(offset)
+        .map(|(byte, _)| byte)
+        .unwrap_or(text.len())
+}
+
+fn split_hierarchy(value: &str) -> Vec<String> {
+    value
+        .split(" > ")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn source_artifact_id(file_hash: &str) -> String {
@@ -797,12 +874,15 @@ fn parse_text(raw: &str, content_hash: String, page_aware: bool) -> ParsedText {
             value: "1".into(),
         });
     }
-    let section_spans = derive_section_spans(&text);
+    let (section_spans, section_hierarchy_spans) = derive_section_spans(&text);
+    let paragraph_spans = derive_paragraph_spans(&text);
     ParsedText {
         text,
         content_hash,
         page_spans,
         section_spans,
+        section_hierarchy_spans,
+        paragraph_spans,
     }
 }
 
@@ -819,44 +899,82 @@ fn append_capped(target: &mut String, value: &str) {
     target.extend(value.chars().take(remaining));
 }
 
-fn derive_section_spans(text: &str) -> Vec<TextSpan> {
-    let mut headings = Vec::<(usize, String)>::new();
+fn derive_section_spans(text: &str) -> (Vec<TextSpan>, Vec<TextSpan>) {
+    let mut headings = Vec::<(usize, String, Vec<String>)>::new();
+    let mut hierarchy = Vec::<String>::new();
     let mut offset = 0usize;
     for line in text.lines() {
-        if let Some(label) = heading_label(line) {
-            headings.push((offset, label));
+        if let Some((level, label)) = heading_label(line) {
+            let level = level.max(1);
+            if hierarchy.len() >= level {
+                hierarchy.truncate(level - 1);
+            }
+            hierarchy.push(label.clone());
+            headings.push((offset, label, hierarchy.clone()));
         }
         offset += line.chars().count() + 1;
     }
     if headings.is_empty() && !text.is_empty() {
-        return vec![TextSpan {
+        let span = TextSpan {
             start: 0,
             end: text.chars().count(),
             value: "document".into(),
-        }];
+        };
+        return (vec![span.clone()], vec![span]);
     }
     let end_of_text = text.chars().count();
-    let mut spans = Vec::new();
-    for (index, (start, label)) in headings.iter().enumerate() {
+    let mut section_spans = Vec::new();
+    let mut hierarchy_spans = Vec::new();
+    for (index, (start, label, hierarchy)) in headings.iter().enumerate() {
         let end = headings
             .get(index + 1)
-            .map(|(next, _)| *next)
+            .map(|(next, _, _)| *next)
             .unwrap_or(end_of_text);
-        spans.push(TextSpan {
+        section_spans.push(TextSpan {
             start: *start,
             end,
             value: label.clone(),
+        });
+        hierarchy_spans.push(TextSpan {
+            start: *start,
+            end,
+            value: hierarchy.join(" > "),
+        });
+    }
+    (section_spans, hierarchy_spans)
+}
+
+fn derive_paragraph_spans(text: &str) -> Vec<TextSpan> {
+    let mut spans = Vec::new();
+    let mut offset = 0usize;
+    for line in text.lines() {
+        let line_len = line.chars().count();
+        if !line.trim().is_empty() {
+            spans.push(TextSpan {
+                start: offset,
+                end: offset + line_len,
+                value: (spans.len() + 1).to_string(),
+            });
+        }
+        offset += line_len + 1;
+    }
+    if spans.is_empty() && !text.is_empty() {
+        spans.push(TextSpan {
+            start: 0,
+            end: text.chars().count(),
+            value: "1".into(),
         });
     }
     spans
 }
 
-fn heading_label(line: &str) -> Option<String> {
+fn heading_label(line: &str) -> Option<(usize, String)> {
     let trimmed = line.trim();
-    if let Some(label) = trimmed.strip_prefix("#") {
-        let label = label.trim_matches('#').trim();
+    let hashes = trimmed.chars().take_while(|char| *char == '#').count();
+    if hashes > 0 && trimmed.chars().nth(hashes).is_some_and(char::is_whitespace) {
+        let label = trimmed[hashes..].trim();
         if !label.is_empty() {
-            return Some(label.chars().take(96).collect());
+            return Some((hashes, label.chars().take(96).collect()));
         }
     }
     for prefix in [
@@ -876,7 +994,7 @@ fn heading_label(line: &str) -> Option<String> {
                 .unwrap_or(rest)
                 .trim();
             if !name.is_empty() {
-                return Some(format!("{} {}", prefix.trim_end(), name));
+                return Some((1, format!("{} {}", prefix.trim_end(), name)));
             }
         }
     }

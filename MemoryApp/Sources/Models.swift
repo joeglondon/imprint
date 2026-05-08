@@ -149,12 +149,19 @@ struct SourceAnchor: Codable, Equatable, Identifiable {
     var id: String
     var documentId: String
     var chunkId: String?
+    var sourceArtifactId: String?
     var path: String
     var contentHash: String
     var start: Int
     var end: Int
+    var byteStart: Int?
+    var byteEnd: Int?
+    var charStart: Int?
+    var charEnd: Int?
     var page: Int?
     var section: String?
+    var sectionHierarchy: [String]
+    var paragraphIndex: Int?
     var parserVersion: UInt32
 }
 

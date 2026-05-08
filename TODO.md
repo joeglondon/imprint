@@ -32,8 +32,9 @@ Already implemented or partially implemented:
 - [x] Source artifacts are persisted as first-class provenance records with stable file-hash IDs for local imports.
 - [x] Local imports keep a hidden managed source copy and reconcile moves/renames by content hash.
 - [x] Surf/open/expand results carry durable source open targets for local offsets, Markdown headings, PDF pages, and web URLs.
-- [x] Rust tests pass as of 2026-05-06.
-- [x] macOS build passes as of 2026-05-06.
+- [x] Source anchors carry source artifact IDs, explicit byte/character offsets, section hierarchy, and paragraph index metadata.
+- [x] Rust tests pass as of 2026-05-08.
+- [x] macOS build passes as of 2026-05-08.
 
 Important gaps:
 
@@ -241,10 +242,10 @@ Goal: make exact recall trustworthy, deep-linkable, and reversible.
   - [x] browser URL/archive location
 - [ ] Improve `SourceAnchor` precision:
   - [ ] rendered page metadata
-  - [ ] section hierarchy
-  - [ ] paragraph index
-  - [ ] byte offsets plus character offsets
-  - [ ] source artifact ID
+  - [x] section hierarchy
+  - [x] paragraph index
+  - [x] byte offsets plus character offsets
+  - [x] source artifact ID
 - [ ] Add provenance inspector UI for every hit/chunk/document.
 - [ ] Add source trust policy:
   - [ ] local source

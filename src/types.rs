@@ -98,14 +98,28 @@ pub struct SourceAnchor {
     pub document_id: DocumentId,
     #[serde(default)]
     pub chunk_id: Option<ChunkId>,
+    #[serde(default)]
+    pub source_artifact_id: Option<SourceArtifactId>,
     pub path: String,
     pub content_hash: String,
     pub start: usize,
     pub end: usize,
     #[serde(default)]
+    pub byte_start: Option<usize>,
+    #[serde(default)]
+    pub byte_end: Option<usize>,
+    #[serde(default)]
+    pub char_start: Option<usize>,
+    #[serde(default)]
+    pub char_end: Option<usize>,
+    #[serde(default)]
     pub page: Option<usize>,
     #[serde(default)]
     pub section: Option<String>,
+    #[serde(default)]
+    pub section_hierarchy: Vec<String>,
+    #[serde(default)]
+    pub paragraph_index: Option<usize>,
     pub parser_version: u32,
 }
 

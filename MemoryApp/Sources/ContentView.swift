@@ -776,6 +776,15 @@ private struct MapInspector: View {
         if let section = anchor.section {
             parts.append(section)
         }
+        if !anchor.sectionHierarchy.isEmpty {
+            parts.append(anchor.sectionHierarchy.joined(separator: " > "))
+        }
+        if let paragraph = anchor.paragraphIndex {
+            parts.append("para \(paragraph)")
+        }
+        if let byteStart = anchor.byteStart, let byteEnd = anchor.byteEnd {
+            parts.append("bytes \(byteStart)-\(byteEnd)")
+        }
         parts.append("\(anchor.start)-\(anchor.end)")
         return parts.joined(separator: " · ")
     }
