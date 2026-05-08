@@ -163,6 +163,10 @@ enum CortexCommand {
         #[arg(long, default_value_t = crate::training::DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE)]
         minimum_score: f64,
     },
+    EvalHarness {
+        #[arg(long, default_value_t = crate::training::DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE)]
+        minimum_score: f64,
+    },
     Activate {
         #[arg(long, default_value_t = crate::training::DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE)]
         minimum_score: f64,
@@ -426,6 +430,19 @@ pub fn run() -> anyhow::Result<()> {
                     .as_ref()
                     .context("compile did not return adapter state")?;
                 let report = crate::training::evaluate_cortex_adapter(
+                    store.root(),
+                    &adapter_state.current_source_dataset_hash,
+                    minimum_score,
+                )?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
+            CortexCommand::EvalHarness { minimum_score } => {
+                let compile = crate::app::compile_memory_brain(store.root())?;
+                let adapter_state = compile
+                    .adapter_state
+                    .as_ref()
+                    .context("compile did not return adapter state")?;
+                let report = crate::training::run_phase13_evaluation_harness(
                     store.root(),
                     &adapter_state.current_source_dataset_hash,
                     minimum_score,

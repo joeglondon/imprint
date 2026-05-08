@@ -118,6 +118,20 @@ fn call_tool(store_root: &Path, params: Value) -> anyhow::Result<Value> {
                     .unwrap_or(crate::training::DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE),
             )?)?
         }
+        "memory_evaluation_harness" => {
+            let compile = crate::app::compile_memory_brain(store_root)?;
+            let adapter_state = compile
+                .adapter_state
+                .as_ref()
+                .context("compile did not return adapter state")?;
+            serde_json::to_value(crate::training::run_phase13_evaluation_harness(
+                store_root,
+                &adapter_state.current_source_dataset_hash,
+                args.get("minimum_score")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(crate::training::DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE),
+            )?)?
+        }
         "memory_open" => {
             let node = node_arg(&args)?;
             serde_json::to_value(crate::app::surf_open(store_root, &node)?)?
@@ -601,6 +615,14 @@ fn tools() -> Vec<Value> {
         tool(
             "memory_cortex_eval",
             "Evaluate the current trained adapter against cortex activation gates.",
+            json!({
+                "type": "object",
+                "properties": { "minimum_score": { "type": "number" } }
+            }),
+        ),
+        tool(
+            "memory_evaluation_harness",
+            "Run the full phase 13 evaluation harness over eval sets, baselines, gates, fixtures, and metric history.",
             json!({
                 "type": "object",
                 "properties": { "minimum_score": { "type": "number" } }

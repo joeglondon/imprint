@@ -100,6 +100,40 @@ pub struct CortexTrainingDatasetSummary {
     pub redacted_records: usize,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct EvaluationSetCoverage {
+    pub name: String,
+    pub records: usize,
+    pub source_ref_records: usize,
+    pub anchor_records: usize,
+    pub present: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct BaselineComparison {
+    pub name: String,
+    pub score: f64,
+    pub records: usize,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Phase13EvaluationHarnessReport {
+    pub status: String,
+    pub evaluated_at: u64,
+    pub dataset_summary: CortexTrainingDatasetSummary,
+    pub eval_sets: BTreeMap<String, EvaluationSetCoverage>,
+    pub baselines: BTreeMap<String, BaselineComparison>,
+    pub synthetic_fixture_path: String,
+    pub synthetic_fixture_records: usize,
+    pub regression_trace_fixture_path: String,
+    pub regression_trace_records: usize,
+    pub metrics_history_path: String,
+    pub adapter_activation_gate: bool,
+    pub recursive_mas_default_gate: bool,
+    pub failure_reasons: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CortexTrainingExportContext {
     pub memory: PersistedMemory,
@@ -146,6 +180,97 @@ pub fn summarize_training_dataset(
         records.extend(training_records_for_split(training_dir, split)?);
     }
     Ok(dataset_summary(&records))
+}
+
+pub fn run_phase13_evaluation_harness(
+    store_root: &Path,
+    current_source_dataset_hash: &str,
+    minimum_adapter_score: f64,
+) -> anyhow::Result<Phase13EvaluationHarnessReport> {
+    let evaluated_at = now_millis();
+    let training_dir = store_root.join("training");
+    fs::create_dir_all(&training_dir)
+        .with_context(|| format!("creating training directory {}", training_dir.display()))?;
+    let mut records = training_records_for_split(&training_dir, "eval")?;
+    if records.is_empty() {
+        records = training_records_for_split(&training_dir, "test")?;
+    }
+    if records.is_empty() {
+        records = training_records_for_split(&training_dir, "train")?;
+    }
+    backfill_missing_eval_tasks(&training_dir, &mut records)?;
+
+    let all_records = ["train", "eval", "test"]
+        .into_iter()
+        .map(|split| training_records_for_split(&training_dir, split))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let dataset_summary = dataset_summary(&all_records);
+    let eval_sets = phase13_eval_set_coverage(&records);
+    let synthetic_fixture_path = write_phase13_synthetic_fixture(&training_dir)?;
+    let regression_trace_fixture_path =
+        write_phase13_regression_trace_fixture(&training_dir, &records)?;
+    let synthetic_fixture_records = count_jsonl_records(&synthetic_fixture_path)?;
+    let regression_trace_records = count_jsonl_records(&regression_trace_fixture_path)?;
+
+    let adapter_eval = evaluate_cortex_adapter(
+        store_root,
+        current_source_dataset_hash,
+        minimum_adapter_score,
+    )?;
+    let baselines = phase13_baseline_comparisons(&records, &adapter_eval);
+    let recursive_mas_default_gate = recursive_mas_default_gate(&baselines);
+    let adapter_activation_gate = adapter_eval.passed;
+
+    let mut failure_reasons = Vec::new();
+    for coverage in eval_sets.values() {
+        if !coverage.present {
+            failure_reasons.push(format!("missing eval set: {}", coverage.name));
+        }
+    }
+    if !adapter_activation_gate {
+        failure_reasons.push(
+            adapter_eval
+                .failure_reason
+                .clone()
+                .unwrap_or_else(|| "adapter activation eval gate did not pass".into()),
+        );
+    }
+    if !recursive_mas_default_gate {
+        failure_reasons.push(
+            "latent RecursiveMAS remains disabled until it beats the text/tool recursive baseline"
+                .into(),
+        );
+    }
+    let metrics_history_path = append_phase13_metrics_history(
+        &training_dir,
+        evaluated_at,
+        &eval_sets,
+        &baselines,
+        adapter_activation_gate,
+        recursive_mas_default_gate,
+    )?;
+    Ok(Phase13EvaluationHarnessReport {
+        status: if failure_reasons.is_empty() {
+            "passed".into()
+        } else {
+            "blocked".into()
+        },
+        evaluated_at,
+        dataset_summary,
+        eval_sets,
+        baselines,
+        synthetic_fixture_path: synthetic_fixture_path.display().to_string(),
+        synthetic_fixture_records,
+        regression_trace_fixture_path: regression_trace_fixture_path.display().to_string(),
+        regression_trace_records,
+        metrics_history_path: metrics_history_path.display().to_string(),
+        adapter_activation_gate,
+        recursive_mas_default_gate,
+        failure_reasons,
+    })
 }
 
 pub fn training_source_hash(training_dir: &Path) -> anyhow::Result<String> {
@@ -1394,6 +1519,313 @@ fn route_region_baseline_score(records: &[serde_json::Value]) -> f64 {
     ratio(1, route_targets.len())
 }
 
+fn phase13_eval_set_coverage(
+    records: &[serde_json::Value],
+) -> BTreeMap<String, EvaluationSetCoverage> {
+    let specs = [
+        ("route_accuracy", &["query_to_region"][..]),
+        ("source_family_selection", &["query_to_source_family"][..]),
+        ("exact_anchor_recovery", &["chunk_to_semantic_address"][..]),
+        (
+            "citation_correctness",
+            &["snippet_set_to_citation_boundary"][..],
+        ),
+        (
+            "weak_evidence_detection",
+            &["weak_evidence_to_next_action", "recursive_sufficiency_eval"][..],
+        ),
+        ("web_needed_decisions", &["web_needed_or_not"][..]),
+        (
+            "deletion_staleness_behavior",
+            &["deleted_or_stale_memory_to_caution"][..],
+        ),
+        (
+            "token_tool_call_efficiency",
+            &["recursive_efficiency_eval", "recursive_token_usage_eval"][..],
+        ),
+    ];
+    specs
+        .into_iter()
+        .map(|(name, tasks)| {
+            let matching = records
+                .iter()
+                .filter(|record| {
+                    record
+                        .get("task")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|task| tasks.contains(&task))
+                })
+                .collect::<Vec<_>>();
+            let source_ref_records = matching
+                .iter()
+                .filter(|record| json_array_len(record, "source_refs") > 0)
+                .count();
+            let anchor_records = matching
+                .iter()
+                .filter(|record| json_array_len(record, "anchor_ids") > 0)
+                .count();
+            (
+                name.into(),
+                EvaluationSetCoverage {
+                    name: name.into(),
+                    records: matching.len(),
+                    source_ref_records,
+                    anchor_records,
+                    present: !matching.is_empty(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn phase13_baseline_comparisons(
+    records: &[serde_json::Value],
+    adapter_eval: &CortexAdapterEvalReport,
+) -> BTreeMap<String, BaselineComparison> {
+    let route_records = task_records(records, "query_to_region");
+    let vector_records = task_records(records, "chunk_to_semantic_address");
+    let tool_records = task_records(records, "query_to_tool_plan");
+    let recursive_records = records
+        .iter()
+        .filter(|record| {
+            record
+                .get("task")
+                .and_then(|value| value.as_str())
+                .is_some_and(|task| task.starts_with("recursive_"))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let text_recursive_score = task_gate_score(&recursive_records);
+    let latent_recursive_score = records
+        .iter()
+        .filter(|record| {
+            record.get("task").and_then(|value| value.as_str()) == Some("recursive_role_trace")
+        })
+        .filter(|record| {
+            record
+                .get("target")
+                .and_then(|value| value.as_str())
+                .is_some_and(|target| target.contains("latent_status:research_only"))
+        })
+        .count();
+    let latent_recursive_records = task_records(records, "recursive_role_trace").len();
+    BTreeMap::from([
+        (
+            "lexical_map_routing".into(),
+            BaselineComparison {
+                name: "lexical_map_routing".into(),
+                score: route_region_baseline_score(records),
+                records: route_records.len(),
+                status: "deterministic_baseline".into(),
+            },
+        ),
+        (
+            "vector_only_routing".into(),
+            BaselineComparison {
+                name: "vector_only_routing".into(),
+                score: task_gate_score(&vector_records),
+                records: vector_records.len(),
+                status: "source_anchor_proxy".into(),
+            },
+        ),
+        (
+            "cortex_index_routing".into(),
+            BaselineComparison {
+                name: "cortex_index_routing".into(),
+                score: task_gate_score(&route_records),
+                records: route_records.len(),
+                status: "cortex_eval_set".into(),
+            },
+        ),
+        (
+            "base_model_planner".into(),
+            BaselineComparison {
+                name: "base_model_planner".into(),
+                score: task_gate_score(&tool_records),
+                records: tool_records.len(),
+                status: "tool_plan_proxy".into(),
+            },
+        ),
+        (
+            "adapted_model_planner".into(),
+            BaselineComparison {
+                name: "adapted_model_planner".into(),
+                score: adapter_eval.score,
+                records: adapter_eval.records,
+                status: if adapter_eval.passed {
+                    "passed_activation_gate"
+                } else {
+                    "blocked_or_missing_adapter"
+                }
+                .into(),
+            },
+        ),
+        (
+            "text_recursive_loop".into(),
+            BaselineComparison {
+                name: "text_recursive_loop".into(),
+                score: text_recursive_score,
+                records: recursive_records.len(),
+                status: "text_tool_trace_eval".into(),
+            },
+        ),
+        (
+            "latent_recursive_link_loop".into(),
+            BaselineComparison {
+                name: "latent_recursive_link_loop".into(),
+                score: ratio(latent_recursive_score, latent_recursive_records),
+                records: latent_recursive_records,
+                status: "research_only_not_default".into(),
+            },
+        ),
+    ])
+}
+
+fn task_records(records: &[serde_json::Value], task: &str) -> Vec<serde_json::Value> {
+    records
+        .iter()
+        .filter(|record| record.get("task").and_then(|value| value.as_str()) == Some(task))
+        .cloned()
+        .collect()
+}
+
+fn task_gate_score(records: &[serde_json::Value]) -> f64 {
+    ratio(
+        records
+            .iter()
+            .filter(|record| eval_record_passes_gate(record))
+            .count(),
+        records.len(),
+    )
+}
+
+fn recursive_mas_default_gate(baselines: &BTreeMap<String, BaselineComparison>) -> bool {
+    let text = baselines
+        .get("text_recursive_loop")
+        .map(|baseline| baseline.score)
+        .unwrap_or_default();
+    let latent = baselines
+        .get("latent_recursive_link_loop")
+        .map(|baseline| baseline.score)
+        .unwrap_or_default();
+    let latent_records = baselines
+        .get("latent_recursive_link_loop")
+        .map(|baseline| baseline.records)
+        .unwrap_or_default();
+    latent_records >= 5 && latent > text
+}
+
+fn write_phase13_synthetic_fixture(training_dir: &Path) -> anyhow::Result<PathBuf> {
+    let fixtures_dir = training_dir.join("fixtures");
+    fs::create_dir_all(&fixtures_dir)
+        .with_context(|| format!("creating fixture directory {}", fixtures_dir.display()))?;
+    let path = fixtures_dir.join("synthetic_phase13.jsonl");
+    let records = [
+        json!({
+            "task": "query_to_region",
+            "input": "Where are the sourdough starter notes?",
+            "target": "route_region:synthetic-kitchen-notes",
+            "source_refs": ["imprint://synthetic/document/sourdough"],
+            "anchor_ids": ["synthetic-anchor-sourdough"],
+        }),
+        json!({
+            "task": "weak_evidence_to_next_action",
+            "input": "A summary mentions a date but no anchor is present.",
+            "target": "weak_evidence:search_original_sources_before_answering",
+            "source_refs": ["imprint://synthetic/document/research-log"],
+            "anchor_ids": [],
+        }),
+        json!({
+            "task": "web_needed_or_not",
+            "input": "The user asks for today's API pricing.",
+            "target": "web_search_needed:mutable_current_fact",
+            "source_refs": ["imprint://synthetic/policy/current-facts"],
+            "anchor_ids": [],
+        }),
+    ];
+    write_jsonl(&path, &records)?;
+    Ok(path)
+}
+
+fn write_phase13_regression_trace_fixture(
+    training_dir: &Path,
+    records: &[serde_json::Value],
+) -> anyhow::Result<PathBuf> {
+    let fixtures_dir = training_dir.join("fixtures");
+    fs::create_dir_all(&fixtures_dir)
+        .with_context(|| format!("creating fixture directory {}", fixtures_dir.display()))?;
+    let path = fixtures_dir.join("regression_traces.jsonl");
+    let mut trace_records = records
+        .iter()
+        .filter(|record| {
+            record.get("source_type").and_then(|value| value.as_str()) == Some("chat_context_trace")
+                || record
+                    .get("target")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|target| target.contains("reuse_successful_trace"))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    trace_records.sort_by(|left, right| {
+        left.get("id")
+            .and_then(|value| value.as_str())
+            .cmp(&right.get("id").and_then(|value| value.as_str()))
+    });
+    write_jsonl(&path, &trace_records)?;
+    Ok(path)
+}
+
+fn append_phase13_metrics_history(
+    training_dir: &Path,
+    evaluated_at: u64,
+    eval_sets: &BTreeMap<String, EvaluationSetCoverage>,
+    baselines: &BTreeMap<String, BaselineComparison>,
+    adapter_activation_gate: bool,
+    recursive_mas_default_gate: bool,
+) -> anyhow::Result<PathBuf> {
+    let metrics_dir = training_dir.join("metrics");
+    fs::create_dir_all(&metrics_dir)
+        .with_context(|| format!("creating metrics directory {}", metrics_dir.display()))?;
+    let path = metrics_dir.join("phase13_eval_history.jsonl");
+    let payload = json!({
+        "evaluated_at": evaluated_at,
+        "eval_sets": eval_sets,
+        "baselines": baselines,
+        "adapter_activation_gate": adapter_activation_gate,
+        "recursive_mas_default_gate": recursive_mas_default_gate,
+    });
+    let mut line = serde_json::to_string(&payload)?;
+    line.push('\n');
+    use std::io::Write;
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?
+        .write_all(line.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
+}
+
+fn count_jsonl_records(path: &Path) -> anyhow::Result<usize> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    Ok(fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count())
+}
+
+fn json_array_len(record: &serde_json::Value, key: &str) -> usize {
+    record
+        .get(key)
+        .and_then(|value| value.as_array())
+        .map(Vec::len)
+        .unwrap_or_default()
+}
+
 fn adapter_output_hash(output: &Path) -> anyhow::Result<Option<String>> {
     if !output.exists() {
         return Ok(None);
@@ -2439,4 +2871,250 @@ fn stable_hash(text: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(text.as_bytes());
     format!("{:x}", digest.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn phase13_harness_covers_eval_sets_baselines_and_history() {
+        let root = std::env::temp_dir().join(format!(
+            "imprint-phase13-harness-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let training_dir = root.join("training");
+        fs::create_dir_all(&training_dir).expect("training dir");
+        let source_refs = vec!["imprint://document/synthetic".to_string()];
+        let anchor_ids = vec!["synthetic-anchor".to_string()];
+        let records = vec![
+            training_example(
+                "query_to_region",
+                "eval",
+                "synthetic:route",
+                "Route the synthetic memory query.".into(),
+                "route_region:synthetic-region".into(),
+                &[],
+                source_refs.clone(),
+                anchor_ids.clone(),
+                "synthetic_fixture",
+                "shared_project",
+                false,
+            ),
+            training_example(
+                "query_to_source_family",
+                "eval",
+                "synthetic:family",
+                "Choose source family.".into(),
+                "source_family:synthetic-notes".into(),
+                &[],
+                source_refs.clone(),
+                anchor_ids.clone(),
+                "synthetic_fixture",
+                "shared_project",
+                false,
+            ),
+            training_example(
+                "query_to_tool_plan",
+                "eval",
+                "synthetic:tool",
+                "Plan source-grounded retrieval.".into(),
+                "memory_search -> memory_expand -> cite_source_anchor".into(),
+                &[],
+                source_refs.clone(),
+                anchor_ids.clone(),
+                "synthetic_fixture",
+                "shared_project",
+                false,
+            ),
+            training_example(
+                "chunk_to_semantic_address",
+                "eval",
+                "synthetic:anchor",
+                "Find exact source address.".into(),
+                "region:synthetic-region;document:synthetic-doc;anchor:synthetic-anchor".into(),
+                &[],
+                source_refs.clone(),
+                anchor_ids.clone(),
+                "synthetic_fixture",
+                "shared_project",
+                false,
+            ),
+            training_example(
+                "weak_evidence_to_next_action",
+                "eval",
+                "synthetic:weak",
+                "Evidence has no source anchor.".into(),
+                "weak_evidence:search_original_sources_before_answering".into(),
+                &[],
+                source_refs.clone(),
+                anchor_ids.clone(),
+                "synthetic_fixture",
+                "shared_project",
+                false,
+            ),
+            training_example(
+                "snippet_set_to_citation_boundary",
+                "eval",
+                "synthetic:citation",
+                "Decide citation boundary.".into(),
+                "cite_anchor_ids:synthetic-anchor;do_not_cite:unanchored-summary".into(),
+                &[],
+                source_refs.clone(),
+                anchor_ids.clone(),
+                "synthetic_fixture",
+                "shared_project",
+                false,
+            ),
+            training_example(
+                "deleted_or_stale_memory_to_caution",
+                "eval",
+                "synthetic:stale",
+                "A memory was deleted or stale.".into(),
+                "caution:verify_before_using".into(),
+                &[],
+                source_refs.clone(),
+                anchor_ids.clone(),
+                "synthetic_fixture",
+                "shared_project",
+                true,
+            ),
+            training_example(
+                "web_needed_or_not",
+                "eval",
+                "synthetic:web",
+                "The question needs current facts.".into(),
+                "web_search_needed:mutable_current_fact".into(),
+                &[],
+                source_refs.clone(),
+                anchor_ids.clone(),
+                "synthetic_fixture",
+                "shared_project",
+                false,
+            ),
+            training_example(
+                "recursive_role_trace",
+                "eval",
+                "synthetic:recursive-role",
+                "Trace recursive roles.".into(),
+                "roles:planner,retriever,critic,solver;latent_status:research_only".into(),
+                &[],
+                source_refs.clone(),
+                anchor_ids.clone(),
+                "chat_context_trace",
+                "shared_project",
+                false,
+            ),
+            training_example(
+                "recursive_sufficiency_eval",
+                "eval",
+                "synthetic:recursive-sufficiency",
+                "Judge sufficiency.".into(),
+                "sufficient:true;cite_anchor_ids:synthetic-anchor".into(),
+                &[],
+                source_refs.clone(),
+                anchor_ids.clone(),
+                "chat_context_trace",
+                "shared_project",
+                false,
+            ),
+            training_example(
+                "recursive_efficiency_eval",
+                "eval",
+                "synthetic:recursive-efficiency",
+                "Judge efficiency.".into(),
+                "efficiency:ok;tool_calls:2;source_grounded:true".into(),
+                &[],
+                source_refs.clone(),
+                anchor_ids.clone(),
+                "chat_context_trace",
+                "shared_project",
+                false,
+            ),
+            training_example(
+                "recursive_region_selection_eval",
+                "eval",
+                "synthetic:recursive-region",
+                "Judge selected refs.".into(),
+                "region_source_selection:ok;selected_refs:imprint://document/synthetic".into(),
+                &[],
+                source_refs.clone(),
+                anchor_ids.clone(),
+                "chat_context_trace",
+                "shared_project",
+                false,
+            ),
+            training_example(
+                "recursive_hallucination_eval",
+                "eval",
+                "synthetic:recursive-hallucination",
+                "Judge hallucination risk.".into(),
+                "hallucination_risk:low;source_anchored:true".into(),
+                &[],
+                source_refs.clone(),
+                anchor_ids.clone(),
+                "chat_context_trace",
+                "shared_project",
+                false,
+            ),
+            training_example(
+                "recursive_token_usage_eval",
+                "eval",
+                "synthetic:recursive-token",
+                "Judge token usage.".into(),
+                "token_usage:lower_if_hidden_state_supported;baseline_tool_calls:2;fallback:text_tool"
+                    .into(),
+                &[],
+                source_refs.clone(),
+                anchor_ids.clone(),
+                "chat_context_trace",
+                "shared_project",
+                false,
+            ),
+        ];
+        write_jsonl(&training_dir.join("synthetic.eval.jsonl"), &records).expect("write eval");
+        let source_hash = training_source_hash(&training_dir).expect("source hash");
+        let adapter_dir = root.join("adapters").join("trained-synthetic");
+        fs::create_dir_all(&adapter_dir).expect("adapter dir");
+        fs::write(
+            adapter_dir.join("adapter_manifest.json"),
+            serde_json::json!({
+                "status": "trained",
+                "adapter_path": adapter_dir.display().to_string(),
+                "source_dataset_hash": source_hash,
+                "adapter_file_hash": "synthetic-hash",
+            })
+            .to_string(),
+        )
+        .expect("manifest");
+
+        let report =
+            run_phase13_evaluation_harness(&root, &source_hash, 0.8).expect("phase 13 harness");
+        assert_eq!(report.status, "blocked");
+        assert!(report.adapter_activation_gate);
+        assert!(!report.recursive_mas_default_gate);
+        assert!(report.eval_sets.values().all(|coverage| coverage.present));
+        assert_eq!(report.synthetic_fixture_records, 3);
+        assert!(report.regression_trace_records >= 5);
+        assert_eq!(
+            report
+                .baselines
+                .get("adapted_model_planner")
+                .expect("adapted baseline")
+                .status,
+            "passed_activation_gate"
+        );
+        assert!(Path::new(&report.metrics_history_path).exists());
+        assert_eq!(
+            training_source_hash(&training_dir).expect("source hash after harness"),
+            source_hash,
+            "fixtures and metric history must not contaminate adapter dataset hash"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
 }

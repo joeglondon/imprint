@@ -407,6 +407,7 @@ Goal: expose imprint as an agent-native memory filesystem.
   - [x] `memory_cortex_train`
   - [x] `memory_cortex_route`
   - [x] `memory_cortex_eval`
+  - [x] `memory_evaluation_harness`
 - [x] Keep `memory_compile` as an alias until clients migrate.
 - [x] Add route-plan output to MCP search tools.
 - [x] Add explicit source-recall tools:
@@ -484,28 +485,28 @@ Goal: make personal latent memory controllable and reversible enough to trust.
 
 Goal: measure whether cortex, adapters, and recursion actually improve outcomes.
 
-- [ ] Build eval sets for:
-  - [ ] route accuracy
-  - [ ] source-family selection
-  - [ ] exact anchor recovery
-  - [ ] citation correctness
-  - [ ] weak evidence detection
-  - [ ] web-needed decisions
-  - [ ] deletion/staleness behavior
-  - [ ] token/tool-call efficiency
-- [ ] Compare baselines:
-  - [ ] lexical map routing
-  - [ ] vector-only routing
-  - [ ] cortex index routing
-  - [ ] base model planner
-  - [ ] adapted model planner
-  - [ ] text recursive loop
-  - [ ] latent RecursiveLink loop
-- [ ] Add regression datasets from real successful traces.
-- [ ] Add synthetic fixtures that do not leak private data.
-- [ ] Track metrics over time.
-- [ ] Gate adapter activation on eval.
-- [ ] Gate RecursiveMAS default enablement on eval.
+- [x] Build eval sets for:
+  - [x] route accuracy
+  - [x] source-family selection
+  - [x] exact anchor recovery
+  - [x] citation correctness
+  - [x] weak evidence detection
+  - [x] web-needed decisions
+  - [x] deletion/staleness behavior
+  - [x] token/tool-call efficiency
+- [x] Compare baselines:
+  - [x] lexical map routing
+  - [x] vector-only routing
+  - [x] cortex index routing
+  - [x] base model planner
+  - [x] adapted model planner
+  - [x] text recursive loop
+  - [x] latent RecursiveLink loop
+- [x] Add regression datasets from real successful traces.
+- [x] Add synthetic fixtures that do not leak private data.
+- [x] Track metrics over time.
+- [x] Gate adapter activation on eval.
+- [x] Gate RecursiveMAS default enablement on eval.
 
 ## Phase 14: Cloud, Sync, And Multi-Device
 

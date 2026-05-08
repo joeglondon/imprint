@@ -9,6 +9,7 @@ Phase 10 exposes imprint as an agent-native memory filesystem. All tools return 
 - `memory_cortex_train({})`: queue/start adapter training for the current source dataset.
 - `memory_cortex_route({ query, max_regions?, max_chunks? })`: route plan with ranked candidates and next source-recall steps.
 - `memory_cortex_eval({ minimum_score? })`: evaluate the trained adapter against activation gates.
+- `memory_evaluation_harness({ minimum_score? })`: run the phase 13 eval harness across eval-set coverage, baseline comparisons, adapter/RecursiveMAS gates, synthetic fixtures, regression traces, and metric history.
 - `memory_compile({})`: compatibility alias for `memory_cortex_compile`.
 
 ## Search And Source Recall

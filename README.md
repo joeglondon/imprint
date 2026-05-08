@@ -220,6 +220,7 @@ Validate cortex training exports:
 ```bash
 python3 training/export_dataset.py --store .imprint
 python3 training/eval_router.py --dataset .imprint/training
+cargo run -- --store .imprint cortex eval-harness
 python3 training/train_mlx_lora.py --model mlx-community/LFM2.5-1.2B-Instruct-8bit --dataset .imprint/training --output .imprint/adapters/lfm-cortex
 ```
 
