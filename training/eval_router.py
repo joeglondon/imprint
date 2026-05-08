@@ -8,13 +8,22 @@ import json
 from pathlib import Path
 
 
-def records(dataset: Path) -> list[dict]:
+def records(dataset: Path) -> tuple[list[dict], list[str]]:
     values: list[dict] = []
+    warnings: list[str] = []
     for path in sorted(dataset.glob("*.eval.jsonl")):
         for line in path.read_text().splitlines():
             if line.strip():
                 values.append(json.loads(line))
-    return values
+    if values:
+        return values, warnings
+    for path in sorted(dataset.glob("*.test.jsonl")):
+        for line in path.read_text().splitlines():
+            if line.strip():
+                values.append(json.loads(line))
+    if values:
+        warnings.append("No eval records found; evaluated test records instead.")
+    return values, warnings
 
 
 def main() -> None:
@@ -23,9 +32,13 @@ def main() -> None:
     args = parser.parse_args()
 
     dataset = Path(args.dataset)
-    eval_records = records(dataset)
+    eval_records, warnings = records(dataset)
     if not eval_records:
-        print(json.dumps({"records": 0, "baseline_accuracy": 0.0}, indent=2))
+        print(json.dumps({
+            "records": 0,
+            "baseline_accuracy": 0.0,
+            "warnings": warnings + ["No eval or test records found."],
+        }, indent=2))
         return
 
     correct = 0
@@ -67,6 +80,7 @@ def main() -> None:
     print(json.dumps({
         "records": len(eval_records),
         "baseline_accuracy": round(correct / len(eval_records), 4),
+        "warnings": warnings,
     }, indent=2, sort_keys=True))
 
 

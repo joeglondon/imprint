@@ -79,6 +79,9 @@ final class AppState: ObservableObject {
             if let adapterSnapshot = try? RustBridge.loadCortexAdapterSnapshot(storePath: storePath) {
                 applyAdapterSnapshot(adapterSnapshot)
             }
+            if summary.documents > 0 {
+                statusMessage = loadedMemoryStatus(summary: summary, adapterState: cortexAdapterState)
+            }
             loadChatState()
         } catch {
             statusMessage = error.localizedDescription
@@ -297,6 +300,7 @@ final class AppState: ObservableObject {
                 self.applyAdapterSnapshot(adapterSnapshot)
                 self.librarySnapshot = library
                 self.cortexIndex = cortexIndex
+                self.statusMessage = self.loadedMemoryStatus(summary: summary, adapterState: self.cortexAdapterState)
             }
         )
     }
@@ -672,6 +676,14 @@ final class AppState: ObservableObject {
                 self.statusMessage = "Moved back in navigation history."
             }
         )
+    }
+
+    private func loadedMemoryStatus(summary: MemorySummary, adapterState: CortexAdapterState?) -> String {
+        var message = "Memory loaded: \(summary.documents) docs, \(summary.chunks) chunks."
+        if let adapterState {
+            message += " Adapter \(adapterState.freshness)."
+        }
+        return message
     }
 
     private func runTask<Result: Sendable>(

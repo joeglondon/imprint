@@ -251,7 +251,73 @@ pub struct LibraryBackupManifest {
     pub schema_version: u32,
     pub created_at: u64,
     pub store_path: String,
+    #[serde(default)]
+    pub original_store_path: Option<String>,
     pub files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum CloudSyncObjectKind {
+    SourceArtifact,
+    ExtractedText,
+    Chunk,
+    Embedding,
+    CortexIndex,
+    DerivedArtifact,
+    AttentionMark,
+    AdapterManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CloudSyncMergePolicy {
+    ContentAddressedImmutable,
+    RebuildFromSource,
+    AppendOnly,
+    LastWriterWinsWithActor,
+    DeviceLocalReference,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CloudSyncPrivacyClass {
+    PrivateUserMemory,
+    SharedProjectMemory,
+    GlobalReferenceMemory,
+    DeviceLocal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudSyncObjectSpec {
+    pub kind: CloudSyncObjectKind,
+    pub namespace: String,
+    pub key_pattern: String,
+    pub includes: Vec<String>,
+    pub dependencies: Vec<CloudSyncObjectKind>,
+    pub content_addressed: bool,
+    pub merge_policy: CloudSyncMergePolicy,
+    pub privacy_class: CloudSyncPrivacyClass,
+    pub notes: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudSyncObjectRecord {
+    pub kind: CloudSyncObjectKind,
+    pub id: String,
+    pub object_key: String,
+    pub content_hash: String,
+    pub updated_at: u64,
+    pub source_refs: Vec<String>,
+    pub depends_on: Vec<String>,
+    pub byte_size: usize,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudSyncObjectModel {
+    pub schema_version: u32,
+    pub generated_at: u64,
+    pub store_path: String,
+    pub object_specs: Vec<CloudSyncObjectSpec>,
+    pub objects: Vec<CloudSyncObjectRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

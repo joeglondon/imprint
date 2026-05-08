@@ -359,6 +359,64 @@ struct LibraryManagementSnapshot: Codable, Equatable {
     var sourceTypeFilters: [SourceTypeFilterSummary]
 }
 
+enum CloudSyncObjectKind: String, Codable, Equatable {
+    case sourceArtifact = "SourceArtifact"
+    case extractedText = "ExtractedText"
+    case chunk = "Chunk"
+    case embedding = "Embedding"
+    case cortexIndex = "CortexIndex"
+    case derivedArtifact = "DerivedArtifact"
+    case attentionMark = "AttentionMark"
+    case adapterManifest = "AdapterManifest"
+}
+
+enum CloudSyncMergePolicy: String, Codable, Equatable {
+    case contentAddressedImmutable = "ContentAddressedImmutable"
+    case rebuildFromSource = "RebuildFromSource"
+    case appendOnly = "AppendOnly"
+    case lastWriterWinsWithActor = "LastWriterWinsWithActor"
+    case deviceLocalReference = "DeviceLocalReference"
+}
+
+enum CloudSyncPrivacyClass: String, Codable, Equatable {
+    case privateUserMemory = "PrivateUserMemory"
+    case sharedProjectMemory = "SharedProjectMemory"
+    case globalReferenceMemory = "GlobalReferenceMemory"
+    case deviceLocal = "DeviceLocal"
+}
+
+struct CloudSyncObjectSpec: Codable, Equatable {
+    var kind: CloudSyncObjectKind
+    var namespace: String
+    var keyPattern: String
+    var includes: [String]
+    var dependencies: [CloudSyncObjectKind]
+    var contentAddressed: Bool
+    var mergePolicy: CloudSyncMergePolicy
+    var privacyClass: CloudSyncPrivacyClass
+    var notes: String
+}
+
+struct CloudSyncObjectRecord: Codable, Equatable, Identifiable {
+    var kind: CloudSyncObjectKind
+    var id: String
+    var objectKey: String
+    var contentHash: String
+    var updatedAt: UInt64
+    var sourceRefs: [String]
+    var dependsOn: [String]
+    var byteSize: Int
+    var metadata: [String: String]
+}
+
+struct CloudSyncObjectModel: Codable, Equatable {
+    var schemaVersion: UInt32
+    var generatedAt: UInt64
+    var storePath: String
+    var objectSpecs: [CloudSyncObjectSpec]
+    var objects: [CloudSyncObjectRecord]
+}
+
 enum SourceOpenTargetKind: String, Codable, Equatable {
     case textOffset = "TextOffset"
     case markdownHeading = "MarkdownHeading"
@@ -412,12 +470,15 @@ struct ImportResult: Codable, Equatable {
     var importedPaths: [String]
     var replacedPaths: [String]
     var skippedPaths: [ImportSkip]
+    var importedDocumentIds: [String]?
+    var replacedDocumentIds: [String]?
     var importedCount: Int
     var replacedCount: Int
     var skippedCount: Int
     var embeddedCount: Int
     var reusedEmbeddingCount: Int
     var adapterState: CortexAdapterState?
+    var adapterJob: CortexAdapterJob?
 }
 
 struct ImportSkip: Codable, Equatable, Identifiable {

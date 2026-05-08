@@ -96,6 +96,34 @@ pub struct CortexRouteProbeResult {
     pub raw_response: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Phase16Check {
+    pub passed: bool,
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Phase16RetrievalMeasurement {
+    pub query: String,
+    pub without_imprint_hits: usize,
+    pub without_imprint_top_score: f32,
+    pub with_imprint_hits: usize,
+    pub with_imprint_top_score: f32,
+    pub with_imprint_cited_anchors: usize,
+    pub cortex_regions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Phase16Report {
+    pub status: String,
+    pub checked_at: u64,
+    pub store_path: String,
+    pub checks: BTreeMap<String, Phase16Check>,
+    pub retrieval_measurement: Phase16RetrievalMeasurement,
+    pub phase13: crate::training::Phase13EvaluationHarnessReport,
+    pub integrity: StoreIntegrityReport,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelConfig {
     pub mode: ModelConnectionMode,
@@ -198,6 +226,10 @@ pub struct ImportResult {
     pub imported_paths: Vec<String>,
     pub replaced_paths: Vec<String>,
     pub skipped_paths: Vec<ImportSkip>,
+    #[serde(default)]
+    pub imported_document_ids: Vec<DocumentId>,
+    #[serde(default)]
+    pub replaced_document_ids: Vec<DocumentId>,
     pub imported_count: usize,
     pub replaced_count: usize,
     pub skipped_count: usize,
@@ -205,6 +237,14 @@ pub struct ImportResult {
     pub reused_embedding_count: usize,
     #[serde(default)]
     pub adapter_state: Option<CortexAdapterState>,
+    #[serde(default)]
+    pub adapter_job: Option<CortexAdapterJob>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdapterTrainingLaunch {
+    InProcess,
+    QueueOnly,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -283,6 +323,18 @@ pub struct OperationProgress {
 }
 
 pub fn ingest_paths(store_root: &Path, paths: &[PathBuf]) -> anyhow::Result<ImportResult> {
+    ingest_paths_with_adapter_launch(store_root, paths, AdapterTrainingLaunch::InProcess)
+}
+
+pub fn ingest_paths_for_cli(store_root: &Path, paths: &[PathBuf]) -> anyhow::Result<ImportResult> {
+    ingest_paths_with_adapter_launch(store_root, paths, AdapterTrainingLaunch::QueueOnly)
+}
+
+fn ingest_paths_with_adapter_launch(
+    store_root: &Path,
+    paths: &[PathBuf],
+    adapter_launch: AdapterTrainingLaunch,
+) -> anyhow::Result<ImportResult> {
     write_progress(store_root, "extract", 0, 1, "Reading selected files")?;
     let store = FileMemoryStore::new(store_root);
     let existing = store.load()?;
@@ -309,6 +361,16 @@ pub fn ingest_paths(store_root: &Path, paths: &[PathBuf]) -> anyhow::Result<Impo
         .iter()
         .map(|document| document.id.clone())
         .collect::<HashSet<_>>();
+    let replaced_document_ids = incoming_documents
+        .iter()
+        .filter(|document| existing_ids.contains(&document.id))
+        .map(|document| document.id.clone())
+        .collect::<Vec<_>>();
+    let imported_document_ids = incoming_documents
+        .iter()
+        .filter(|document| !existing_ids.contains(&document.id))
+        .map(|document| document.id.clone())
+        .collect::<Vec<_>>();
     let replaced_paths = incoming_documents
         .iter()
         .filter(|document| existing_ids.contains(&document.id))
@@ -336,9 +398,16 @@ pub fn ingest_paths(store_root: &Path, paths: &[PathBuf]) -> anyhow::Result<Impo
         "Refreshing cortex adapter data",
     )?;
     let adapter_state = compile_memory_brain(store_root)?.adapter_state;
-    if let Some(state) = adapter_state.as_ref() {
-        let _ = maybe_start_cortex_adapter_training_after_refresh(store_root, &config, state);
-    }
+    let adapter_job = adapter_state.as_ref().and_then(|state| {
+        maybe_start_cortex_adapter_training_after_refresh(
+            store_root,
+            &config,
+            state,
+            matches!(adapter_launch, AdapterTrainingLaunch::InProcess),
+        )
+        .ok()
+        .flatten()
+    });
     write_progress(
         store_root,
         "complete",
@@ -354,13 +423,27 @@ pub fn ingest_paths(store_root: &Path, paths: &[PathBuf]) -> anyhow::Result<Impo
         embedded_count: stats.embedded_count,
         reused_embedding_count: stats.reused_embedding_count,
         adapter_state,
+        adapter_job,
         imported_paths,
         replaced_paths,
         skipped_paths: batch.skipped_paths,
+        imported_document_ids,
+        replaced_document_ids,
     })
 }
 
 pub fn rebuild_memory(store_root: &Path) -> anyhow::Result<ImportResult> {
+    rebuild_memory_with_adapter_launch(store_root, AdapterTrainingLaunch::InProcess)
+}
+
+pub fn rebuild_memory_for_cli(store_root: &Path) -> anyhow::Result<ImportResult> {
+    rebuild_memory_with_adapter_launch(store_root, AdapterTrainingLaunch::QueueOnly)
+}
+
+fn rebuild_memory_with_adapter_launch(
+    store_root: &Path,
+    adapter_launch: AdapterTrainingLaunch,
+) -> anyhow::Result<ImportResult> {
     write_progress(store_root, "load", 0, 1, "Loading existing memory")?;
     let store = FileMemoryStore::new(store_root);
     let memory = store.load()?;
@@ -390,9 +473,16 @@ pub fn rebuild_memory(store_root: &Path) -> anyhow::Result<ImportResult> {
         "Refreshing cortex adapter data",
     )?;
     let adapter_state = compile_memory_brain(store_root)?.adapter_state;
-    if let Some(state) = adapter_state.as_ref() {
-        let _ = maybe_start_cortex_adapter_training_after_refresh(store_root, &config, state);
-    }
+    let adapter_job = adapter_state.as_ref().and_then(|state| {
+        maybe_start_cortex_adapter_training_after_refresh(
+            store_root,
+            &config,
+            state,
+            matches!(adapter_launch, AdapterTrainingLaunch::InProcess),
+        )
+        .ok()
+        .flatten()
+    });
     write_progress(
         store_root,
         "complete",
@@ -405,12 +495,15 @@ pub fn rebuild_memory(store_root: &Path) -> anyhow::Result<ImportResult> {
         imported_paths: Vec::new(),
         replaced_paths: Vec::new(),
         skipped_paths: Vec::new(),
+        imported_document_ids: Vec::new(),
+        replaced_document_ids: Vec::new(),
         imported_count: 0,
         replaced_count: 0,
         skipped_count: deleted_count,
         embedded_count: stats.embedded_count,
         reused_embedding_count: stats.reused_embedding_count,
         adapter_state,
+        adapter_job,
     })
 }
 
@@ -477,10 +570,10 @@ pub fn run_import_queue(
                 item.status = ImportQueueStatus::Succeeded;
                 item.progress_completed = 1;
                 item.imported_document_ids = result
-                    .imported_paths
+                    .imported_document_ids
                     .iter()
-                    .chain(result.replaced_paths.iter())
-                    .map(|path| format!("path:{path}"))
+                    .chain(result.replaced_document_ids.iter())
+                    .cloned()
                     .collect();
             }
             Err(error) => {
@@ -587,14 +680,18 @@ pub fn detect_library_updates(store_root: &Path) -> anyhow::Result<Vec<FileUpdat
     let artifacts = store.list_source_artifacts()?;
     let artifact_hash_counts = artifacts
         .iter()
+        .filter(|artifact| source_artifact_update_path(artifact).is_some())
         .fold(BTreeMap::new(), |mut counts, artifact| {
             *counts.entry(artifact.file_hash.clone()).or_insert(0usize) += 1;
             counts
         });
     for artifact in artifacts {
-        let live_path = Path::new(&artifact.original_path)
+        let Some(update_path) = source_artifact_update_path(&artifact) else {
+            continue;
+        };
+        let live_path = Path::new(update_path)
             .is_file()
-            .then(|| Path::new(&artifact.original_path));
+            .then(|| Path::new(update_path));
         let current_hash = live_path.and_then(|path| file_content_hash(path).ok());
         let candidate_path = seen_hashes
             .get(&artifact.file_hash)
@@ -640,6 +737,23 @@ pub fn detect_library_updates(store_root: &Path) -> anyhow::Result<Vec<FileUpdat
         }
     }
     Ok(updates)
+}
+
+fn source_artifact_update_path(artifact: &SourceArtifact) -> Option<&str> {
+    if !matches!(
+        artifact.storage_mode,
+        SourceStorageMode::ReferenceInPlace
+            | SourceStorageMode::ReferenceWithManagedCopy
+            | SourceStorageMode::ManagedCopy
+    ) {
+        return None;
+    }
+    let path = artifact.original_path.as_str();
+    if path.starts_with("imprint://") || path.starts_with("http://") || path.starts_with("https://")
+    {
+        return None;
+    }
+    Some(path)
 }
 
 pub fn analyze_dedupe_candidates(
@@ -853,7 +967,8 @@ pub fn delete_library_items(
         }
         let refreshed = compile_memory_brain(store_root)?;
         if let Some(state) = refreshed.adapter_state.as_ref() {
-            let _ = maybe_start_cortex_adapter_training_after_refresh(store_root, &config, state);
+            let _ =
+                maybe_start_cortex_adapter_training_after_refresh(store_root, &config, state, true);
         }
     }
     Ok(LibraryDeleteResult {
@@ -878,9 +993,10 @@ pub fn export_library_backup(
     }
     copy_dir_all(store_root, destination)?;
     let manifest = LibraryBackupManifest {
-        schema_version: 1,
+        schema_version: 2,
         created_at: now_millis(),
         store_path: store_root.display().to_string(),
+        original_store_path: Some(store_root.display().to_string()),
         files: list_relative_files(destination)?,
     };
     std::fs::write(
@@ -902,11 +1018,606 @@ pub fn import_library_backup(
             schema_version: 1,
             created_at: now_millis(),
             store_path: source.display().to_string(),
+            original_store_path: Some(source.display().to_string()),
             files: list_relative_files(source)?,
         }
     };
     copy_dir_all(source, store_root)?;
+    let original_store = manifest
+        .original_store_path
+        .as_deref()
+        .unwrap_or(&manifest.store_path);
+    rebase_restored_store_paths(store_root, original_store)?;
     Ok(manifest)
+}
+
+fn rebase_restored_store_paths(store_root: &Path, original_store: &str) -> anyhow::Result<()> {
+    let original_store = original_store.trim();
+    if original_store.is_empty() || original_store == store_root.display().to_string() {
+        return Ok(());
+    }
+    let store = FileMemoryStore::new(store_root);
+    let mut memory = store.load()?;
+    for document in &mut memory.documents {
+        rebase_document_store_paths(document, original_store, store_root);
+    }
+    for chunk in &mut memory.chunks {
+        for key in ["current_path", "managed_path", "managed_copy_path"] {
+            rebase_metadata_path(&mut chunk.metadata, key, original_store, store_root);
+        }
+        rebase_anchor_store_path(&mut chunk.source_anchor, original_store, store_root);
+    }
+    store.save(&memory)?;
+
+    if let Some(mut state) = store.load_cortex_adapter_state()? {
+        state.adapter_path = rebase_optional_path(state.adapter_path, original_store, store_root);
+        state.manifest_path = rebase_optional_path(state.manifest_path, original_store, store_root);
+        store.save_cortex_adapter_state(&state)?;
+    }
+
+    for mut job in store.list_cortex_adapter_jobs(None)? {
+        job.adapter_output_path =
+            rebase_path_string(job.adapter_output_path, original_store, store_root);
+        job.manifest_path = rebase_optional_path(job.manifest_path, original_store, store_root);
+        job.log_path = rebase_optional_path(job.log_path, original_store, store_root);
+        job.command = job
+            .command
+            .into_iter()
+            .map(|part| rebase_path_string(part, original_store, store_root))
+            .collect();
+        job.payload = job
+            .payload
+            .into_iter()
+            .map(|(key, value)| (key, rebase_path_string(value, original_store, store_root)))
+            .collect();
+        store.upsert_cortex_adapter_job(&job)?;
+    }
+
+    rebase_adapter_manifests(store_root, original_store)?;
+    Ok(())
+}
+
+fn rebase_document_store_paths(document: &mut Document, original_store: &str, store_root: &Path) {
+    for key in ["current_path", "managed_path", "managed_copy_path"] {
+        rebase_metadata_path(&mut document.metadata, key, original_store, store_root);
+    }
+    rebase_anchor_store_path(&mut document.source_anchor, original_store, store_root);
+}
+
+fn rebase_metadata_path(
+    metadata: &mut BTreeMap<String, String>,
+    key: &str,
+    original_store: &str,
+    store_root: &Path,
+) {
+    if let Some(value) = metadata.get_mut(key) {
+        let rebased = rebase_path_string(value.clone(), original_store, store_root);
+        *value = rebased;
+    }
+}
+
+fn rebase_anchor_store_path(
+    anchor: &mut Option<SourceAnchor>,
+    original_store: &str,
+    store_root: &Path,
+) {
+    if let Some(anchor) = anchor {
+        anchor.path = rebase_path_string(anchor.path.clone(), original_store, store_root);
+    }
+}
+
+fn rebase_optional_path(
+    value: Option<String>,
+    original_store: &str,
+    store_root: &Path,
+) -> Option<String> {
+    value.map(|value| rebase_path_string(value, original_store, store_root))
+}
+
+fn rebase_path_string(value: String, original_store: &str, store_root: &Path) -> String {
+    let Some(rest) = value.strip_prefix(original_store) else {
+        return value;
+    };
+    if !rest.is_empty() && !rest.starts_with(std::path::MAIN_SEPARATOR) {
+        return value;
+    }
+    format!("{}{}", store_root.display(), rest)
+}
+
+fn rebase_adapter_manifests(store_root: &Path, original_store: &str) -> anyhow::Result<()> {
+    for manifest_path in adapter_manifest_paths(store_root)? {
+        let raw = std::fs::read_to_string(&manifest_path)?;
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        rebase_json_value_strings(&mut value, original_store, store_root);
+        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&value)?)?;
+    }
+    Ok(())
+}
+
+fn rebase_json_value_strings(
+    value: &mut serde_json::Value,
+    original_store: &str,
+    store_root: &Path,
+) {
+    match value {
+        serde_json::Value::String(text) => {
+            *text = rebase_path_string(text.clone(), original_store, store_root);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                rebase_json_value_strings(item, original_store, store_root);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for item in object.values_mut() {
+                rebase_json_value_strings(item, original_store, store_root);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn cloud_sync_object_model(store_root: &Path) -> anyhow::Result<CloudSyncObjectModel> {
+    let store = FileMemoryStore::new(store_root);
+    let memory = store.load()?;
+    let mut objects = Vec::new();
+    let now = now_millis();
+
+    for artifact in store.list_source_artifacts()? {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("source_type".into(), artifact.source_type.clone());
+        metadata.insert(
+            "storage_mode".into(),
+            format!("{:?}", artifact.storage_mode),
+        );
+        if let Some(path) = artifact.current_path.as_ref() {
+            metadata.insert("current_path".into(), path.clone());
+        }
+        if let Some(path) = artifact.managed_path.as_ref() {
+            metadata.insert("managed_path".into(), path.clone());
+        }
+        objects.push(cloud_sync_record(
+            CloudSyncObjectKind::SourceArtifact,
+            artifact.id.clone(),
+            artifact.file_hash.clone(),
+            artifact.imported_at,
+            artifact.provenance.source_refs.clone(),
+            Vec::new(),
+            serde_json::to_vec(&artifact)?.len(),
+            metadata,
+        ));
+    }
+
+    for document in &memory.documents {
+        let source_artifact_id = document
+            .source_anchor
+            .as_ref()
+            .and_then(|anchor| anchor.source_artifact_id.clone())
+            .or_else(|| document.metadata.get("source_artifact_id").cloned());
+        let mut metadata = BTreeMap::new();
+        metadata.insert("title".into(), document.title.clone());
+        metadata.insert(
+            "parser_version".into(),
+            document
+                .parser_version
+                .unwrap_or(PARSER_VERSION)
+                .to_string(),
+        );
+        if let Some(source_artifact_id) = source_artifact_id.as_ref() {
+            metadata.insert("source_artifact_id".into(), source_artifact_id.clone());
+        }
+        objects.push(cloud_sync_record(
+            CloudSyncObjectKind::ExtractedText,
+            document.id.clone(),
+            document
+                .content_hash
+                .clone()
+                .unwrap_or_else(|| hash_text(&document.text)),
+            document
+                .metadata
+                .get("imported_at")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(now),
+            source_artifact_id
+                .iter()
+                .map(|id| cloud_object_key(&CloudSyncObjectKind::SourceArtifact, id))
+                .collect(),
+            source_artifact_id
+                .iter()
+                .map(|id| cloud_object_key(&CloudSyncObjectKind::SourceArtifact, id))
+                .collect(),
+            document.text.len(),
+            metadata,
+        ));
+    }
+
+    for chunk in &memory.chunks {
+        let document_key =
+            cloud_object_key(&CloudSyncObjectKind::ExtractedText, &chunk.document_id);
+        let mut metadata = BTreeMap::new();
+        metadata.insert("document_id".into(), chunk.document_id.clone());
+        metadata.insert("region_id".into(), chunk.region_id.clone());
+        metadata.insert("ordinal".into(), chunk.ordinal.to_string());
+        if let Some(anchor) = chunk.source_anchor.as_ref() {
+            metadata.insert("anchor_id".into(), anchor.id.clone());
+        }
+        objects.push(cloud_sync_record(
+            CloudSyncObjectKind::Chunk,
+            chunk.id.clone(),
+            chunk
+                .metadata
+                .get("content_hash")
+                .cloned()
+                .or_else(|| {
+                    chunk
+                        .source_anchor
+                        .as_ref()
+                        .map(|anchor| anchor.content_hash.clone())
+                })
+                .unwrap_or_else(|| hash_text(&chunk.text)),
+            now,
+            vec![document_key.clone()],
+            vec![document_key.clone()],
+            chunk.text.len(),
+            metadata.clone(),
+        ));
+
+        let embedding_key = format!("{}:embedding", chunk.id);
+        let embedding_hash = hash_text(&serde_json::to_string(&chunk.embedding)?);
+        metadata.insert(
+            "embedding_model".into(),
+            chunk
+                .embedding_model
+                .clone()
+                .unwrap_or_else(|| HASH_EMBEDDING_MODEL.into()),
+        );
+        metadata.insert(
+            "embedding_dimension".into(),
+            chunk
+                .embedding_dimension
+                .unwrap_or(chunk.embedding.len())
+                .to_string(),
+        );
+        objects.push(cloud_sync_record(
+            CloudSyncObjectKind::Embedding,
+            embedding_key,
+            embedding_hash,
+            now,
+            vec![cloud_object_key(&CloudSyncObjectKind::Chunk, &chunk.id)],
+            vec![cloud_object_key(&CloudSyncObjectKind::Chunk, &chunk.id)],
+            chunk.embedding.len() * std::mem::size_of::<f32>(),
+            metadata,
+        ));
+    }
+
+    if let Some(index) = store.load_current_cortex_index()? {
+        let source_refs = index.source_refs.clone();
+        let content_hash = hash_text(&serde_json::to_string(&index)?);
+        objects.push(cloud_sync_record(
+            CloudSyncObjectKind::CortexIndex,
+            index.id.clone(),
+            content_hash,
+            index.created_at,
+            source_refs,
+            index
+                .artifact_ids
+                .iter()
+                .map(|id| cloud_object_key(&CloudSyncObjectKind::DerivedArtifact, id))
+                .collect(),
+            serde_json::to_vec(&index)?.len(),
+            BTreeMap::from([
+                ("corpus_hash".into(), index.corpus_hash),
+                ("schema_version".into(), index.schema_version.to_string()),
+            ]),
+        ));
+    }
+
+    for memory in store.list_derived_memories(None)? {
+        let content_hash = hash_text(&serde_json::to_string(&memory)?);
+        objects.push(cloud_sync_record(
+            CloudSyncObjectKind::DerivedArtifact,
+            memory.id.clone(),
+            content_hash,
+            memory.created_at,
+            memory.provenance.source_refs.clone(),
+            memory
+                .provenance
+                .source_refs
+                .iter()
+                .map(|source_ref| source_ref.to_string())
+                .collect(),
+            serde_json::to_vec(&memory)?.len(),
+            BTreeMap::from([
+                ("kind".into(), format!("{:?}", memory.kind)),
+                ("actor".into(), memory.actor),
+            ]),
+        ));
+    }
+
+    for artifact in store.list_brain_artifacts(None)? {
+        let content_hash = hash_text(&serde_json::to_string(&artifact)?);
+        objects.push(cloud_sync_record(
+            CloudSyncObjectKind::DerivedArtifact,
+            artifact.id.clone(),
+            content_hash,
+            artifact.updated_at,
+            artifact.source_refs.clone(),
+            artifact.source_refs.clone(),
+            serde_json::to_vec(&artifact)?.len(),
+            BTreeMap::from([
+                ("kind".into(), format!("{:?}", artifact.kind)),
+                ("derived".into(), "true".into()),
+            ]),
+        ));
+    }
+
+    for mark in store.list_attention_marks(None)? {
+        let content_hash = hash_text(&serde_json::to_string(&mark)?);
+        objects.push(cloud_sync_record(
+            CloudSyncObjectKind::AttentionMark,
+            mark.id.clone(),
+            content_hash,
+            mark.created_at,
+            vec![mark.target_id.clone()],
+            vec![mark.target_id.clone()],
+            serde_json::to_vec(&mark)?.len(),
+            BTreeMap::from([
+                ("target_kind".into(), format!("{:?}", mark.target_kind)),
+                ("action".into(), format!("{:?}", mark.action)),
+                ("actor".into(), mark.actor),
+            ]),
+        ));
+    }
+
+    for manifest_path in adapter_manifest_paths(store_root)? {
+        let raw = std::fs::read_to_string(&manifest_path)
+            .with_context(|| format!("reading adapter manifest {}", manifest_path.display()))?;
+        let manifest: serde_json::Value = serde_json::from_str(&raw)
+            .with_context(|| format!("parsing adapter manifest {}", manifest_path.display()))?;
+        let source_hash = manifest
+            .get("source_dataset_hash")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let adapter_hash = manifest
+            .get("adapter_file_hash")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| hash_text(&raw));
+        let updated_at = manifest
+            .get("finished_at")
+            .or_else(|| manifest.get("created_at"))
+            .and_then(|value| value.as_u64())
+            .unwrap_or(now);
+        objects.push(cloud_sync_record(
+            CloudSyncObjectKind::AdapterManifest,
+            format!("adapter-manifest:{adapter_hash}"),
+            hash_text(&raw),
+            updated_at,
+            vec![source_hash.clone()],
+            vec![source_hash.clone()],
+            raw.len(),
+            BTreeMap::from([
+                ("path".into(), manifest_path.display().to_string()),
+                ("source_dataset_hash".into(), source_hash),
+            ]),
+        ));
+    }
+
+    objects.sort_by(|left, right| left.object_key.cmp(&right.object_key));
+    Ok(CloudSyncObjectModel {
+        schema_version: 1,
+        generated_at: now,
+        store_path: store_root.display().to_string(),
+        object_specs: cloud_sync_object_specs(),
+        objects,
+    })
+}
+
+fn cloud_sync_object_specs() -> Vec<CloudSyncObjectSpec> {
+    use CloudSyncMergePolicy::*;
+    use CloudSyncObjectKind::*;
+    use CloudSyncPrivacyClass::*;
+    vec![
+        CloudSyncObjectSpec {
+            kind: SourceArtifact,
+            namespace: "source-artifacts".into(),
+            key_pattern: "source-artifacts/{source_artifact_id}.json".into(),
+            includes: vec![
+                "source type".into(),
+                "storage mode".into(),
+                "file hash".into(),
+                "provenance".into(),
+                "managed/original paths".into(),
+            ],
+            dependencies: Vec::new(),
+            content_addressed: true,
+            merge_policy: ContentAddressedImmutable,
+            privacy_class: PrivateUserMemory,
+            notes: "Original binary/file bytes remain in managed local storage until encrypted blob sync is enabled.".into(),
+        },
+        CloudSyncObjectSpec {
+            kind: ExtractedText,
+            namespace: "extracted-text".into(),
+            key_pattern: "extracted-text/{document_id}.json".into(),
+            includes: vec![
+                "document title".into(),
+                "extracted text hash".into(),
+                "parser version".into(),
+                "source anchor".into(),
+            ],
+            dependencies: vec![SourceArtifact],
+            content_addressed: true,
+            merge_policy: RebuildFromSource,
+            privacy_class: PrivateUserMemory,
+            notes: "Extracted text can be rebuilt from durable source artifacts and parser metadata.".into(),
+        },
+        CloudSyncObjectSpec {
+            kind: Chunk,
+            namespace: "chunks".into(),
+            key_pattern: "chunks/{chunk_id}.json".into(),
+            includes: vec![
+                "chunk offsets".into(),
+                "region id".into(),
+                "source anchor".into(),
+                "chunking version".into(),
+            ],
+            dependencies: vec![ExtractedText],
+            content_addressed: true,
+            merge_policy: RebuildFromSource,
+            privacy_class: PrivateUserMemory,
+            notes: "Chunks are source-derived and should stay reproducible across devices.".into(),
+        },
+        CloudSyncObjectSpec {
+            kind: Embedding,
+            namespace: "embeddings".into(),
+            key_pattern: "embeddings/{chunk_id}:{embedding_model}.bin".into(),
+            includes: vec![
+                "embedding provider".into(),
+                "model".into(),
+                "dimension".into(),
+                "embedding text hash".into(),
+            ],
+            dependencies: vec![Chunk],
+            content_addressed: true,
+            merge_policy: RebuildFromSource,
+            privacy_class: PrivateUserMemory,
+            notes: "Embeddings are cacheable derived data and can be dropped when model or dimension changes.".into(),
+        },
+        CloudSyncObjectSpec {
+            kind: CortexIndex,
+            namespace: "cortex-indexes".into(),
+            key_pattern: "cortex-indexes/{corpus_hash}/{index_id}.json".into(),
+            includes: vec![
+                "schema version".into(),
+                "corpus hash".into(),
+                "region sketches".into(),
+                "route examples".into(),
+                "compatibility map projection".into(),
+            ],
+            dependencies: vec![Chunk, DerivedArtifact, AttentionMark],
+            content_addressed: true,
+            merge_policy: RebuildFromSource,
+            privacy_class: PrivateUserMemory,
+            notes: "Cortex indexes are compiler artifacts, not source truth.".into(),
+        },
+        CloudSyncObjectSpec {
+            kind: DerivedArtifact,
+            namespace: "derived-artifacts".into(),
+            key_pattern: "derived-artifacts/{derived_artifact_id}.json".into(),
+            includes: vec![
+                "artifact kind".into(),
+                "body or summary".into(),
+                "source refs".into(),
+                "confidence".into(),
+                "provenance".into(),
+            ],
+            dependencies: vec![SourceArtifact, Chunk],
+            content_addressed: false,
+            merge_policy: LastWriterWinsWithActor,
+            privacy_class: PrivateUserMemory,
+            notes: "Derived artifacts must remain visibly derived and cite original source refs before exact claims.".into(),
+        },
+        CloudSyncObjectSpec {
+            kind: AttentionMark,
+            namespace: "attention-marks".into(),
+            key_pattern: "attention-marks/{mark_id}.json".into(),
+            includes: vec![
+                "target id".into(),
+                "target kind".into(),
+                "action".into(),
+                "actor".into(),
+                "reason".into(),
+                "reverted_at".into(),
+            ],
+            dependencies: Vec::new(),
+            content_addressed: false,
+            merge_policy: AppendOnly,
+            privacy_class: PrivateUserMemory,
+            notes: "Attention marks are reversible events that influence ranking without mutating sources.".into(),
+        },
+        CloudSyncObjectSpec {
+            kind: AdapterManifest,
+            namespace: "adapter-manifests".into(),
+            key_pattern: "adapter-manifests/{source_dataset_hash}/{adapter_hash}.json".into(),
+            includes: vec![
+                "base model".into(),
+                "source dataset hash".into(),
+                "prepared dataset hash".into(),
+                "adapter file hash".into(),
+                "eval score".into(),
+                "status".into(),
+            ],
+            dependencies: vec![CortexIndex],
+            content_addressed: true,
+            merge_policy: DeviceLocalReference,
+            privacy_class: DeviceLocal,
+            notes: "Manifests are syncable metadata; adapter weights stay per-device until encrypted adapter sync is explicitly enabled.".into(),
+        },
+    ]
+}
+
+fn cloud_sync_record(
+    kind: CloudSyncObjectKind,
+    id: String,
+    content_hash: String,
+    updated_at: u64,
+    source_refs: Vec<String>,
+    depends_on: Vec<String>,
+    byte_size: usize,
+    metadata: BTreeMap<String, String>,
+) -> CloudSyncObjectRecord {
+    CloudSyncObjectRecord {
+        object_key: cloud_object_key(&kind, &id),
+        kind,
+        id,
+        content_hash,
+        updated_at,
+        source_refs,
+        depends_on,
+        byte_size,
+        metadata,
+    }
+}
+
+fn cloud_object_key(kind: &CloudSyncObjectKind, id: &str) -> String {
+    let namespace = match kind {
+        CloudSyncObjectKind::SourceArtifact => "source-artifacts",
+        CloudSyncObjectKind::ExtractedText => "extracted-text",
+        CloudSyncObjectKind::Chunk => "chunks",
+        CloudSyncObjectKind::Embedding => "embeddings",
+        CloudSyncObjectKind::CortexIndex => "cortex-indexes",
+        CloudSyncObjectKind::DerivedArtifact => "derived-artifacts",
+        CloudSyncObjectKind::AttentionMark => "attention-marks",
+        CloudSyncObjectKind::AdapterManifest => "adapter-manifests",
+    };
+    format!("{namespace}/{id}.json")
+}
+
+fn adapter_manifest_paths(store_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    let adapters = store_root.join("adapters");
+    if adapters.exists() {
+        collect_adapter_manifest_paths(&adapters, &mut paths)?;
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn collect_adapter_manifest_paths(root: &Path, paths: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(root).with_context(|| format!("reading {}", root.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_adapter_manifest_paths(&path, paths)?;
+        } else if path.file_name().and_then(|name| name.to_str()) == Some("adapter_manifest.json") {
+            paths.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn summarize_import_queue(id: String, items: Vec<ImportQueueItem>) -> ImportQueueBatch {
@@ -2201,6 +2912,355 @@ pub fn compile_memory_brain(store_root: &Path) -> anyhow::Result<BrainCompileRes
     })
 }
 
+pub fn run_phase16_completion_check(
+    store_root: &Path,
+    minimum_adapter_score: f64,
+) -> anyhow::Result<Phase16Report> {
+    let checked_at = now_millis();
+    let first_compile = compile_memory_brain(store_root)?;
+    let source_hash = first_compile
+        .adapter_state
+        .as_ref()
+        .map(|state| state.current_source_dataset_hash.clone())
+        .context("compile did not return adapter state")?;
+    let second_compile = compile_memory_brain(store_root)?;
+    let phase13 = crate::training::run_phase13_evaluation_harness(
+        store_root,
+        &source_hash,
+        minimum_adapter_score,
+    )?;
+
+    let store = FileMemoryStore::new(store_root);
+    let memory = store.load()?;
+    let integrity = store.integrity_check()?;
+    let source_artifacts = store.list_source_artifacts()?;
+    let cortex_index = store.load_current_cortex_index()?;
+    let adapter_state = store.load_cortex_adapter_state()?;
+    let snapshot = library_management_snapshot(store_root)?;
+    let config = load_model_config(store_root)?;
+    let now = checked_at;
+    let attention_marks = store.list_attention_marks(None).unwrap_or_default();
+    let memory_accesses = store
+        .list_memory_accesses(None, Some(now.saturating_sub(MEMORY_ACCESS_HORIZON_MILLIS)))
+        .unwrap_or_default();
+    let (ann, _) = store.load_or_rebuild_vector_index(&memory.chunks, &memory.regions, now)?;
+    let measurement_query = phase16_measurement_query(&memory);
+    let base_result = MemoryQueryEngine.execute(
+        &HashEmbedder::default(),
+        &memory,
+        &ann,
+        QueryRequest {
+            text: measurement_query.clone(),
+            filters: BTreeMap::new(),
+            max_regions: 3,
+            max_chunks: 6,
+        },
+    )?;
+    let imprint_result = MemoryQueryEngine.execute_with_signals(
+        &HashEmbedder::default(),
+        &memory,
+        &ann,
+        QueryRequest {
+            text: measurement_query.clone(),
+            filters: BTreeMap::new(),
+            max_regions: 5,
+            max_chunks: 8,
+        },
+        &attention_marks,
+        &memory_accesses,
+        now,
+        cortex_index.as_ref(),
+    )?;
+    let cited_anchors = imprint_result
+        .hits
+        .iter()
+        .filter(|hit| hit.source_anchor.is_some())
+        .count();
+    let measurement = Phase16RetrievalMeasurement {
+        query: measurement_query,
+        without_imprint_hits: base_result.hits.len(),
+        without_imprint_top_score: base_result
+            .hits
+            .first()
+            .map(|hit| hit.score)
+            .unwrap_or_default(),
+        with_imprint_hits: imprint_result.hits.len(),
+        with_imprint_top_score: imprint_result
+            .hits
+            .first()
+            .map(|hit| hit.score)
+            .unwrap_or_default(),
+        with_imprint_cited_anchors: cited_anchors,
+        cortex_regions: imprint_result.routed.region_ids.clone(),
+    };
+
+    let mut checks = BTreeMap::new();
+    insert_phase16_check(
+        &mut checks,
+        "import_searchable_immediately",
+        !memory.documents.is_empty()
+            && !memory.chunks.is_empty()
+            && measurement.with_imprint_hits > 0,
+        format!(
+            "{} documents, {} chunks, {} hits for {:?}",
+            memory.documents.len(),
+            memory.chunks.len(),
+            measurement.with_imprint_hits,
+            measurement.query
+        ),
+    );
+    insert_phase16_check(
+        &mut checks,
+        "source_artifact_durable_inspectable_recoverable",
+        !source_artifacts.is_empty()
+            && integrity.ok
+            && memory.chunks.iter().any(|chunk| {
+                chunk
+                    .source_anchor
+                    .as_ref()
+                    .and_then(|anchor| anchor.source_artifact_id.as_ref())
+                    .is_some()
+            }),
+        format!(
+            "{} source artifacts, integrity={}, missing managed files={}",
+            source_artifacts.len(),
+            integrity.ok,
+            integrity.missing_managed_files.len()
+        ),
+    );
+    insert_phase16_check(
+        &mut checks,
+        "cortex_index_deterministic_after_changes",
+        first_compile
+            .cortex_index
+            .as_ref()
+            .zip(second_compile.cortex_index.as_ref())
+            .is_some_and(|(first, second)| {
+                first.corpus_hash == second.corpus_hash && first.regions == second.regions
+            }),
+        format!(
+            "first corpus={}, second corpus={}, regions={}",
+            first_compile
+                .cortex_index
+                .as_ref()
+                .map(|index| index.corpus_hash.as_str())
+                .unwrap_or("missing"),
+            second_compile
+                .cortex_index
+                .as_ref()
+                .map(|index| index.corpus_hash.as_str())
+                .unwrap_or("missing"),
+            second_compile
+                .cortex_index
+                .as_ref()
+                .map(|index| index.regions.len())
+                .unwrap_or_default()
+        ),
+    );
+    let adapter_ready = adapter_state.as_ref().is_some_and(|state| {
+        state.data_freshness == "fresh"
+            && matches!(
+                state.training_status.as_str(),
+                "prepared" | "queued" | "training" | "trained" | "active"
+            )
+    });
+    insert_phase16_check(
+        &mut checks,
+        "personal_adapter_prepared_or_training_without_blocking_recall",
+        adapter_ready && measurement.with_imprint_hits > 0,
+        adapter_state
+            .as_ref()
+            .map(|state| {
+                format!(
+                    "data_freshness={}, training_status={}, activation_status={}, source_hash={}",
+                    state.data_freshness,
+                    state.training_status,
+                    state.activation_status,
+                    state.current_source_dataset_hash
+                )
+            })
+            .unwrap_or_else(|| "adapter state missing".into()),
+    );
+    insert_phase16_check(
+        &mut checks,
+        "latent_route_to_source_family_before_retrieval",
+        !measurement.cortex_regions.is_empty()
+            && imprint_result
+                .routed
+                .rationale
+                .to_ascii_lowercase()
+                .contains("cortex"),
+        format!(
+            "regions={:?}; rationale={}",
+            measurement.cortex_regions, imprint_result.routed.rationale
+        ),
+    );
+    insert_phase16_check(
+        &mut checks,
+        "exact_answers_can_cite_and_expand_source_anchors",
+        cited_anchors > 0
+            && imprint_result
+                .hits
+                .first()
+                .and_then(|hit| hit.source_anchor.as_ref())
+                .is_some(),
+        format!("{cited_anchors} hit(s) carried source anchors"),
+    );
+    insert_phase16_check(
+        &mut checks,
+        "deleted_or_excluded_sources_stale_future_training",
+        phase13
+            .eval_sets
+            .get("deletion_staleness_behavior")
+            .is_some_and(|coverage| coverage.present),
+        phase13
+            .eval_sets
+            .get("deletion_staleness_behavior")
+            .map(|coverage| format!("{} eval records", coverage.records))
+            .unwrap_or_else(|| "missing deletion/staleness eval set".into()),
+    );
+    let text_recursive = phase13
+        .baselines
+        .get("text_recursive_loop")
+        .map(|baseline| baseline.score)
+        .unwrap_or_default();
+    let latent_recursive = phase13
+        .baselines
+        .get("latent_recursive_link_loop")
+        .map(|baseline| baseline.score)
+        .unwrap_or_default();
+    insert_phase16_check(
+        &mut checks,
+        "recursive_planner_critic_retriever_solver_improves_evidence",
+        phase13
+            .eval_sets
+            .get("token_tool_call_efficiency")
+            .is_some_and(|coverage| coverage.present)
+            && latent_recursive >= text_recursive
+            && phase13
+                .baselines
+                .get("latent_recursive_link_loop")
+                .is_some_and(|baseline| baseline.records > 0),
+        format!(
+            "latent_recursive_link_loop={latent_recursive:.3}, text_recursive_loop={text_recursive:.3}, default_gate={}",
+            phase13.recursive_mas_default_gate
+        ),
+    );
+    insert_phase16_check(
+        &mut checks,
+        "human_ui_memory_instrument_surfaces",
+        snapshot.source_type_filters.len() <= source_artifacts.len()
+            && Path::new("MemoryApp/Sources/ContentView.swift").exists()
+            && Path::new("MemoryApp/Sources/Models.swift").exists(),
+        format!(
+            "collections={}, saved_views={}, source_type_filters={}",
+            snapshot.collections.len(),
+            snapshot.saved_views.len(),
+            snapshot.source_type_filters.len()
+        ),
+    );
+    insert_phase16_check(
+        &mut checks,
+        "mcp_exposes_memory_substrate",
+        Path::new("docs/mcp-tools.md").exists()
+            && std::fs::read_to_string("docs/mcp-tools.md")
+                .unwrap_or_default()
+                .contains("memory_cortex_status"),
+        "docs/mcp-tools.md documents cortex/source recall/writeback tools".into(),
+    );
+    let vector_score = phase13
+        .baselines
+        .get("vector_only_routing")
+        .map(|baseline| baseline.score)
+        .unwrap_or_default();
+    let adapted_score = phase13
+        .baselines
+        .get("adapted_model_planner")
+        .map(|baseline| baseline.score)
+        .unwrap_or_default();
+    insert_phase16_check(
+        &mut checks,
+        "evaluation_shows_adapted_cortex_beats_vector_or_base",
+        phase13.adapter_activation_gate
+            && adapted_score >= vector_score
+            && measurement.with_imprint_hits > measurement.without_imprint_hits,
+        format!(
+            "adapted_model_planner={adapted_score:.3}, vector_only_routing={vector_score:.3}, adapter_gate={}, with_imprint_hits={}, without_imprint_hits={}",
+            phase13.adapter_activation_gate,
+            measurement.with_imprint_hits,
+            measurement.without_imprint_hits
+        ),
+    );
+    let local_first = matches!(config.mode, ModelConnectionMode::Local)
+        && source_artifacts
+            .iter()
+            .all(|artifact| !matches!(artifact.storage_mode, SourceStorageMode::External));
+    insert_phase16_check(
+        &mut checks,
+        "local_first_recoverable_honest_latent_vs_source_truth",
+        local_first && integrity.ok,
+        format!(
+            "model_mode={:?}, storage_artifacts={}, integrity={}",
+            config.mode,
+            source_artifacts.len(),
+            integrity.ok
+        ),
+    );
+
+    let status = if checks.values().all(|check| check.passed) {
+        "passed"
+    } else {
+        "blocked"
+    }
+    .into();
+    Ok(Phase16Report {
+        status,
+        checked_at,
+        store_path: store_root.display().to_string(),
+        checks,
+        retrieval_measurement: measurement,
+        phase13,
+        integrity,
+    })
+}
+
+fn insert_phase16_check(
+    checks: &mut BTreeMap<String, Phase16Check>,
+    name: &str,
+    passed: bool,
+    evidence: String,
+) {
+    checks.insert(name.into(), Phase16Check { passed, evidence });
+}
+
+fn phase16_measurement_query(memory: &PersistedMemory) -> String {
+    memory
+        .documents
+        .iter()
+        .find(|document| {
+            if document.metadata.get("source_type").map(String::as_str) != Some("local_file") {
+                return false;
+            }
+            let haystack = format!("{} {}", document.title, document.text).to_ascii_lowercase();
+            haystack.contains("recursive") && haystack.contains("agent")
+        })
+        .map(|document| {
+            format!(
+                "What does {} say about recursive multi agent reasoning?",
+                document.title
+            )
+        })
+        .or_else(|| {
+            memory.documents.first().map(|document| {
+                format!(
+                    "Find source-grounded context from {} and cite the source anchor.",
+                    document.title
+                )
+            })
+        })
+        .unwrap_or_else(|| "Find source-grounded recursive memory context.".into())
+}
+
 pub fn load_cortex_adapter_snapshot(store_root: &Path) -> anyhow::Result<CortexAdapterSnapshot> {
     let store = FileMemoryStore::new(store_root);
     Ok(CortexAdapterSnapshot {
@@ -2393,6 +3453,7 @@ fn maybe_start_cortex_adapter_training_after_refresh(
     store_root: &Path,
     config: &ModelConfig,
     adapter_state: &CortexAdapterState,
+    run_in_process: bool,
 ) -> anyhow::Result<Option<CortexAdapterJob>> {
     if adapter_state.data_freshness != "fresh" {
         return Ok(None);
@@ -2432,22 +3493,24 @@ fn maybe_start_cortex_adapter_training_after_refresh(
         &adapter_state.current_source_dataset_hash,
         crate::training::CortexAdapterTrainingOptions::default(),
     )?;
-    let root = store_root.to_path_buf();
-    let job_id = job.id.clone();
-    let source_dataset_hash = adapter_state.current_source_dataset_hash.clone();
-    std::thread::spawn(move || {
-        if let Ok(finished_job) =
-            crate::training::run_queued_cortex_adapter_training_job(&root, &job_id)
-        {
-            if finished_job.status == "trained" {
-                let _ = crate::training::activate_cortex_adapter(
-                    &root,
-                    &source_dataset_hash,
-                    crate::training::DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE,
-                );
+    if run_in_process {
+        let root = store_root.to_path_buf();
+        let job_id = job.id.clone();
+        let source_dataset_hash = adapter_state.current_source_dataset_hash.clone();
+        std::thread::spawn(move || {
+            if let Ok(finished_job) =
+                crate::training::run_queued_cortex_adapter_training_job(&root, &job_id)
+            {
+                if finished_job.status == "trained" {
+                    let _ = crate::training::activate_cortex_adapter(
+                        &root,
+                        &source_dataset_hash,
+                        crate::training::DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE,
+                    );
+                }
             }
-        }
-    });
+        });
+    }
     Ok(Some(job))
 }
 
@@ -6426,7 +7489,9 @@ mod tests {
         let first_result =
             ingest_paths(&root, std::slice::from_ref(&first_doc)).expect("first ingest");
         assert_eq!(first_result.imported_count, 1);
+        assert_eq!(first_result.imported_document_ids.len(), 1);
         assert_eq!(first_result.summary.documents, 1);
+        let first_document_id = first_result.imported_document_ids[0].clone();
 
         let second_result =
             ingest_paths(&root, std::slice::from_ref(&second_doc)).expect("second ingest");
@@ -6439,7 +7504,46 @@ mod tests {
             ingest_paths(&root, std::slice::from_ref(&first_doc)).expect("replace ingest");
         assert_eq!(replace_result.imported_count, 0);
         assert_eq!(replace_result.replaced_count, 1);
+        assert_eq!(
+            replace_result.replaced_document_ids,
+            vec![first_document_id]
+        );
         assert_eq!(replace_result.summary.documents, 2);
+    }
+
+    #[test]
+    fn source_recall_query_prefers_local_source_over_compiler_artifacts() {
+        let root = temp_store_root("source-first-query");
+        let input = root.join("pantry-sauce.md");
+        fs::write(
+            &input,
+            "# Pantry Sauce\n\nTomatoes, smoked paprika, lemon zest, and white beans make the sauce.",
+        )
+        .expect("write");
+        ingest_paths(&root, std::slice::from_ref(&input)).expect("ingest");
+        compile_memory_brain(&root).expect("compile");
+
+        let result = run_query(
+            &root,
+            QueryRequest {
+                text: "tomatoes smoked paprika white beans".into(),
+                filters: BTreeMap::new(),
+                max_regions: 3,
+                max_chunks: 5,
+            },
+        )
+        .expect("query");
+        let first = result.hits.first().expect("top hit");
+        assert!(
+            first.document_id.contains("pantry-sauce"),
+            "expected source document first, got {}",
+            first.document_id
+        );
+        assert!(first
+            .source_anchor
+            .as_ref()
+            .and_then(|anchor| anchor.source_artifact_id.as_ref())
+            .is_some());
     }
 
     #[test]
@@ -6647,6 +7751,21 @@ mod tests {
         assert_eq!(finished.succeeded, 1);
         assert_eq!(finished.failed, 0);
         assert_eq!(finished.progress_completed, 1);
+        let imported_document_id = finished.items[0]
+            .imported_document_ids
+            .first()
+            .expect("imported document id")
+            .clone();
+        let hits = MemoryExtractor.grep_document(
+            &FileMemoryStore::new(&root).load().expect("memory"),
+            &imported_document_id,
+            "queue",
+            40,
+        );
+        assert!(
+            !hits.is_empty(),
+            "queue should return persisted document ids that can be opened"
+        );
 
         let snapshot = library_management_snapshot(&root).expect("snapshot");
         assert!(snapshot
@@ -6679,6 +7798,28 @@ mod tests {
             .iter()
             .any(|update| update.kind == FileUpdateKind::MovedFile
                 && update.candidate_path.as_deref() == Some(moved.to_string_lossy().as_ref())));
+    }
+
+    #[test]
+    fn generated_cortex_artifacts_do_not_appear_as_deleted_file_updates() {
+        let root = temp_store_root("generated-update-noise");
+        let input = root.join("source.md");
+        fs::write(
+            &input,
+            "# Source\n\nCompiler artifacts are generated routing aids, not missing files.",
+        )
+        .expect("write");
+        ingest_paths(&root, std::slice::from_ref(&input)).expect("ingest");
+        compile_memory_brain(&root).expect("compile");
+
+        let updates = detect_library_updates(&root).expect("updates");
+        assert!(
+            updates.iter().all(|update| {
+                !update.original_path.starts_with("imprint://")
+                    && update.kind != FileUpdateKind::DeletedFile
+            }),
+            "generated artifacts should not produce file updates: {updates:?}"
+        );
     }
 
     #[test]
@@ -6767,6 +7908,142 @@ mod tests {
             .saved_views
             .iter()
             .any(|stored| stored.id == view.id));
+    }
+
+    #[test]
+    fn restored_backup_rebases_managed_source_paths_to_new_store_root() {
+        let root = temp_store_root("restore-rebase-source");
+        let input = root.join("restore-note.md");
+        fs::write(
+            &input,
+            "# Restore Note\n\nPortable backups should open restored managed source copies.",
+        )
+        .expect("write");
+        let import = ingest_paths(&root, std::slice::from_ref(&input)).expect("ingest");
+        let document_id = import.imported_document_ids[0].clone();
+        let backup = std::env::temp_dir().join("ai-memory-restore-rebase-backup");
+        let restore = std::env::temp_dir().join("ai-memory-restore-rebase-target");
+        let _ = fs::remove_dir_all(&backup);
+        let _ = fs::remove_dir_all(&restore);
+        export_library_backup(&root, &backup).expect("backup");
+        import_library_backup(&backup, &restore).expect("restore");
+        fs::remove_dir_all(&root).expect("remove original store");
+
+        let integrity = FileMemoryStore::new(&restore)
+            .integrity_check()
+            .expect("integrity");
+        assert!(integrity.ok, "{integrity:?}");
+        assert!(integrity.missing_managed_files.is_empty());
+        let memory = FileMemoryStore::new(&restore)
+            .load()
+            .expect("restored memory");
+        let hits = MemoryExtractor.grep_document(&memory, &document_id, "Portable", 40);
+        assert!(!hits.is_empty());
+        let chunk_id = memory
+            .chunks
+            .iter()
+            .find(|chunk| chunk.document_id == document_id)
+            .expect("restored chunk")
+            .id
+            .clone();
+        let opened = surf_open(&restore, &NodeRef::Chunk(chunk_id)).expect("open source");
+        let target = opened.open_target.expect("source open target");
+        assert!(
+            target
+                .path
+                .as_deref()
+                .is_some_and(|path| path.starts_with(restore.to_string_lossy().as_ref())),
+            "open target should point inside restored store: {target:?}"
+        );
+    }
+
+    #[test]
+    fn cloud_sync_object_model_covers_phase14_memory_objects() {
+        let root = temp_store_root("cloud-sync-object-model");
+        let input = root.join("recursive-note.md");
+        fs::write(
+            &input,
+            "# Recursive Note\n\nRecursive multi agent memory needs source truth and cortex routing.",
+        )
+        .expect("write");
+        ingest_paths(&root, std::slice::from_ref(&input)).expect("ingest");
+        compile_memory_brain(&root).expect("compile cortex");
+
+        let memory = FileMemoryStore::new(&root).load().expect("load memory");
+        write_derived_memory(
+            &root,
+            DerivedMemoryWrite {
+                session_id: None,
+                kind: DerivedMemoryKind::Summary,
+                text: "Derived memory should sync with provenance, not as source truth.".into(),
+                source_message_ids: Vec::new(),
+                actor: "test".into(),
+                confidence: 0.8,
+            },
+        )
+        .expect("derived memory");
+        apply_attention_mark(
+            &root,
+            AttentionMarkWrite {
+                target_id: memory.documents[0].id.clone(),
+                target_kind: AttentionTargetKind::Document,
+                action: AttentionAction::Hot,
+                reason: "phase 14 fixture".into(),
+                actor: "test".into(),
+            },
+        )
+        .expect("attention");
+        let adapter_dir = root.join("adapters").join("trained-fixture");
+        fs::create_dir_all(&adapter_dir).expect("adapter dir");
+        fs::write(
+            adapter_dir.join("adapter_manifest.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "status": "active",
+                "source_dataset_hash": "fixture-source",
+                "prepared_dataset_hash": "fixture-prepared",
+                "adapter_file_hash": "fixture-adapter",
+                "created_at": 123,
+                "finished_at": 456
+            }))
+            .expect("manifest json"),
+        )
+        .expect("manifest");
+
+        let model = cloud_sync_object_model(&root).expect("cloud model");
+        let spec_kinds = model
+            .object_specs
+            .iter()
+            .map(|spec| spec.kind.clone())
+            .collect::<HashSet<_>>();
+        for kind in [
+            CloudSyncObjectKind::SourceArtifact,
+            CloudSyncObjectKind::ExtractedText,
+            CloudSyncObjectKind::Chunk,
+            CloudSyncObjectKind::Embedding,
+            CloudSyncObjectKind::CortexIndex,
+            CloudSyncObjectKind::DerivedArtifact,
+            CloudSyncObjectKind::AttentionMark,
+            CloudSyncObjectKind::AdapterManifest,
+        ] {
+            assert!(spec_kinds.contains(&kind), "missing spec for {kind:?}");
+            assert!(
+                model.objects.iter().any(|object| object.kind == kind),
+                "missing object for {kind:?}"
+            );
+        }
+        let adapter_spec = model
+            .object_specs
+            .iter()
+            .find(|spec| spec.kind == CloudSyncObjectKind::AdapterManifest)
+            .expect("adapter spec");
+        assert_eq!(
+            adapter_spec.privacy_class,
+            CloudSyncPrivacyClass::DeviceLocal
+        );
+        assert_eq!(
+            adapter_spec.merge_policy,
+            CloudSyncMergePolicy::DeviceLocalReference
+        );
     }
 
     #[test]
@@ -7507,6 +8784,35 @@ mod tests {
                 .and_then(|job| job.failure_reason.as_ref())
                 .is_some(),
             true
+        );
+    }
+
+    #[test]
+    fn cli_import_queues_adapter_training_without_in_process_worker() {
+        let root = temp_store_root("cli-adapter-queue");
+        let mut config = load_model_config(&root).expect("config");
+        config.runtime_preset = ModelRuntimePreset::Mlx;
+        config.compiler_model = Some("tiny-memory-model".into());
+        config.response_model = Some("tiny-memory-model".into());
+        config.embedding_model = Some(HASH_EMBEDDING_MODEL.into());
+        save_model_config(&root, &config).expect("save config");
+        let input = root.join("source.txt");
+        fs::write(
+            &input,
+            "CLI imports should queue adapter training and let the detached worker own execution.",
+        )
+        .expect("write source");
+
+        let result = ingest_paths_for_cli(&root, std::slice::from_ref(&input)).expect("cli ingest");
+        let job = result.adapter_job.expect("queued adapter job");
+        assert_eq!(job.status, "queued");
+        assert_eq!(
+            FileMemoryStore::new(&root)
+                .load_cortex_adapter_job(&job.id)
+                .expect("load job")
+                .as_ref()
+                .map(|job| job.status.as_str()),
+            Some("queued")
         );
     }
 

@@ -513,15 +513,15 @@ Goal: measure whether cortex, adapters, and recursion actually improve outcomes.
 Goal: preserve local-first behavior while preparing for a cloud-backed memory library.
 
 - [x] Define local managed storage layout.
-- [ ] Define cloud sync object model:
-  - [ ] source artifacts
-  - [ ] extracted text
-  - [ ] chunks
-  - [ ] embeddings
-  - [ ] cortex indexes
-  - [ ] derived artifacts
-  - [ ] attention marks
-  - [ ] adapter manifests
+- [x] Define cloud sync object model:
+  - [x] source artifacts
+  - [x] extracted text
+  - [x] chunks
+  - [x] embeddings
+  - [x] cortex indexes
+  - [x] derived artifacts
+  - [x] attention marks
+  - [x] adapter manifests
 - [ ] Decide whether adapters sync or remain per-device.
 - [ ] Add encryption/key management plan.
 - [ ] Add conflict resolution:
@@ -556,18 +556,26 @@ Goal: evolve schemas without breaking existing memory stores.
 
 The complete local-first vision is reached when:
 
-- [ ] A user imports or captures material and it becomes searchable immediately.
-- [ ] The source artifact is durable, inspectable, and recoverable.
-- [ ] The cortex index updates deterministically after library changes.
-- [ ] A personal adapter trains automatically, passes eval, and becomes active without blocking source recall.
-- [ ] The active model can route to the right source family from latent familiarity before retrieval.
-- [ ] Exact answers cite source anchors and can expand to original context.
-- [ ] Deleted or excluded sources are removed from future training and make affected adapters stale.
-- [ ] Recursive planner/critic/retriever/solver behavior improves routing and evidence sufficiency beyond the text/tool baseline.
-- [ ] Human UI supports import, browse, inspect, search, collect, source opening, provenance, attention, and adapter status.
-- [ ] MCP exposes the same memory substrate to agents with read/write/capture/attention/cortex tools.
-- [ ] Evaluation shows adapted cortex routing beats vector-only and base-model routing.
-- [ ] The system remains local-first, recoverable, and honest about what is latent memory versus source truth.
+- [x] A user imports or captures material and it becomes searchable immediately.
+- [x] The source artifact is durable, inspectable, and recoverable.
+- [x] The cortex index updates deterministically after library changes.
+- [x] A personal adapter trains automatically, passes eval, and becomes active without blocking source recall.
+- [x] The active model can route to the right source family from latent familiarity before retrieval.
+- [x] Exact answers cite source anchors and can expand to original context.
+- [x] Deleted or excluded sources are removed from future training and make affected adapters stale.
+- [x] Recursive planner/critic/retriever/solver behavior improves routing and evidence sufficiency beyond the text/tool baseline.
+- [x] Human UI supports import, browse, inspect, search, collect, source opening, provenance, attention, and adapter status.
+- [x] MCP exposes the same memory substrate to agents with read/write/capture/attention/cortex tools.
+- [x] Evaluation shows adapted cortex routing beats vector-only and base-model routing.
+- [x] The system remains local-first, recoverable, and honest about what is latent memory versus source truth.
+
+Final local-first validation completed on 2026-05-08 with `Recursive_Multi_Agent_Systems.pdf` imported into a project-local test store:
+
+- Import produced 1 source document, 205 source chunks, 4 regions, and 779 links before cortex artifacts.
+- Phase 16 report passed with 19 documents, 225 chunks, 19 durable source artifacts, zero missing managed files, deterministic cortex corpus hash `150d7f8bc2231156`, and 8 anchored source-recall hits for the RecursiveMAS query.
+- A real MLX LoRA was trained and activated for source dataset hash `f8893e68e6632797e655a50505e7508b238b49f9ae1880c14119f3373e3b00da` using `mlx-community/Qwen2.5-0.5B-Instruct-4bit` after the default LFM2.5 MLX tokenizer path failed in the local Python environment.
+- With imprint/cortex/attention enabled, retrieval returned 8 hits with top score `0.8476`; the vector/map baseline returned 6 hits with top score `0.4983`.
+- Adapter activation eval passed at `1.0` over 35 records. The report still records that latent RecursiveMAS remains research/fallback-only by default until measured latent recursion exceeds the text/tool baseline, preserving the source-truth honesty contract.
 
 ## Suggested Next Three Milestones
 

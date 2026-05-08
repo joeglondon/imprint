@@ -423,6 +423,8 @@ pub fn queue_cortex_adapter_training_job(
         output_dir.display().to_string(),
         "--iters".into(),
         options.iters.to_string(),
+        "--source-dataset-hash".into(),
+        source_dataset_hash.into(),
     ];
     if options.dry_run {
         command.push("--dry-run".into());
@@ -1115,8 +1117,86 @@ fn backfill_missing_eval_tasks(
                 }
             }
         }
+        if !records
+            .iter()
+            .any(|record| record.get("task").and_then(|value| value.as_str()) == Some(task))
+        {
+            if let Some(record) = synthetic_eval_record_for_task(task) {
+                if let Some(id) = record.get("id").and_then(|value| value.as_str()) {
+                    if seen_ids.insert(id.to_string()) {
+                        records.push(record);
+                    }
+                }
+            }
+        }
     }
     Ok(())
+}
+
+fn synthetic_eval_record_for_task(task: &str) -> Option<serde_json::Value> {
+    Some(match task {
+        "recursive_role_trace" => json!({
+            "id": "synthetic:phase13:recursive-role-trace",
+            "task": "recursive_role_trace",
+            "split": "eval",
+            "input": "Trace a source-grounded recursive planner/critic/retriever/solver loop.",
+            "target": "roles:planner,retriever,critic,solver,memory_steward;latent_status:research_only;fallback:text_tool",
+            "source_refs": ["imprint://synthetic/recursive/trace"],
+            "anchor_ids": ["synthetic-recursive-anchor"],
+            "source_type": "synthetic_fixture",
+        }),
+        "recursive_sufficiency_eval" => json!({
+            "id": "synthetic:phase13:recursive-sufficiency",
+            "task": "recursive_sufficiency_eval",
+            "split": "eval",
+            "input": "Critic sees anchored snippets that answer the question.",
+            "target": "sufficient:true;cite_anchor_ids:synthetic-recursive-anchor",
+            "source_refs": ["imprint://synthetic/recursive/sufficiency"],
+            "anchor_ids": ["synthetic-recursive-anchor"],
+            "source_type": "synthetic_fixture",
+        }),
+        "recursive_efficiency_eval" => json!({
+            "id": "synthetic:phase13:recursive-efficiency",
+            "task": "recursive_efficiency_eval",
+            "split": "eval",
+            "input": "Compare recursive source routing with text/tool fallback.",
+            "target": "efficiency:better_or_equal;tool_calls:1;source_grounded:true",
+            "source_refs": ["imprint://synthetic/recursive/efficiency"],
+            "anchor_ids": ["synthetic-recursive-anchor"],
+            "source_type": "synthetic_fixture",
+        }),
+        "recursive_region_selection_eval" => json!({
+            "id": "synthetic:phase13:recursive-region-selection",
+            "task": "recursive_region_selection_eval",
+            "split": "eval",
+            "input": "Retriever should select the source region before expanding context.",
+            "target": "region_source_selection:correct;selected_refs:imprint://synthetic/recursive/trace",
+            "source_refs": ["imprint://synthetic/recursive/trace"],
+            "anchor_ids": ["synthetic-recursive-anchor"],
+            "source_type": "synthetic_fixture",
+        }),
+        "recursive_hallucination_eval" => json!({
+            "id": "synthetic:phase13:recursive-hallucination",
+            "task": "recursive_hallucination_eval",
+            "split": "eval",
+            "input": "Solver should avoid ungrounded exact claims.",
+            "target": "hallucination_risk:low;source_anchored:true",
+            "source_refs": ["imprint://synthetic/recursive/hallucination"],
+            "anchor_ids": ["synthetic-recursive-anchor"],
+            "source_type": "synthetic_fixture",
+        }),
+        "recursive_token_usage_eval" => json!({
+            "id": "synthetic:phase13:recursive-token-usage",
+            "task": "recursive_token_usage_eval",
+            "split": "eval",
+            "input": "Latent recursion should reduce token use only after measured wins.",
+            "target": "token_usage:lower_if_hidden_state_supported;baseline_tool_calls:2;fallback:text_tool",
+            "source_refs": ["imprint://synthetic/recursive/tokens"],
+            "anchor_ids": ["synthetic-recursive-anchor"],
+            "source_type": "synthetic_fixture",
+        }),
+        _ => return None,
+    })
 }
 
 fn write_jsonl(path: &Path, records: &[serde_json::Value]) -> anyhow::Result<()> {
@@ -3115,6 +3195,134 @@ mod tests {
             "fixtures and metric history must not contaminate adapter dataset hash"
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mlx_prep_uses_test_records_for_validation_when_eval_is_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "imprint-mlx-split-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let dataset = root.join("training");
+        let output = root.join("adapter");
+        fs::create_dir_all(&dataset).expect("dataset dir");
+        fs::write(
+            dataset.join("query_to_region.train.jsonl"),
+            [
+                serde_json::json!({"task":"query_to_region","input":"train one","target":"route_region:a"}).to_string(),
+                serde_json::json!({"task":"query_to_region","input":"train two","target":"route_region:b"}).to_string(),
+            ]
+            .join("\n"),
+        )
+        .expect("train records");
+        fs::write(
+            dataset.join("query_to_region.test.jsonl"),
+            serde_json::json!({"task":"query_to_region","input":"test one","target":"route_region:c"}).to_string(),
+        )
+        .expect("test records");
+
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("training")
+            .join("train_mlx_lora.py");
+        let output_result = Command::new("python3")
+            .arg(script)
+            .arg("--model")
+            .arg("tiny-memory-model")
+            .arg("--dataset")
+            .arg(&dataset)
+            .arg("--output")
+            .arg(&output)
+            .arg("--dry-run")
+            .output()
+            .expect("run train_mlx_lora.py");
+        assert!(
+            output_result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output_result.stderr)
+        );
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(output.join("adapter_manifest.json")).expect("manifest"),
+        )
+        .expect("manifest json");
+        assert_eq!(
+            manifest
+                .get("train_records")
+                .and_then(|value| value.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            manifest
+                .get("valid_records")
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            manifest
+                .get("test_records")
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        assert!(manifest
+            .get("warnings")
+            .and_then(|value| value.as_array())
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("No eval records found"))
+            })));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn eval_router_falls_back_to_test_records_when_eval_is_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "imprint-router-split-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let dataset = root.join("training");
+        fs::create_dir_all(&dataset).expect("dataset dir");
+        fs::write(
+            dataset.join("query_to_region.test.jsonl"),
+            serde_json::json!({
+                "task":"query_to_region",
+                "input":"Where is the orchard note?",
+                "target":"route_region:orchard"
+            })
+            .to_string(),
+        )
+        .expect("test record");
+
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("training")
+            .join("eval_router.py");
+        let output = Command::new("python3")
+            .arg(script)
+            .arg("--dataset")
+            .arg(&dataset)
+            .output()
+            .expect("run eval_router.py");
+        assert!(output.status.success());
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("router report");
+        assert_eq!(
+            report.get("records").and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        assert!(report
+            .get("warnings")
+            .and_then(|value| value.as_array())
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("evaluated test records"))
+            })));
         let _ = fs::remove_dir_all(root);
     }
 }

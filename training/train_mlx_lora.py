@@ -35,23 +35,40 @@ def to_mlx_record(record: dict) -> dict:
     }
 
 
-def prepare_mlx_dataset(dataset: Path, output: Path) -> Path:
+def prepare_mlx_dataset(dataset: Path, output: Path) -> tuple[Path, list[str]]:
     data_dir = output / "mlx-data"
     data_dir.mkdir(parents=True, exist_ok=True)
     train_records: list[dict] = []
-    valid_records: list[dict] = []
+    eval_records: list[dict] = []
+    test_records: list[dict] = []
+    warnings: list[str] = []
     for path in sorted(dataset.glob("*.train.jsonl")):
         train_records.extend(to_mlx_record(record) for record in load_jsonl(path))
     for path in sorted(dataset.glob("*.eval.jsonl")):
-        valid_records.extend(to_mlx_record(record) for record in load_jsonl(path))
+        eval_records.extend(to_mlx_record(record) for record in load_jsonl(path))
+    for path in sorted(dataset.glob("*.test.jsonl")):
+        test_records.extend(to_mlx_record(record) for record in load_jsonl(path))
     if not train_records:
         raise SystemExit(f"no training records found in {dataset}")
+    valid_records = eval_records
     if not valid_records:
-        valid_records = train_records[:]
+        if test_records:
+            valid_records = test_records[:]
+            warnings.append("No eval records found; using test records for validation.")
+        else:
+            valid_records = train_records[:]
+            warnings.append("No eval or test records found; using training records for validation.")
+    if not test_records:
+        if eval_records:
+            test_records = eval_records[:]
+            warnings.append("No test records found; using eval records for test.")
+        else:
+            test_records = train_records[:]
+            warnings.append("No test records found; using training records for test.")
     write_jsonl(data_dir / "train.jsonl", train_records)
     write_jsonl(data_dir / "valid.jsonl", valid_records)
-    write_jsonl(data_dir / "test.jsonl", valid_records)
-    return data_dir
+    write_jsonl(data_dir / "test.jsonl", test_records)
+    return data_dir, warnings
 
 
 def load_prepared_counts(dataset: Path) -> dict[str, int]:
@@ -113,12 +130,14 @@ def write_adapter_manifest(
     model: str,
     dataset: Path,
     source_dataset: Path | None = None,
+    source_dataset_hash: str | None = None,
     output: Path,
     iters: int,
     status: str,
     command: list[str] | None = None,
     created_at: int | None = None,
     finished_at: int | None = None,
+    warnings: list[str] | None = None,
 ) -> dict:
     prepared_dataset_hash = dataset_hash(dataset)
     manifest = {
@@ -137,11 +156,12 @@ def write_adapter_manifest(
         },
         "created_at": created_at if created_at is not None else now_millis(),
         "finished_at": finished_at if finished_at is not None else now_millis(),
+        "warnings": warnings or [],
         **load_prepared_counts(dataset),
     }
     if source_dataset is not None:
         manifest["source_dataset"] = str(source_dataset)
-        manifest["source_dataset_hash"] = dataset_hash(source_dataset)
+        manifest["source_dataset_hash"] = source_dataset_hash or dataset_hash(source_dataset)
     (output / "adapter_manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
     return manifest
 
@@ -152,6 +172,7 @@ def main() -> None:
     parser.add_argument("--dataset", required=True, help="Path to store/training directory")
     parser.add_argument("--output", required=True, help="Adapter output directory")
     parser.add_argument("--iters", type=int, default=100)
+    parser.add_argument("--source-dataset-hash", help="Canonical Rust training export hash to record in the manifest")
     parser.add_argument("--dry-run", action="store_true", help="Prepare MLX data and print the training command without running it")
     args = parser.parse_args()
 
@@ -159,7 +180,7 @@ def main() -> None:
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     started_at = now_millis()
-    mlx_data = prepare_mlx_dataset(dataset, output)
+    mlx_data, warnings = prepare_mlx_dataset(dataset, output)
     command = [
         sys.executable,
         "-m",
@@ -180,12 +201,14 @@ def main() -> None:
             model=args.model,
             dataset=mlx_data,
             source_dataset=dataset,
+            source_dataset_hash=args.source_dataset_hash,
             output=output,
             iters=args.iters,
             status="prepared",
             command=command,
             created_at=started_at,
             finished_at=now_millis(),
+            warnings=warnings,
         )
         print(json.dumps({
             "status": "ready",
@@ -193,6 +216,7 @@ def main() -> None:
             "manifest": str(output / "adapter_manifest.json"),
             "dataset_hash": manifest["dataset_hash"],
             "command": command,
+            "warnings": warnings,
         }, indent=2))
         return
     if importlib.util.find_spec("mlx_lm") is None:
@@ -203,12 +227,14 @@ def main() -> None:
         model=args.model,
         dataset=mlx_data,
         source_dataset=dataset,
+        source_dataset_hash=args.source_dataset_hash,
         output=output,
         iters=args.iters,
         status="trained",
         command=command,
         created_at=started_at,
         finished_at=finished_at,
+        warnings=warnings,
     )
     print(json.dumps({"status": "trained", **manifest}, indent=2, sort_keys=True))
 

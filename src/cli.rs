@@ -8,7 +8,8 @@ use crate::types::*;
 use anyhow::{anyhow, Context};
 use clap::{Parser, Subcommand};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MEMORY_ACCESS_HORIZON_MILLIS: u64 = 30 * 24 * 60 * 60 * 1000;
@@ -40,6 +41,10 @@ enum Command {
     Cortex {
         #[command(subcommand)]
         command: CortexCommand,
+    },
+    Phase16 {
+        #[arg(long, default_value_t = crate::training::DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE)]
+        minimum_score: f64,
     },
     Compile,
     Mcp,
@@ -151,6 +156,8 @@ enum CortexCommand {
     Compile,
     Train {
         #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
         dry_run: bool,
         #[arg(long, default_value_t = 100)]
         iters: usize,
@@ -182,6 +189,12 @@ enum CortexCommand {
         job_id: String,
         #[arg(long)]
         queue_only: bool,
+    },
+    #[command(hide = true)]
+    RunJob {
+        job_id: String,
+        #[arg(long)]
+        activate: bool,
     },
     Dataset,
 }
@@ -247,6 +260,7 @@ enum LibraryCommand {
     Restore {
         source: PathBuf,
     },
+    CloudModel,
 }
 
 #[derive(Debug, Subcommand)]
@@ -266,11 +280,13 @@ pub fn run() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Ingest { input } => {
-            let result = crate::app::ingest_paths(store.root(), &[input])?;
+            let result = crate::app::ingest_paths_for_cli(store.root(), &[input])?;
+            maybe_spawn_adapter_worker(store.root(), result.adapter_job.as_ref());
             println!("{}", serde_json::to_string_pretty(&result.summary)?);
         }
         Command::Rebuild => {
-            let result = crate::app::rebuild_memory(store.root())?;
+            let result = crate::app::rebuild_memory_for_cli(store.root())?;
+            maybe_spawn_adapter_worker(store.root(), result.adapter_job.as_ref());
             println!("{}", serde_json::to_string_pretty(&result.summary)?);
         }
         Command::Library { command } => match command {
@@ -361,6 +377,10 @@ pub fn run() -> anyhow::Result<()> {
                 let manifest = crate::app::import_library_backup(&source, store.root())?;
                 println!("{}", serde_json::to_string_pretty(&manifest)?);
             }
+            LibraryCommand::CloudModel => {
+                let model = crate::app::cloud_sync_object_model(store.root())?;
+                println!("{}", serde_json::to_string_pretty(&model)?);
+            }
         },
         Command::Store { command } => match command {
             StoreCommand::Status | StoreCommand::Migrate => {
@@ -406,6 +426,7 @@ pub fn run() -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             }
             CortexCommand::Train {
+                model,
                 dry_run,
                 iters,
                 timeout_millis,
@@ -419,9 +440,8 @@ pub fn run() -> anyhow::Result<()> {
                     .as_ref()
                     .context("compile did not return adapter state")?;
                 let config = crate::app::load_model_config(store.root())?;
-                let base_model = adapter_state
-                    .base_model
-                    .clone()
+                let base_model = model
+                    .or(adapter_state.base_model.clone())
                     .or(config.compiler_model)
                     .or(config.response_model)
                     .or(config.chat_model)
@@ -500,12 +520,37 @@ pub fn run() -> anyhow::Result<()> {
                 )?;
                 println!("{}", serde_json::to_string_pretty(&job)?);
             }
+            CortexCommand::RunJob { job_id, activate } => {
+                let job =
+                    crate::training::run_queued_cortex_adapter_training_job(store.root(), &job_id)?;
+                let adapter_state = if activate && job.status == "trained" {
+                    Some(
+                        crate::training::activate_cortex_adapter(
+                            store.root(),
+                            &job.source_dataset_hash,
+                            crate::training::DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE,
+                        )?
+                        .1,
+                    )
+                } else {
+                    None
+                };
+                let payload = serde_json::json!({
+                    "job": job,
+                    "adapter_state": adapter_state,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            }
             CortexCommand::Dataset => {
                 let summary =
                     crate::training::summarize_training_dataset(&store.root().join("training"))?;
                 println!("{}", serde_json::to_string_pretty(&summary)?);
             }
         },
+        Command::Phase16 { minimum_score } => {
+            let report = crate::app::run_phase16_completion_check(store.root(), minimum_score)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::Compile => {
             let result = crate::app::compile_memory_brain(store.root())?;
             println!("{}", serde_json::to_string_pretty(&result)?);
@@ -546,12 +591,15 @@ pub fn run() -> anyhow::Result<()> {
             max_chunks,
         } => {
             let memory = load_ready_memory(&store)?;
-            let (ann, _) = store.load_or_rebuild_vector_index(
-                &memory.chunks,
-                &memory.regions,
-                now_millis(),
-            )?;
-            let result = engine.execute(
+            let now = now_millis();
+            let attention_marks = store.list_attention_marks(None).unwrap_or_default();
+            let memory_accesses = store
+                .list_memory_accesses(None, Some(now.saturating_sub(MEMORY_ACCESS_HORIZON_MILLIS)))
+                .unwrap_or_default();
+            let cortex_index = store.load_current_cortex_index().unwrap_or_default();
+            let (ann, _) =
+                store.load_or_rebuild_vector_index(&memory.chunks, &memory.regions, now)?;
+            let result = engine.execute_with_signals(
                 &embedder,
                 &memory,
                 &ann,
@@ -561,7 +609,12 @@ pub fn run() -> anyhow::Result<()> {
                     max_regions,
                     max_chunks,
                 },
+                &attention_marks,
+                &memory_accesses,
+                now,
+                cortex_index.as_ref(),
             )?;
+            record_cli_query_hit_accesses(&store, &result);
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::GrepRegion {
@@ -788,11 +841,78 @@ fn parse_attention_target_kind(raw: &str) -> anyhow::Result<AttentionTargetKind>
     }
 }
 
+fn record_cli_query_hit_accesses(store: &FileMemoryStore, result: &QueryResult) {
+    for hit in result.hits.iter().take(3) {
+        let access = MemoryAccess {
+            id: format!("access:{}:{}", now_millis(), hit.chunk_id),
+            target_id: hit.chunk_id.clone(),
+            target_kind: AttentionTargetKind::Chunk,
+            access_kind: MemoryAccessKind::QueryHit,
+            reason: "Returned as a top CLI source recall hit.".into(),
+            actor: "cli".into(),
+            accessed_at: now_millis(),
+        };
+        let _ = store.insert_memory_access(&access);
+    }
+    for region_id in result.routed.region_ids.iter().take(3) {
+        let access = MemoryAccess {
+            id: format!("access:{}:{}", now_millis(), region_id),
+            target_id: region_id.clone(),
+            target_kind: AttentionTargetKind::Region,
+            access_kind: MemoryAccessKind::QueryHit,
+            reason: "Selected as a CLI query route candidate.".into(),
+            actor: "cli".into(),
+            accessed_at: now_millis(),
+        };
+        let _ = store.insert_memory_access(&access);
+    }
+}
+
 fn excerpt_from_doc(text: &str, start: usize, end: usize) -> String {
     let chars = text.chars().collect::<Vec<_>>();
     let left = start.saturating_sub(120);
     let right = (end + 120).min(chars.len());
     chars[left..right].iter().collect()
+}
+
+fn maybe_spawn_adapter_worker(store_root: &Path, job: Option<&CortexAdapterJob>) {
+    let Some(job) = job.filter(|job| job.status == "queued") else {
+        return;
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        mark_adapter_worker_spawn_failure(store_root, job, "could not resolve current executable");
+        return;
+    };
+    let spawn = ProcessCommand::new(exe)
+        .arg("--store")
+        .arg(store_root)
+        .arg("cortex")
+        .arg("run-job")
+        .arg(&job.id)
+        .arg("--activate")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if let Err(error) = spawn {
+        mark_adapter_worker_spawn_failure(
+            store_root,
+            job,
+            &format!("failed to spawn cortex adapter worker: {error}"),
+        );
+    }
+}
+
+fn mark_adapter_worker_spawn_failure(store_root: &Path, job: &CortexAdapterJob, reason: &str) {
+    let store = FileMemoryStore::new(store_root);
+    let mut job = store
+        .load_cortex_adapter_job(&job.id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| job.clone());
+    job.failure_reason = Some(reason.into());
+    job.updated_at = now_millis();
+    let _ = store.upsert_cortex_adapter_job(&job);
 }
 
 #[cfg(test)]
