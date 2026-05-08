@@ -401,33 +401,33 @@ Goal: make the macOS app a calm, dense, inspectable library, not just a graph de
 
 Goal: expose imprint as an agent-native memory filesystem.
 
-- [ ] Add first-class cortex MCP tools:
-  - [ ] `memory_cortex_status`
-  - [ ] `memory_cortex_compile`
-  - [ ] `memory_cortex_train`
-  - [ ] `memory_cortex_route`
-  - [ ] `memory_cortex_eval`
-- [ ] Keep `memory_compile` as an alias until clients migrate.
-- [ ] Add route-plan output to MCP search tools.
-- [ ] Add explicit source-recall tools:
-  - [ ] open source artifact
-  - [ ] expand exact anchor
-  - [ ] list provenance
-  - [ ] cite hit
-  - [ ] save trail
-- [ ] Add writeback tools:
-  - [ ] save derived memory
-  - [ ] save web finding
-  - [ ] save agent link
-  - [ ] mark attention
-  - [ ] revert attention mark
-- [ ] Add web capture tools:
-  - [ ] capture URL
-  - [ ] save search result
-  - [ ] refresh stale web finding
-  - [ ] set freshness/expiration
-- [ ] Document schemas for all MCP tools.
-- [ ] Add compatibility tests for MCP JSON outputs.
+- [x] Add first-class cortex MCP tools:
+  - [x] `memory_cortex_status`
+  - [x] `memory_cortex_compile`
+  - [x] `memory_cortex_train`
+  - [x] `memory_cortex_route`
+  - [x] `memory_cortex_eval`
+- [x] Keep `memory_compile` as an alias until clients migrate.
+- [x] Add route-plan output to MCP search tools.
+- [x] Add explicit source-recall tools:
+  - [x] open source artifact
+  - [x] expand exact anchor
+  - [x] list provenance
+  - [x] cite hit
+  - [x] save trail
+- [x] Add writeback tools:
+  - [x] save derived memory
+  - [x] save web finding
+  - [x] save agent link
+  - [x] mark attention
+  - [x] revert attention mark
+- [x] Add web capture tools:
+  - [x] capture URL
+  - [x] save search result
+  - [x] refresh stale web finding
+  - [x] set freshness/expiration
+- [x] Document schemas for all MCP tools.
+- [x] Add compatibility tests for MCP JSON outputs.
 
 ## Phase 11: Web Findings And Browser Capture
 

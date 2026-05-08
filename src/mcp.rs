@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn run_stdio(store_root: &Path) -> anyhow::Result<()> {
     let stdin = io::stdin();
@@ -78,9 +79,51 @@ fn call_tool(store_root: &Path, params: Value) -> anyhow::Result<Value> {
                 },
             )?)?
         }
+        "memory_cortex_status" => cortex_status_payload(store_root, &args)?,
+        "memory_cortex_compile" | "memory_compile" => {
+            serde_json::to_value(crate::app::compile_memory_brain(store_root)?)?
+        }
+        "memory_cortex_train" => {
+            serde_json::to_value(crate::app::train_cortex_adapter_now(store_root)?)?
+        }
+        "memory_cortex_route" => {
+            let query = string_arg(&args, "query")?;
+            let max_regions = usize_arg(&args, "max_regions").unwrap_or(3);
+            let result = crate::app::run_query(
+                store_root,
+                QueryRequest {
+                    text: query,
+                    filters: BTreeMap::new(),
+                    max_regions,
+                    max_chunks: usize_arg(&args, "max_chunks").unwrap_or(0),
+                },
+            )?;
+            let route_plan = result.routed.route_plan.clone();
+            serde_json::to_value(json!({
+                "routed": result.routed,
+                "route_plan": route_plan,
+            }))?
+        }
+        "memory_cortex_eval" => {
+            let compile = crate::app::compile_memory_brain(store_root)?;
+            let adapter_state = compile
+                .adapter_state
+                .as_ref()
+                .context("compile did not return adapter state")?;
+            serde_json::to_value(crate::training::evaluate_cortex_adapter(
+                store_root,
+                &adapter_state.current_source_dataset_hash,
+                args.get("minimum_score")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(crate::training::DEFAULT_ADAPTER_ACTIVATION_MIN_SCORE),
+            )?)?
+        }
         "memory_open" => {
             let node = node_arg(&args)?;
             serde_json::to_value(crate::app::surf_open(store_root, &node)?)?
+        }
+        "memory_open_source_artifact" => {
+            open_source_artifact_payload(store_root, &string_arg(&args, "source_artifact_id")?)?
         }
         "memory_neighbors" => {
             let node = node_arg(&args)?;
@@ -129,7 +172,43 @@ fn call_tool(store_root: &Path, params: Value) -> anyhow::Result<Value> {
                 usize_arg(&args, "window").unwrap_or(420),
             )?)?
         }
-        "memory_write_summary" => {
+        "memory_expand_anchor" => {
+            let anchor_id = string_arg(&args, "anchor_id")?;
+            serde_json::to_value(crate::app::surf_jump_to_anchor(
+                store_root,
+                &anchor_id,
+                usize_arg(&args, "window").unwrap_or(420),
+            )?)?
+        }
+        "memory_list_provenance" => provenance_payload(
+            store_root,
+            &string_arg(&args, "target_id")?,
+            args.get("target_kind").and_then(Value::as_str),
+        )?,
+        "memory_cite_hit" => {
+            let actor = args
+                .get("actor")
+                .and_then(Value::as_str)
+                .unwrap_or("mcp-agent")
+                .to_string();
+            serde_json::to_value(crate::app::cite_source_anchor(
+                store_root,
+                &string_arg(&args, "anchor_id")?,
+                usize_arg(&args, "window").unwrap_or(420),
+                actor,
+            )?)?
+        }
+        "memory_save_trail" => {
+            let session: SessionState =
+                serde_json::from_value(args.get("session").cloned().context("session missing")?)
+                    .context("decoding session")?;
+            serde_json::to_value(crate::app::save_trail_from_session(
+                store_root,
+                &session,
+                &string_arg(&args, "name")?,
+            )?)?
+        }
+        "memory_write_summary" | "memory_save_derived_memory" => {
             let text = string_arg(&args, "text")?;
             let session_id = args
                 .get("session_id")
@@ -155,7 +234,10 @@ fn call_tool(store_root: &Path, params: Value) -> anyhow::Result<Value> {
                 },
             )?)?
         }
-        "memory_write_web_finding" => serde_json::to_value(crate::app::write_web_finding(
+        "memory_write_web_finding"
+        | "memory_save_web_finding"
+        | "memory_capture_url"
+        | "memory_save_search_result" => serde_json::to_value(crate::app::write_web_finding(
             store_root,
             WebFindingWrite {
                 session_id: args
@@ -186,19 +268,66 @@ fn call_tool(store_root: &Path, params: Value) -> anyhow::Result<Value> {
                     .to_string(),
             },
         )?)?,
-        "memory_write_link" => serde_json::to_value(crate::app::write_agent_link(
+        "memory_refresh_web_finding" => {
+            let existing = web_finding_arg(store_root, &args)?;
+            serde_json::to_value(crate::app::write_web_finding(
+                store_root,
+                WebFindingWrite {
+                    session_id: existing.session_id,
+                    query: args
+                        .get("query")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&existing.query)
+                        .to_string(),
+                    url: existing.url,
+                    title: args
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&existing.title)
+                        .to_string(),
+                    summary: string_arg(&args, "summary")?,
+                    retrieved_at: args
+                        .get("retrieved_at")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_else(now_secs),
+                    freshness_expires_at: args.get("freshness_expires_at").and_then(Value::as_u64),
+                    confidence: args
+                        .get("confidence")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(existing.confidence as f64)
+                        as f32,
+                    actor: args
+                        .get("actor")
+                        .and_then(Value::as_str)
+                        .unwrap_or("mcp-agent")
+                        .to_string(),
+                },
+            )?)?
+        }
+        "memory_set_web_freshness" => serde_json::to_value(crate::app::set_web_finding_freshness(
             store_root,
-            AgentLinkWrite {
-                source_id: string_arg(&args, "source_id")?,
-                target_id: string_arg(&args, "target_id")?,
-                label: string_arg(&args, "label")?,
-                actor: args
-                    .get("actor")
-                    .and_then(Value::as_str)
-                    .unwrap_or("mcp-agent")
-                    .to_string(),
-            },
+            &string_arg(&args, "web_finding_id")?,
+            args.get("freshness_expires_at").and_then(Value::as_u64),
+            args.get("actor")
+                .and_then(Value::as_str)
+                .unwrap_or("mcp-agent")
+                .to_string(),
         )?)?,
+        "memory_write_link" | "memory_save_agent_link" => {
+            serde_json::to_value(crate::app::write_agent_link(
+                store_root,
+                AgentLinkWrite {
+                    source_id: string_arg(&args, "source_id")?,
+                    target_id: string_arg(&args, "target_id")?,
+                    label: string_arg(&args, "label")?,
+                    actor: args
+                        .get("actor")
+                        .and_then(Value::as_str)
+                        .unwrap_or("mcp-agent")
+                        .to_string(),
+                },
+            )?)?
+        }
         "memory_mark_attention" => serde_json::to_value(crate::app::apply_attention_mark(
             store_root,
             AttentionMarkWrite {
@@ -213,6 +342,14 @@ fn call_tool(store_root: &Path, params: Value) -> anyhow::Result<Value> {
                     .to_string(),
             },
         )?)?,
+        "memory_revert_attention_mark" => serde_json::to_value(crate::app::revert_attention_mark(
+            store_root,
+            &string_arg(&args, "mark_id")?,
+            args.get("actor")
+                .and_then(Value::as_str)
+                .unwrap_or("mcp-agent")
+                .to_string(),
+        )?)?,
         "memory_chat_trace" => {
             let session_id = string_arg(&args, "session_id")?;
             serde_json::to_value(crate::app::list_chat_context_traces(
@@ -220,7 +357,6 @@ fn call_tool(store_root: &Path, params: Value) -> anyhow::Result<Value> {
                 &session_id,
             )?)?
         }
-        "memory_compile" => serde_json::to_value(crate::app::compile_memory_brain(store_root)?)?,
         _ => return Err(anyhow!("unknown memory tool {name}")),
     };
     Ok(json!({
@@ -232,11 +368,152 @@ fn call_tool(store_root: &Path, params: Value) -> anyhow::Result<Value> {
     }))
 }
 
+fn cortex_status_payload(store_root: &Path, args: &Value) -> anyhow::Result<Value> {
+    let store = FileMemoryStore::new(store_root);
+    let snapshot = crate::app::load_cortex_adapter_snapshot(store_root)?;
+    let cortex_index = store.load_current_cortex_index()?;
+    let recent_jobs = store
+        .list_cortex_adapter_jobs(None)?
+        .into_iter()
+        .take(usize_arg(args, "max_jobs").unwrap_or(10))
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "adapter_state": snapshot.adapter_state,
+        "cortex_index": cortex_index.as_ref().map(|index| json!({
+            "id": index.id,
+            "schema_version": index.schema_version,
+            "created_at": index.created_at,
+            "corpus_hash": index.corpus_hash,
+            "source_refs": index.source_refs.len(),
+            "artifact_ids": index.artifact_ids.len(),
+            "regions": index.regions.len(),
+            "route_examples": index.regions.iter().map(|region| region.route_examples.len()).sum::<usize>(),
+        })),
+        "recent_jobs": recent_jobs,
+    }))
+}
+
+fn open_source_artifact_payload(
+    store_root: &Path,
+    source_artifact_id: &str,
+) -> anyhow::Result<Value> {
+    let store = FileMemoryStore::new(store_root);
+    let artifact = store
+        .list_source_artifacts()?
+        .into_iter()
+        .find(|artifact| artifact.id == source_artifact_id)
+        .context("source artifact not found")?;
+    let memory = store.load()?;
+    let documents = memory
+        .documents
+        .iter()
+        .filter(|document| {
+            document
+                .metadata
+                .get("source_artifact_id")
+                .is_some_and(|id| id == source_artifact_id)
+        })
+        .map(|document| {
+            json!({
+                "document_id": document.id,
+                "title": document.title,
+                "source_anchor": document.source_anchor,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "source_artifact": artifact,
+        "documents": documents,
+    }))
+}
+
+fn provenance_payload(
+    store_root: &Path,
+    target_id: &str,
+    target_kind: Option<&str>,
+) -> anyhow::Result<Value> {
+    let store = FileMemoryStore::new(store_root);
+    let memory = store.load()?;
+    let artifacts = store.list_source_artifacts()?;
+    let derived = store.list_derived_memories(None)?;
+    let web = store.list_web_findings(None)?;
+    let links = store.list_agent_links()?;
+
+    let mut records = Vec::new();
+    if target_kind.is_none() || target_kind == Some("source_artifact") {
+        records.extend(artifacts.iter().filter(|item| item.id == target_id).map(|item| {
+            json!({ "target_kind": "source_artifact", "target_id": item.id, "provenance": item.provenance })
+        }));
+    }
+    if target_kind.is_none() || target_kind == Some("document") {
+        records.extend(
+            memory
+                .documents
+                .iter()
+                .filter(|item| item.id == target_id)
+                .map(|item| {
+                    json!({
+                        "target_kind": "document",
+                        "target_id": item.id,
+                        "source_anchor": item.source_anchor,
+                        "source_artifact_id": item.metadata.get("source_artifact_id"),
+                        "metadata": item.metadata,
+                    })
+                }),
+        );
+    }
+    if target_kind.is_none() || target_kind == Some("chunk") {
+        records.extend(
+            memory
+                .chunks
+                .iter()
+                .filter(|item| item.id == target_id)
+                .map(|item| {
+                    json!({
+                        "target_kind": "chunk",
+                        "target_id": item.id,
+                        "document_id": item.document_id,
+                        "source_anchor": item.source_anchor,
+                        "metadata": item.metadata,
+                    })
+                }),
+        );
+    }
+    if target_kind.is_none() || target_kind == Some("derived_memory") {
+        records.extend(derived.iter().filter(|item| item.id == target_id).map(|item| {
+            json!({ "target_kind": "derived_memory", "target_id": item.id, "provenance": item.provenance })
+        }));
+    }
+    if target_kind.is_none() || target_kind == Some("web_finding") {
+        records.extend(web.iter().filter(|item| item.id == target_id).map(|item| {
+            json!({ "target_kind": "web_finding", "target_id": item.id, "provenance": item.provenance, "freshness_expires_at": item.freshness_expires_at })
+        }));
+    }
+    if target_kind.is_none() || target_kind == Some("link") {
+        records.extend(links.iter().filter(|item| item.id == target_id).map(|item| {
+            json!({ "target_kind": "link", "target_id": item.id, "provenance": item.provenance })
+        }));
+    }
+    if records.is_empty() {
+        return Err(anyhow!("no provenance found for {target_id}"));
+    }
+    Ok(json!({ "target_id": target_id, "records": records }))
+}
+
+fn web_finding_arg(store_root: &Path, args: &Value) -> anyhow::Result<WebFinding> {
+    let id = string_arg(args, "web_finding_id")?;
+    FileMemoryStore::new(store_root)
+        .list_web_findings(None)?
+        .into_iter()
+        .find(|finding| finding.id == id)
+        .context("web finding not found")
+}
+
 fn tools() -> Vec<Value> {
     vec![
         tool(
             "memory_search",
-            "Search local AI memory and return anchored chunks.",
+            "Search local AI memory and return anchored chunks plus a typed route_plan.",
             json!({
                 "type": "object",
                 "properties": {
@@ -248,9 +525,57 @@ fn tools() -> Vec<Value> {
             }),
         ),
         tool(
+            "memory_cortex_status",
+            "Return cortex index, adapter lifecycle, and recent training job status.",
+            json!({
+                "type": "object",
+                "properties": { "max_jobs": { "type": "integer" } }
+            }),
+        ),
+        tool(
+            "memory_cortex_compile",
+            "Compile the current CortexIndex and prepared adapter dataset.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool(
+            "memory_cortex_train",
+            "Queue and start cortex adapter training for the current source dataset.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool(
+            "memory_cortex_route",
+            "Return the cortex-guided route plan for a query without requiring answer generation.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "max_regions": { "type": "integer" },
+                    "max_chunks": { "type": "integer" }
+                },
+                "required": ["query"]
+            }),
+        ),
+        tool(
+            "memory_cortex_eval",
+            "Evaluate the current trained adapter against cortex activation gates.",
+            json!({
+                "type": "object",
+                "properties": { "minimum_score": { "type": "number" } }
+            }),
+        ),
+        tool(
             "memory_open",
             "Open a document, chunk, or region node.",
             node_schema(),
+        ),
+        tool(
+            "memory_open_source_artifact",
+            "Open a source artifact provenance record and list documents imported from it.",
+            json!({
+                "type": "object",
+                "properties": { "source_artifact_id": { "type": "string" } },
+                "required": ["source_artifact_id"]
+            }),
         ),
         tool(
             "memory_neighbors",
@@ -320,6 +645,55 @@ fn tools() -> Vec<Value> {
             }),
         ),
         tool(
+            "memory_expand_anchor",
+            "Expand exact source context from an anchor id.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "anchor_id": { "type": "string" },
+                    "window": { "type": "integer" }
+                },
+                "required": ["anchor_id"]
+            }),
+        ),
+        tool(
+            "memory_list_provenance",
+            "List provenance and source-anchor metadata for a memory target.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "target_id": { "type": "string" },
+                    "target_kind": { "type": "string", "enum": ["source_artifact", "document", "chunk", "derived_memory", "web_finding", "link"] }
+                },
+                "required": ["target_id"]
+            }),
+        ),
+        tool(
+            "memory_cite_hit",
+            "Record a cite access and return exact source context for an anchor.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "anchor_id": { "type": "string" },
+                    "window": { "type": "integer" },
+                    "actor": { "type": "string" }
+                },
+                "required": ["anchor_id"]
+            }),
+        ),
+        tool(
+            "memory_save_trail",
+            "Save a reversible surf trail from a session state.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "session": { "type": "object" }
+                },
+                "required": ["name", "session"]
+            }),
+        ),
+        tool(
             "memory_write_summary",
             "Write an agent summary back into memory with provenance.",
             json!({
@@ -334,14 +708,47 @@ fn tools() -> Vec<Value> {
             }),
         ),
         tool(
-            "memory_write_web_finding",
-            "Store a supplied web finding with URL, query, retrieval date, and provenance.",
+            "memory_save_derived_memory",
+            "Alias for memory_write_summary while clients migrate to explicit writeback naming.",
             json!({
                 "type": "object",
                 "properties": {
                     "session_id": { "type": "string" },
+                    "text": { "type": "string" },
+                    "actor": { "type": "string" },
+                    "confidence": { "type": "number" }
+                },
+                "required": ["text"]
+            }),
+        ),
+        tool(
+            "memory_write_web_finding",
+            "Store a supplied web finding with URL, query, retrieval date, and provenance.",
+            web_finding_write_schema(),
+        ),
+        tool(
+            "memory_save_web_finding",
+            "Alias for saving supplied web findings with provenance.",
+            web_finding_write_schema(),
+        ),
+        tool(
+            "memory_capture_url",
+            "Capture supplied URL evidence into memory with retrieval/freshness metadata.",
+            web_finding_write_schema(),
+        ),
+        tool(
+            "memory_save_search_result",
+            "Save a search result as a source-grounded web finding.",
+            web_finding_write_schema(),
+        ),
+        tool(
+            "memory_refresh_web_finding",
+            "Write a refreshed web finding version for an existing web_finding_id.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "web_finding_id": { "type": "string" },
                     "query": { "type": "string" },
-                    "url": { "type": "string" },
                     "title": { "type": "string" },
                     "summary": { "type": "string" },
                     "retrieved_at": { "type": "integer" },
@@ -349,12 +756,39 @@ fn tools() -> Vec<Value> {
                     "confidence": { "type": "number" },
                     "actor": { "type": "string" }
                 },
-                "required": ["query", "url", "summary"]
+                "required": ["web_finding_id", "summary"]
+            }),
+        ),
+        tool(
+            "memory_set_web_freshness",
+            "Set or clear a web finding freshness expiration.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "web_finding_id": { "type": "string" },
+                    "freshness_expires_at": { "type": "integer" },
+                    "actor": { "type": "string" }
+                },
+                "required": ["web_finding_id"]
             }),
         ),
         tool(
             "memory_write_link",
             "Write an inspectable agent-created link between memory targets.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "source_id": { "type": "string" },
+                    "target_id": { "type": "string" },
+                    "label": { "type": "string" },
+                    "actor": { "type": "string" }
+                },
+                "required": ["source_id", "target_id", "label"]
+            }),
+        ),
+        tool(
+            "memory_save_agent_link",
+            "Alias for writing an inspectable agent-created memory link.",
             json!({
                 "type": "object",
                 "properties": {
@@ -382,6 +816,18 @@ fn tools() -> Vec<Value> {
             }),
         ),
         tool(
+            "memory_revert_attention_mark",
+            "Revert a previous attention mark by id.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "mark_id": { "type": "string" },
+                    "actor": { "type": "string" }
+                },
+                "required": ["mark_id"]
+            }),
+        ),
+        tool(
             "memory_chat_trace",
             "List context traces showing which snippets were used for a chat session.",
             json!({
@@ -394,7 +840,7 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "memory_compile",
-            "Compile compact source-grounded brain artifacts for tiny local models.",
+            "Compatibility alias for memory_cortex_compile.",
             json!({
                 "type": "object",
                 "properties": {}
@@ -431,6 +877,24 @@ fn node_value_schema() -> Value {
     })
 }
 
+fn web_finding_write_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "session_id": { "type": "string" },
+            "query": { "type": "string" },
+            "url": { "type": "string" },
+            "title": { "type": "string" },
+            "summary": { "type": "string" },
+            "retrieved_at": { "type": "integer" },
+            "freshness_expires_at": { "type": "integer" },
+            "confidence": { "type": "number" },
+            "actor": { "type": "string" }
+        },
+        "required": ["query", "url", "summary"]
+    })
+}
+
 fn node_arg(args: &Value) -> anyhow::Result<NodeRef> {
     serde_json::from_value(args.get("node").cloned().context("node missing")?)
         .context("decoding node")
@@ -447,6 +911,13 @@ fn usize_arg(args: &Value, key: &str) -> Option<usize> {
     args.get(key)
         .and_then(Value::as_u64)
         .map(|value| value as usize)
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn expand_mode_arg(args: &Value) -> Option<ExpandMode> {
@@ -548,15 +1019,44 @@ mod tests {
                     .map(ToOwned::to_owned)
             })
             .collect::<Vec<_>>();
+        assert!(names.contains(&"memory_cortex_status".to_string()));
+        assert!(names.contains(&"memory_cortex_compile".to_string()));
+        assert!(names.contains(&"memory_cortex_train".to_string()));
+        assert!(names.contains(&"memory_cortex_route".to_string()));
+        assert!(names.contains(&"memory_cortex_eval".to_string()));
+        assert!(names.contains(&"memory_open_source_artifact".to_string()));
+        assert!(names.contains(&"memory_expand_anchor".to_string()));
+        assert!(names.contains(&"memory_list_provenance".to_string()));
+        assert!(names.contains(&"memory_cite_hit".to_string()));
+        assert!(names.contains(&"memory_save_trail".to_string()));
         assert!(names.contains(&"memory_write_summary".to_string()));
+        assert!(names.contains(&"memory_save_derived_memory".to_string()));
         assert!(names.contains(&"memory_write_web_finding".to_string()));
+        assert!(names.contains(&"memory_save_web_finding".to_string()));
+        assert!(names.contains(&"memory_capture_url".to_string()));
+        assert!(names.contains(&"memory_save_search_result".to_string()));
+        assert!(names.contains(&"memory_refresh_web_finding".to_string()));
+        assert!(names.contains(&"memory_set_web_freshness".to_string()));
         assert!(names.contains(&"memory_write_link".to_string()));
+        assert!(names.contains(&"memory_save_agent_link".to_string()));
         assert!(names.contains(&"memory_links".to_string()));
         assert!(names.contains(&"memory_inspect_link".to_string()));
         assert!(names.contains(&"memory_mark_link".to_string()));
         assert!(names.contains(&"memory_mark_attention".to_string()));
+        assert!(names.contains(&"memory_revert_attention_mark".to_string()));
         assert!(names.contains(&"memory_chat_trace".to_string()));
         assert!(names.contains(&"memory_compile".to_string()));
+    }
+
+    #[test]
+    fn mcp_tool_schemas_are_documented_for_phase_ten_surface() {
+        let docs = fs::read_to_string("docs/mcp-tools.md").expect("mcp docs");
+        for name in tools()
+            .into_iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_owned))
+        {
+            assert!(docs.contains(&name), "missing docs for {name}");
+        }
     }
 
     #[test]
@@ -661,5 +1161,161 @@ mod tests {
             .as_str()
             .expect("text")
             .contains("Suppress"));
+    }
+
+    #[test]
+    fn mcp_search_output_includes_route_plan() {
+        let root = temp_store_root("route-plan");
+        let source = root.join("memory.md");
+        fs::write(
+            &source,
+            "# Cortex\n\nCortex routing should search, open, expand, and cite source anchors.",
+        )
+        .expect("write source");
+        crate::app::ingest_paths(&root, &[source]).expect("ingest");
+
+        let result = call_tool(
+            &root,
+            json!({
+                "name": "memory_search",
+                "arguments": {
+                    "query": "How should cortex routing cite anchors?",
+                    "max_regions": 2,
+                    "max_chunks": 2
+                }
+            }),
+        )
+        .expect("search");
+        let payload: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().expect("text"))
+                .expect("decode payload");
+        assert!(payload["routed"]["route_plan"]["next_steps"]
+            .as_array()
+            .is_some_and(|steps| !steps.is_empty()));
+    }
+
+    #[test]
+    fn mcp_source_recall_and_writeback_tools_return_compatible_json() {
+        let root = temp_store_root("source-recall");
+        let source = root.join("source.md");
+        fs::write(
+            &source,
+            "# Recall\n\nExact recall should cite anchors and preserve provenance.",
+        )
+        .expect("write source");
+        crate::app::ingest_paths(&root, &[source]).expect("ingest");
+        let memory = FileMemoryStore::new(&root).load().expect("memory");
+        let chunk = memory.chunks.first().expect("chunk");
+        let anchor = chunk.source_anchor.as_ref().expect("anchor");
+        let source_artifact_id = anchor.source_artifact_id.as_ref().expect("artifact");
+
+        let opened = call_tool(
+            &root,
+            json!({
+                "name": "memory_open_source_artifact",
+                "arguments": { "source_artifact_id": source_artifact_id }
+            }),
+        )
+        .expect("open artifact");
+        assert!(opened["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains(source_artifact_id));
+
+        let cited = call_tool(
+            &root,
+            json!({
+                "name": "memory_cite_hit",
+                "arguments": { "anchor_id": anchor.id, "actor": "mcp-test" }
+            }),
+        )
+        .expect("cite");
+        assert!(cited["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("Exact recall"));
+
+        let provenance = call_tool(
+            &root,
+            json!({
+                "name": "memory_list_provenance",
+                "arguments": { "target_id": chunk.id, "target_kind": "chunk" }
+            }),
+        )
+        .expect("provenance");
+        assert!(provenance["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("source_anchor"));
+    }
+
+    #[test]
+    fn mcp_web_capture_and_attention_revert_are_compatible() {
+        let root = temp_store_root("web-capture");
+        let finding_result = call_tool(
+            &root,
+            json!({
+                "name": "memory_capture_url",
+                "arguments": {
+                    "query": "semantic filesystem provenance",
+                    "url": "https://example.com/imprint",
+                    "summary": "Captured evidence keeps URL provenance.",
+                    "retrieved_at": 1,
+                    "actor": "mcp-test"
+                }
+            }),
+        )
+        .expect("capture");
+        let finding: WebFinding =
+            serde_json::from_str(finding_result["content"][0]["text"].as_str().expect("text"))
+                .expect("decode finding");
+
+        let refreshed = call_tool(
+            &root,
+            json!({
+                "name": "memory_refresh_web_finding",
+                "arguments": {
+                    "web_finding_id": finding.id,
+                    "summary": "Refreshed evidence keeps URL provenance.",
+                    "retrieved_at": 2,
+                    "actor": "mcp-test"
+                }
+            }),
+        )
+        .expect("refresh");
+        assert!(refreshed["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("Refreshed evidence"));
+
+        let mark_result = call_tool(
+            &root,
+            json!({
+                "name": "memory_mark_attention",
+                "arguments": {
+                    "target_id": "workspace-1",
+                    "target_kind": "workspace",
+                    "action": "hot",
+                    "reason": "active workspace",
+                    "actor": "mcp-test"
+                }
+            }),
+        )
+        .expect("mark");
+        let mark: AttentionMark =
+            serde_json::from_str(mark_result["content"][0]["text"].as_str().expect("text"))
+                .expect("decode mark");
+        let reverted = call_tool(
+            &root,
+            json!({
+                "name": "memory_revert_attention_mark",
+                "arguments": { "mark_id": mark.id, "actor": "mcp-test" }
+            }),
+        )
+        .expect("revert");
+        assert!(reverted["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("reverted_at"));
     }
 }

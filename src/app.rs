@@ -1974,6 +1974,51 @@ pub fn write_web_finding(store_root: &Path, write: WebFindingWrite) -> anyhow::R
     Ok(finding)
 }
 
+pub fn set_web_finding_freshness(
+    store_root: &Path,
+    web_finding_id: &str,
+    freshness_expires_at: Option<u64>,
+    actor: String,
+) -> anyhow::Result<WebFinding> {
+    let store = FileMemoryStore::new(store_root);
+    let mut finding = store
+        .list_web_findings(None)?
+        .into_iter()
+        .find(|finding| finding.id == web_finding_id)
+        .context("web finding not found")?;
+    finding.freshness_expires_at = freshness_expires_at;
+    store.insert_web_finding(&finding)?;
+    audit_write(
+        &store,
+        finding.session_id.clone(),
+        "web_finding.freshness",
+        &finding.id,
+        &actor,
+        &finding,
+    )?;
+    sync_web_findings(store_root)?;
+    Ok(finding)
+}
+
+pub fn cite_source_anchor(
+    store_root: &Path,
+    anchor_id: &str,
+    window: usize,
+    actor: String,
+) -> anyhow::Result<SurfExpansion> {
+    let expanded = surf_jump_to_anchor(store_root, anchor_id, window)?;
+    let store = FileMemoryStore::new(store_root);
+    record_memory_access(
+        &store,
+        AttentionTargetKind::Chunk,
+        expanded.chunk_id.clone(),
+        MemoryAccessKind::Cite,
+        "Cited source anchor for an agent answer.",
+        &actor,
+    );
+    Ok(expanded)
+}
+
 pub fn compile_memory_brain(store_root: &Path) -> anyhow::Result<BrainCompileResult> {
     let store = FileMemoryStore::new(store_root);
     let config = load_model_config(store_root)?;
