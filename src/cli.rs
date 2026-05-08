@@ -101,6 +101,30 @@ enum Command {
     Links {
         node: String,
     },
+    LinkInspect {
+        link_id: String,
+    },
+    LinkSuppress {
+        link_id: String,
+        #[arg(long, default_value = "Hidden from graph navigation.")]
+        reason: String,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+    },
+    LinkPromote {
+        link_id: String,
+        #[arg(long, default_value = "Promoted for graph navigation.")]
+        reason: String,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+    },
+    LinkPin {
+        link_id: String,
+        #[arg(long, default_value = "Pinned for graph navigation.")]
+        reason: String,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+    },
     Step {
         node: String,
         link_id: String,
@@ -437,22 +461,65 @@ pub fn run() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Links { node } => {
-            let memory = load_ready_memory(&store)?;
             let node = parse_node(&node)?;
-            let links = navigator.list_links(&memory, &node);
+            let links = crate::app::list_links(store.root(), &node)?;
             println!("{}", serde_json::to_string_pretty(&links)?);
         }
+        Command::LinkInspect { link_id } => {
+            let inspection = crate::app::inspect_link(store.root(), &link_id)?;
+            println!("{}", serde_json::to_string_pretty(&inspection)?);
+        }
+        Command::LinkSuppress {
+            link_id,
+            reason,
+            actor,
+        } => {
+            let mark = crate::app::mark_link_attention(
+                store.root(),
+                &link_id,
+                AttentionAction::Suppress,
+                reason,
+                actor,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&mark)?);
+        }
+        Command::LinkPromote {
+            link_id,
+            reason,
+            actor,
+        } => {
+            let mark = crate::app::mark_link_attention(
+                store.root(),
+                &link_id,
+                AttentionAction::Promote,
+                reason,
+                actor,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&mark)?);
+        }
+        Command::LinkPin {
+            link_id,
+            reason,
+            actor,
+        } => {
+            let mark = crate::app::mark_link_attention(
+                store.root(),
+                &link_id,
+                AttentionAction::Pin,
+                reason,
+                actor,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&mark)?);
+        }
         Command::Step { node, link_id } => {
-            let memory = load_ready_memory(&store)?;
             let node = parse_node(&node)?;
-            let mut session = navigator.start_session(Some(node));
-            let next = navigator
-                .step(&memory, &mut session, &link_id)
-                .context("link not found")?;
+            let session = navigator.start_session(Some(node));
+            let result = crate::app::step_navigation(store.root(), session, &link_id)?;
+            let next = result.session.current;
             let payload = serde_json::json!({
                 "current": next,
-                "history": session.history,
-                "visited": session.visited,
+                "history": result.session.history,
+                "visited": result.session.visited,
             });
             println!("{}", serde_json::to_string_pretty(&payload)?);
         }

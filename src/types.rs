@@ -302,6 +302,7 @@ pub enum LinkType {
     CitationReference,
     EntityOverlap,
     RegionMembership,
+    Explicit,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -312,6 +313,25 @@ pub struct Link {
     pub link_type: LinkType,
     pub score: f32,
     pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LinkEvidence {
+    pub reason: String,
+    pub source_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LinkInspection {
+    pub link: Link,
+    pub why_linked: String,
+    pub evidence: Vec<LinkEvidence>,
+    pub confidence: String,
+    pub provenance: ProvenanceRecord,
+    pub attention_marks: Vec<AttentionMark>,
+    pub suppressed: bool,
+    pub promoted: bool,
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]

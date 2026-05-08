@@ -678,6 +678,7 @@ enum LinkType: String, Codable {
     case citationReference = "CitationReference"
     case entityOverlap = "EntityOverlap"
     case regionMembership = "RegionMembership"
+    case explicit = "Explicit"
 }
 
 struct LinkRecord: Codable, Equatable, Identifiable {

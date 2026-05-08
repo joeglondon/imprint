@@ -283,19 +283,19 @@ Goal: scale beyond in-memory approximate region search while making memory surfa
   - [x] hierarchical regions
   - [x] source-type-aware regions
   - [x] active project/session overlays
-- [ ] Improve graph links:
-  - [ ] citation/reference parser quality
-  - [ ] entity extraction
-  - [ ] same-source ordering
-  - [ ] semantic neighbor confidence
-  - [ ] explicit user/agent links
-  - [ ] link provenance and reversibility
-- [ ] Add graph inspection tools:
-  - [ ] why linked
-  - [ ] source evidence
-  - [ ] confidence
-  - [ ] hide/suppress link
-  - [ ] pin/promote link
+- [x] Improve graph links:
+  - [x] citation/reference parser quality
+  - [x] entity extraction
+  - [x] same-source ordering
+  - [x] semantic neighbor confidence
+  - [x] explicit user/agent links
+  - [x] link provenance and reversibility
+- [x] Add graph inspection tools:
+  - [x] why linked
+  - [x] source evidence
+  - [x] confidence
+  - [x] hide/suppress link
+  - [x] pin/promote link
 
 ## Phase 7: Attention, Hotness, And Ranking
 

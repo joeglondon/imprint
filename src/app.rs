@@ -591,11 +591,15 @@ pub fn get_visualization_snapshot(store_root: &Path) -> anyhow::Result<Visualiza
     }
 
     add_visual_similarity_edges(&memory.chunks, &mut edges);
-    for link in memory.links.iter().filter(|link| {
+    let visual_links = all_inspectable_links(&store, &memory)?;
+    for link in visual_links.iter().filter(|link| {
         matches!(
             link.link_type,
-            LinkType::SemanticNeighbor | LinkType::EntityOverlap | LinkType::CitationReference
-        )
+            LinkType::SemanticNeighbor
+                | LinkType::EntityOverlap
+                | LinkType::CitationReference
+                | LinkType::Explicit
+        ) && !is_link_suppressed(&store, &link.id).unwrap_or(false)
     }) {
         edges.push(GraphEdge {
             id: link.id.clone(),
@@ -788,8 +792,9 @@ pub fn surf_session_step(
 }
 
 pub fn list_links(store_root: &Path, node: &NodeRef) -> anyhow::Result<Vec<Link>> {
+    let store = FileMemoryStore::new(store_root);
     let memory = load_ready_memory(store_root)?;
-    Ok(MemoryNavigator.list_links(&memory, node))
+    links_for_node(&store, &memory, node)
 }
 
 pub fn step_navigation(
@@ -797,16 +802,16 @@ pub fn step_navigation(
     session: SessionState,
     link_id: &str,
 ) -> anyhow::Result<NavigationResult> {
+    let store = FileMemoryStore::new(store_root);
     let memory = load_ready_memory(store_root)?;
     let mut next_session = session;
-    MemoryNavigator
-        .step(&memory, &mut next_session, link_id)
-        .context("link not found")?;
+    step_any_link(&store, &memory, &mut next_session, link_id).context("link not found")?;
     let current_excerpt = current_excerpt(&memory, next_session.current.as_ref());
     let links = next_session
         .current
         .as_ref()
-        .map(|node| MemoryNavigator.list_links(&memory, node))
+        .map(|node| links_for_node(&store, &memory, node))
+        .transpose()?
         .unwrap_or_default();
     Ok(NavigationResult {
         session: next_session,
@@ -815,10 +820,226 @@ pub fn step_navigation(
     })
 }
 
+pub fn inspect_link(store_root: &Path, link_id: &str) -> anyhow::Result<LinkInspection> {
+    let store = FileMemoryStore::new(store_root);
+    let memory = load_ready_memory(store_root)?;
+    for agent_link in store.list_agent_links()? {
+        if agent_link.id == link_id {
+            let link = agent_link_to_graph_link(&agent_link)
+                .with_context(|| format!("agent link {link_id} has invalid endpoints"))?;
+            let attention_marks = store.list_attention_marks(Some(&link.id))?;
+            let mut inspection = inspect_link_record(link, attention_marks);
+            inspection.provenance = agent_link.provenance;
+            return Ok(inspection);
+        }
+    }
+    let link = all_inspectable_links(&store, &memory)?
+        .into_iter()
+        .find(|link| link.id == link_id)
+        .with_context(|| format!("link {link_id} not found"))?;
+    let attention_marks = store.list_attention_marks(Some(&link.id))?;
+    Ok(inspect_link_record(link, attention_marks))
+}
+
+pub fn mark_link_attention(
+    store_root: &Path,
+    link_id: &str,
+    action: AttentionAction,
+    reason: String,
+    actor: String,
+) -> anyhow::Result<AttentionMark> {
+    inspect_link(store_root, link_id)?;
+    apply_attention_mark(
+        store_root,
+        AttentionMarkWrite {
+            target_id: link_id.into(),
+            target_kind: AttentionTargetKind::Link,
+            action,
+            reason,
+            actor,
+        },
+    )
+}
+
+fn links_for_node(
+    store: &FileMemoryStore,
+    memory: &PersistedMemory,
+    node: &NodeRef,
+) -> anyhow::Result<Vec<Link>> {
+    let mut links = MemoryNavigator.list_links(memory, node);
+    links.extend(
+        store
+            .list_agent_links()?
+            .into_iter()
+            .filter_map(|agent_link| agent_link_to_graph_link(&agent_link))
+            .filter(|link| &link.source == node || &link.target == node),
+    );
+    let mut deduped = BTreeMap::new();
+    for link in links {
+        if !is_link_suppressed(store, &link.id)? {
+            deduped.entry(link.id.clone()).or_insert(link);
+        }
+    }
+    Ok(deduped.into_values().collect())
+}
+
+fn step_any_link(
+    store: &FileMemoryStore,
+    memory: &PersistedMemory,
+    session: &mut SessionState,
+    link_id: &str,
+) -> Option<NodeRef> {
+    let current = session.current.clone()?;
+    let links = links_for_node(store, memory, &current).ok()?;
+    let link = links.into_iter().find(|link| link.id == link_id)?;
+    let next = if link.source == current {
+        link.target
+    } else {
+        link.source
+    };
+    MemoryNavigator.open(session, next.clone());
+    Some(next)
+}
+
+fn all_inspectable_links(
+    store: &FileMemoryStore,
+    memory: &PersistedMemory,
+) -> anyhow::Result<Vec<Link>> {
+    let mut links = memory.links.clone();
+    links.extend(
+        store
+            .list_agent_links()?
+            .iter()
+            .filter_map(agent_link_to_graph_link),
+    );
+    links.sort_by(|left, right| left.id.cmp(&right.id));
+    links.dedup_by(|left, right| left.id == right.id);
+    Ok(links)
+}
+
+fn agent_link_to_graph_link(link: &AgentLinkMemory) -> Option<Link> {
+    Some(Link {
+        id: link.id.clone(),
+        source: parse_node_ref(&link.source_id, None)?,
+        target: parse_node_ref(&link.target_id, None)?,
+        link_type: LinkType::Explicit,
+        score: 1.0,
+        label: link.label.clone(),
+    })
+}
+
+fn is_link_suppressed(store: &FileMemoryStore, link_id: &str) -> anyhow::Result<bool> {
+    let marks = store.list_attention_marks(Some(link_id))?;
+    let suppressed = marks
+        .iter()
+        .any(|mark| mark.reverted_at.is_none() && mark.action == AttentionAction::Suppress);
+    let restored = marks.iter().any(|mark| {
+        mark.reverted_at.is_none()
+            && matches!(
+                mark.action,
+                AttentionAction::Pin | AttentionAction::Promote | AttentionAction::Hot
+            )
+    });
+    Ok(suppressed && !restored)
+}
+
+fn inspect_link_record(link: Link, attention_marks: Vec<AttentionMark>) -> LinkInspection {
+    let suppressed = attention_marks
+        .iter()
+        .any(|mark| mark.reverted_at.is_none() && mark.action == AttentionAction::Suppress);
+    let promoted = attention_marks
+        .iter()
+        .any(|mark| mark.reverted_at.is_none() && mark.action == AttentionAction::Promote);
+    let pinned = attention_marks
+        .iter()
+        .any(|mark| mark.reverted_at.is_none() && mark.action == AttentionAction::Pin);
+    let confidence = if link.score >= 0.85 {
+        "high"
+    } else if link.score >= 0.65 {
+        "medium"
+    } else {
+        "low"
+    }
+    .to_string();
+    let why_linked = link_reason(&link);
+    let evidence = vec![LinkEvidence {
+        reason: why_linked.clone(),
+        source_refs: vec![node_key(&link.source), node_key(&link.target)],
+    }];
+    LinkInspection {
+        provenance: ProvenanceRecord {
+            actor: link_provenance_actor(&link).into(),
+            reason: format!("{} link inspection.", link_type_label(&link.link_type)),
+            created_at: now_millis(),
+            source_refs: evidence[0].source_refs.clone(),
+        },
+        link,
+        why_linked,
+        evidence,
+        confidence,
+        attention_marks,
+        suppressed,
+        promoted,
+        pinned,
+    }
+}
+
+fn link_reason(link: &Link) -> String {
+    match link.link_type {
+        LinkType::SemanticNeighbor => format!(
+            "Embeddings placed these memory nodes near each other; score {:.3}. {}",
+            link.score, link.label
+        ),
+        LinkType::SameDocument => {
+            "Chunks are adjacent or otherwise ordered inside the same source document.".into()
+        }
+        LinkType::CitationReference => {
+            format!(
+                "The source text contains a citation or reference parsed as '{}'.",
+                link.label
+            )
+        }
+        LinkType::EntityOverlap => {
+            format!(
+                "The documents share extracted named or metadata entities: {}.",
+                link.label
+            )
+        }
+        LinkType::RegionMembership => {
+            "The chunk belongs to this cortex/source-recall region.".into()
+        }
+        LinkType::Explicit => {
+            format!(
+                "A user or agent explicitly wrote this link: {}.",
+                link.label
+            )
+        }
+    }
+}
+
+fn link_type_label(link_type: &LinkType) -> &'static str {
+    match link_type {
+        LinkType::SemanticNeighbor => "semantic neighbor",
+        LinkType::SameDocument => "same-document",
+        LinkType::CitationReference => "citation/reference",
+        LinkType::EntityOverlap => "entity-overlap",
+        LinkType::RegionMembership => "region-membership",
+        LinkType::Explicit => "explicit",
+    }
+}
+
+fn link_provenance_actor(link: &Link) -> &'static str {
+    match link.link_type {
+        LinkType::Explicit => "agent-link",
+        _ => "graph-builder",
+    }
+}
+
 pub fn backtrack_navigation(
     store_root: &Path,
     session: SessionState,
 ) -> anyhow::Result<NavigationResult> {
+    let store = FileMemoryStore::new(store_root);
     let memory = load_ready_memory(store_root)?;
     let mut next_session = session;
     MemoryNavigator
@@ -828,7 +1049,8 @@ pub fn backtrack_navigation(
     let links = next_session
         .current
         .as_ref()
-        .map(|node| MemoryNavigator.list_links(&memory, node))
+        .map(|node| links_for_node(&store, &memory, node))
+        .transpose()?
         .unwrap_or_default();
     Ok(NavigationResult {
         session: next_session,
@@ -893,6 +1115,10 @@ pub fn list_attention_marks(
     target_id: Option<String>,
 ) -> anyhow::Result<Vec<AttentionMark>> {
     FileMemoryStore::new(store_root).list_attention_marks(target_id.as_deref())
+}
+
+pub fn list_agent_links(store_root: &Path) -> anyhow::Result<Vec<AgentLinkMemory>> {
+    FileMemoryStore::new(store_root).list_agent_links()
 }
 
 pub fn list_audit_events(
@@ -1434,18 +1660,21 @@ pub fn write_agent_link(
 ) -> anyhow::Result<AgentLinkMemory> {
     let store = FileMemoryStore::new(store_root);
     let created_at = now_millis();
+    let source_id = write.source_id;
+    let target_id = write.target_id;
+    let actor = write.actor;
     let link = AgentLinkMemory {
         id: unique_id("agent-link"),
-        source_id: write.source_id,
-        target_id: write.target_id,
+        source_id: source_id.clone(),
+        target_id: target_id.clone(),
         label: write.label,
-        actor: write.actor,
+        actor: actor.clone(),
         created_at,
         provenance: ProvenanceRecord {
-            actor: "assistant".into(),
+            actor,
             reason: "Agent-created memory link.".into(),
             created_at,
-            source_refs: Vec::new(),
+            source_refs: vec![source_id, target_id],
         },
     };
     store.insert_agent_link(&link)?;
@@ -6468,6 +6697,74 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
         assert!(audit
             .iter()
             .any(|event| event.event_type == "attention.mark"));
+    }
+
+    #[test]
+    fn agent_links_are_inspectable_suppressible_and_navigable() {
+        let root = temp_store_root("agent-link-graph");
+        let first = root.join("first.md");
+        let second = root.join("second.md");
+        fs::write(&first, "# First\n\nAlpha project source.").expect("write first");
+        fs::write(&second, "# Second\n\nBeta project source.").expect("write second");
+        ingest_paths(&root, &[first, second]).expect("ingest sources");
+
+        let memory = load_ready_memory(&root).expect("memory");
+        let source = memory.documents[0].id.clone();
+        let target = memory.documents[1].id.clone();
+        let link = write_agent_link(
+            &root,
+            AgentLinkWrite {
+                source_id: format!("document:{source}"),
+                target_id: format!("document:{target}"),
+                label: "related project note".into(),
+                actor: "assistant".into(),
+            },
+        )
+        .expect("write agent link");
+
+        let links = list_links(&root, &NodeRef::Document(source.clone())).expect("list links");
+        assert!(links.iter().any(|candidate| {
+            candidate.id == link.id && candidate.link_type == LinkType::Explicit
+        }));
+        let snapshot = get_visualization_snapshot(&root).expect("visualization");
+        assert!(snapshot.edges.iter().any(|edge| edge.id == link.id));
+
+        let inspection = inspect_link(&root, &link.id).expect("inspect link");
+        assert_eq!(inspection.link.link_type, LinkType::Explicit);
+        assert_eq!(inspection.confidence, "high");
+        assert_eq!(inspection.provenance.actor, "assistant");
+        assert_eq!(inspection.provenance.source_refs.len(), 2);
+        assert!(inspection.why_linked.contains("explicitly wrote"));
+
+        mark_link_attention(
+            &root,
+            &link.id,
+            AttentionAction::Suppress,
+            "Hide noisy relation.".into(),
+            "assistant".into(),
+        )
+        .expect("suppress link");
+        let hidden_links =
+            list_links(&root, &NodeRef::Document(source.clone())).expect("list hidden links");
+        assert!(!hidden_links.iter().any(|candidate| candidate.id == link.id));
+
+        mark_link_attention(
+            &root,
+            &link.id,
+            AttentionAction::Promote,
+            "Restore useful relation.".into(),
+            "assistant".into(),
+        )
+        .expect("promote link");
+        let restored_links =
+            list_links(&root, &NodeRef::Document(source.clone())).expect("list restored links");
+        assert!(restored_links
+            .iter()
+            .any(|candidate| candidate.id == link.id));
+
+        let session = MemoryNavigator.start_session(Some(NodeRef::Document(source)));
+        let result = step_navigation(&root, session, &link.id).expect("step link");
+        assert_eq!(result.session.current, Some(NodeRef::Document(target)));
     }
 
     #[test]

@@ -1957,6 +1957,7 @@ private struct LinkRow: View {
         case .citationReference: return "citation"
         case .entityOverlap: return "entity"
         case .regionMembership: return "region"
+        case .explicit: return "explicit"
         }
     }
 
@@ -1967,6 +1968,7 @@ private struct LinkRow: View {
         case .citationReference: return .c
         case .entityOverlap: return .d
         case .regionMembership: return .human
+        case .explicit: return .human
         }
     }
 }

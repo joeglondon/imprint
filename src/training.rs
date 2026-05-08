@@ -1871,7 +1871,7 @@ fn build_training_records(context: &CortexTrainingExportContext) -> Vec<serde_js
     for link in &context.memory.links {
         if matches!(
             link.link_type,
-            LinkType::CitationReference | LinkType::EntityOverlap
+            LinkType::CitationReference | LinkType::EntityOverlap | LinkType::Explicit
         ) {
             let source_id = format!("link:{}", link.id);
             let split = split_for_source(&source_id);
@@ -2231,6 +2231,7 @@ fn link_type_label(link_type: &LinkType) -> &'static str {
         LinkType::CitationReference => "citation_reference",
         LinkType::EntityOverlap => "entity_overlap",
         LinkType::RegionMembership => "region_membership",
+        LinkType::Explicit => "explicit",
     }
 }
 

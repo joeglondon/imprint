@@ -90,6 +90,27 @@ fn call_tool(store_root: &Path, params: Value) -> anyhow::Result<Value> {
                 usize_arg(&args, "max_results").unwrap_or(8),
             )?)?
         }
+        "memory_links" => {
+            let node = node_arg(&args)?;
+            serde_json::to_value(crate::app::list_links(store_root, &node)?)?
+        }
+        "memory_inspect_link" => {
+            let link_id = string_arg(&args, "link_id")?;
+            serde_json::to_value(crate::app::inspect_link(store_root, &link_id)?)?
+        }
+        "memory_mark_link" => {
+            let link_id = string_arg(&args, "link_id")?;
+            serde_json::to_value(crate::app::mark_link_attention(
+                store_root,
+                &link_id,
+                attention_action_arg(&args)?,
+                string_arg(&args, "reason")?,
+                args.get("actor")
+                    .and_then(Value::as_str)
+                    .unwrap_or("mcp-agent")
+                    .to_string(),
+            )?)?
+        }
         "memory_expand" => {
             let chunk_id = string_arg(&args, "chunk_id")?;
             let mode = expand_mode_arg(&args).unwrap_or(ExpandMode::Window);
@@ -240,6 +261,36 @@ fn tools() -> Vec<Value> {
                     "max_results": { "type": "integer" }
                 },
                 "required": ["node"]
+            }),
+        ),
+        tool(
+            "memory_links",
+            "List inspectable graph links for a document, chunk, or region node.",
+            node_schema(),
+        ),
+        tool(
+            "memory_inspect_link",
+            "Explain why a graph link exists, with evidence, confidence, provenance, and attention marks.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "link_id": { "type": "string" }
+                },
+                "required": ["link_id"]
+            }),
+        ),
+        tool(
+            "memory_mark_link",
+            "Pin, promote, suppress, or otherwise mark a graph link with reversible attention.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "link_id": { "type": "string" },
+                    "action": { "type": "string", "enum": ["active", "hot", "warm", "cold", "promote", "decay", "pin", "suppress"] },
+                    "reason": { "type": "string" },
+                    "actor": { "type": "string" }
+                },
+                "required": ["link_id", "action", "reason"]
             }),
         ),
         tool(
@@ -493,6 +544,9 @@ mod tests {
         assert!(names.contains(&"memory_write_summary".to_string()));
         assert!(names.contains(&"memory_write_web_finding".to_string()));
         assert!(names.contains(&"memory_write_link".to_string()));
+        assert!(names.contains(&"memory_links".to_string()));
+        assert!(names.contains(&"memory_inspect_link".to_string()));
+        assert!(names.contains(&"memory_mark_link".to_string()));
         assert!(names.contains(&"memory_mark_attention".to_string()));
         assert!(names.contains(&"memory_chat_trace".to_string()));
         assert!(names.contains(&"memory_compile".to_string()));
@@ -522,5 +576,83 @@ mod tests {
         assert!(audit
             .iter()
             .any(|event| event.event_type == "derived_memory.write"));
+    }
+
+    #[test]
+    fn mcp_can_inspect_and_mark_graph_links() {
+        let root = temp_store_root("inspect-link");
+        let first = root.join("first.md");
+        let second = root.join("second.md");
+        fs::write(&first, "# First\n\nAlpha source.").expect("write first");
+        fs::write(&second, "# Second\n\nBeta source.").expect("write second");
+        crate::app::ingest_paths(&root, &[first, second]).expect("ingest");
+
+        let memory = FileMemoryStore::new(&root).load().expect("memory");
+        let source_id = memory.documents[0].id.clone();
+        let target_id = memory.documents[1].id.clone();
+        let write_result = call_tool(
+            &root,
+            json!({
+                "name": "memory_write_link",
+                "arguments": {
+                    "source_id": format!("document:{source_id}"),
+                    "target_id": format!("document:{target_id}"),
+                    "label": "related source",
+                    "actor": "mcp-test"
+                }
+            }),
+        )
+        .expect("write link");
+        let link: AgentLinkMemory =
+            serde_json::from_str(write_result["content"][0]["text"].as_str().expect("text"))
+                .expect("decode link");
+
+        let links_result = call_tool(
+            &root,
+            json!({
+                "name": "memory_links",
+                "arguments": {
+                    "node": { "Document": source_id }
+                }
+            }),
+        )
+        .expect("list links");
+        assert!(links_result["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains(&link.id));
+
+        let inspect_result = call_tool(
+            &root,
+            json!({
+                "name": "memory_inspect_link",
+                "arguments": {
+                    "link_id": link.id.clone()
+                }
+            }),
+        )
+        .expect("inspect link");
+        assert!(inspect_result["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("explicitly wrote"));
+
+        let mark_result = call_tool(
+            &root,
+            json!({
+                "name": "memory_mark_link",
+                "arguments": {
+                    "link_id": link.id,
+                    "action": "suppress",
+                    "reason": "too noisy",
+                    "actor": "mcp-test"
+                }
+            }),
+        )
+        .expect("mark link");
+        assert!(mark_result["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("Suppress"));
     }
 }

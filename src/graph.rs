@@ -1,6 +1,6 @@
 use crate::index::{cosine_similarity, tokenize};
 use crate::types::*;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 const DOC_SEMANTIC_THRESHOLD: f32 = 0.58;
 const MAX_DOC_SEMANTIC_LINKS_PER_DOCUMENT: usize = 3;
@@ -42,6 +42,13 @@ impl GraphBuilder {
                 .iter()
                 .filter(|chunk| chunk.document_id == document.id)
                 .collect::<Vec<_>>();
+            let mut doc_chunks = doc_chunks;
+            doc_chunks.sort_by(|left, right| {
+                left.ordinal
+                    .cmp(&right.ordinal)
+                    .then_with(|| left.start.cmp(&right.start))
+                    .then_with(|| left.id.cmp(&right.id))
+            });
             for window in doc_chunks.windows(2) {
                 let left = window[0];
                 let right = window[1];
@@ -114,7 +121,7 @@ impl GraphBuilder {
                     target: NodeRef::Chunk(right),
                     link_type: LinkType::SemanticNeighbor,
                     score,
-                    label: "semantic neighbor".into(),
+                    label: semantic_neighbor_label(score),
                 });
             }
         }
@@ -142,12 +149,22 @@ impl GraphBuilder {
                     ));
                     continue;
                 }
-                if document_entity_overlap(document, other) {
+                let shared_entities = shared_document_entities(document, other);
+                if !shared_entities.is_empty() {
+                    let score = entity_overlap_score(shared_entities.len());
                     candidates.push((
                         other.id.clone(),
                         LinkType::EntityOverlap,
-                        0.45,
-                        "entity overlap".to_string(),
+                        score,
+                        format!(
+                            "entity overlap: {}",
+                            shared_entities
+                                .iter()
+                                .take(3)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
                     ));
                 }
             }
@@ -225,14 +242,24 @@ impl GraphBuilder {
 }
 
 fn parse_citations(text: &str) -> Vec<String> {
-    text.split_whitespace()
-        .filter_map(|token| token.strip_prefix("cite:"))
-        .map(|value| {
-            value
-                .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '-')
-                .to_string()
-        })
-        .collect()
+    let mut refs = BTreeSet::new();
+    for token in text.split_whitespace() {
+        if let Some(value) = token.strip_prefix("cite:") {
+            add_citation_ref(value, &mut refs);
+        }
+        if let Some(value) = token.strip_prefix('@') {
+            add_citation_ref(value, &mut refs);
+        }
+    }
+
+    for value in parse_wrapped_refs(text, "cite(", ")") {
+        add_citation_ref(&value, &mut refs);
+    }
+    for value in parse_bracketed_citation_refs(text) {
+        add_citation_ref(&value, &mut refs);
+    }
+
+    refs.into_iter().collect()
 }
 
 fn parse_markdown_links(text: &str) -> Vec<String> {
@@ -257,6 +284,51 @@ fn parse_markdown_links(text: &str) -> Vec<String> {
         index += 1;
     }
     refs
+}
+
+fn parse_wrapped_refs(text: &str, open: &str, close: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(start) = text[cursor..].find(open) {
+        let value_start = cursor + start + open.len();
+        let Some(end) = text[value_start..].find(close) else {
+            break;
+        };
+        refs.push(text[value_start..value_start + end].trim().to_string());
+        cursor = value_start + end + close.len();
+    }
+    refs
+}
+
+fn parse_bracketed_citation_refs(text: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(start) = text[cursor..].find("[@") {
+        let value_start = cursor + start + 2;
+        let Some(end) = text[value_start..].find(']') else {
+            break;
+        };
+        let group = &text[value_start..value_start + end];
+        for part in group.split([';', ',']) {
+            let trimmed = part.trim().trim_start_matches('@');
+            if !trimmed.is_empty() {
+                refs.push(trimmed.to_string());
+            }
+        }
+        cursor = value_start + end + 1;
+    }
+    refs
+}
+
+fn add_citation_ref(raw: &str, refs: &mut BTreeSet<String>) {
+    let value = raw
+        .trim()
+        .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '-' && ch != '_' && ch != '/')
+        .trim_end_matches(".md")
+        .trim_end_matches(".markdown");
+    if !value.is_empty() {
+        refs.insert(value.to_string());
+    }
 }
 
 fn resolve_document_reference(raw: &str, documents: &HashMap<String, Document>) -> Option<String> {
@@ -284,6 +356,17 @@ fn normalize_ref(raw: &str) -> String {
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
         .collect()
+}
+
+fn semantic_neighbor_label(score: f32) -> String {
+    let confidence = if score >= 0.88 {
+        "high"
+    } else if score >= 0.78 {
+        "medium"
+    } else {
+        "low"
+    };
+    format!("semantic neighbor ({confidence} confidence)")
 }
 
 fn document_centroids(memory: &PersistedMemory) -> HashMap<String, Vec<f32>> {
@@ -317,14 +400,213 @@ fn document_regions(memory: &PersistedMemory) -> HashMap<String, String> {
     regions
 }
 
-fn document_entity_overlap(left: &Document, right: &Document) -> bool {
-    let left_tokens = tokenize(&left.text)
-        .into_iter()
-        .filter(|token| token.len() > 6)
-        .collect::<HashSet<_>>();
-    let right_tokens = tokenize(&right.text)
-        .into_iter()
-        .filter(|token| token.len() > 6)
-        .collect::<HashSet<_>>();
-    left_tokens.intersection(&right_tokens).next().is_some()
+fn shared_document_entities(left: &Document, right: &Document) -> Vec<String> {
+    let left_entities = document_entities(left);
+    let right_entities = document_entities(right);
+    left_entities
+        .intersection(&right_entities)
+        .take(8)
+        .cloned()
+        .collect()
+}
+
+fn document_entities(document: &Document) -> BTreeSet<String> {
+    let mut entities = BTreeSet::new();
+    for key in ["entities", "entity", "people", "person", "tags", "keywords"] {
+        if let Some(raw) = document.metadata.get(key) {
+            for part in raw.split([',', ';', '|']) {
+                add_entity(part, &mut entities);
+            }
+        }
+    }
+    for token in tokenize(&document.title) {
+        add_normalized_entity(&token, &mut entities);
+    }
+    for token in document
+        .text
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '-' && ch != '_')
+    {
+        if looks_like_named_entity(token) {
+            add_entity(token, &mut entities);
+        }
+    }
+    entities
+}
+
+fn add_entity(raw: &str, entities: &mut BTreeSet<String>) {
+    let normalized = normalize_entity(raw);
+    add_normalized_entity(&normalized, entities);
+}
+
+fn add_normalized_entity(normalized: &str, entities: &mut BTreeSet<String>) {
+    if normalized.len() >= 4 && !ENTITY_STOPWORDS.contains(&normalized) {
+        entities.insert(normalized.to_string());
+    }
+}
+
+fn normalize_entity(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '-' && ch != '_')
+        .to_lowercase()
+}
+
+fn looks_like_named_entity(token: &str) -> bool {
+    let trimmed = token.trim();
+    if trimmed.len() < 4 || ENTITY_STOPWORDS.contains(&trimmed.to_lowercase().as_str()) {
+        return false;
+    }
+    let mut chars = trimmed.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_uppercase() && chars.any(|ch| ch.is_ascii_lowercase()))
+        || (trimmed.len() >= 2 && trimmed.chars().all(|ch| ch.is_ascii_uppercase()))
+}
+
+fn entity_overlap_score(shared_count: usize) -> f32 {
+    (0.48 + (shared_count.min(5) as f32 * 0.04)).min(0.68)
+}
+
+const ENTITY_STOPWORDS: &[&str] = &[
+    "about", "after", "also", "before", "between", "document", "from", "into", "memory", "source",
+    "that", "their", "there", "these", "this", "with",
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn document(id: &str, title: &str, text: &str) -> Document {
+        Document {
+            id: id.into(),
+            title: title.into(),
+            text: text.into(),
+            metadata: BTreeMap::new(),
+            source_anchor: None,
+            content_hash: None,
+            parser_version: None,
+        }
+    }
+
+    fn chunk(id: &str, document_id: &str, ordinal: usize, start: usize) -> Chunk {
+        Chunk {
+            id: id.into(),
+            document_id: document_id.into(),
+            region_id: "region-a".into(),
+            ordinal,
+            start,
+            end: start + 10,
+            text: format!("chunk {id}"),
+            metadata: BTreeMap::new(),
+            source_anchor: None,
+            embedding: vec![1.0, 0.0, 0.0],
+            embedding_text_hash: None,
+            embedding_provider: None,
+            embedding_model: None,
+            embedding_endpoint: None,
+            embedding_dimension: Some(3),
+            chunking_version: None,
+        }
+    }
+
+    fn region() -> Region {
+        Region {
+            id: "region-a".into(),
+            label: "Region A".into(),
+            summary: "Test region".into(),
+            filters: BTreeMap::new(),
+            chunk_ids: Vec::new(),
+            centroid: vec![1.0, 0.0, 0.0],
+            neighbors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn same_document_links_follow_chunk_ordinal_order() {
+        let mut memory = PersistedMemory {
+            documents: vec![document("doc-a", "Doc A", "body")],
+            chunks: vec![
+                chunk("chunk-2", "doc-a", 2, 20),
+                chunk("chunk-0", "doc-a", 0, 0),
+                chunk("chunk-1", "doc-a", 1, 10),
+            ],
+            regions: vec![region()],
+            links: Vec::new(),
+            memory_map: None,
+        };
+
+        GraphBuilder.build(&mut memory);
+
+        let same_doc_links = memory
+            .links
+            .iter()
+            .filter(|link| link.link_type == LinkType::SameDocument)
+            .map(|link| (&link.source, &link.target))
+            .collect::<Vec<_>>();
+        assert!(same_doc_links.contains(&(
+            &NodeRef::Chunk("chunk-0".into()),
+            &NodeRef::Chunk("chunk-1".into())
+        )));
+        assert!(same_doc_links.contains(&(
+            &NodeRef::Chunk("chunk-1".into()),
+            &NodeRef::Chunk("chunk-2".into())
+        )));
+    }
+
+    #[test]
+    fn citation_parser_handles_common_inline_forms() {
+        let refs = parse_citations(
+            "See cite:alpha-doc, cite(beta_doc) [@gamma-doc; @delta/doc] and @epsilon.",
+        );
+
+        assert_eq!(
+            refs,
+            vec![
+                "alpha-doc".to_string(),
+                "beta_doc".to_string(),
+                "delta/doc".to_string(),
+                "epsilon".to_string(),
+                "gamma-doc".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn entity_overlap_requires_named_or_metadata_entities() {
+        let mut left = document(
+            "left",
+            "Imprint Cortex",
+            "RecursiveMAS routes source recall through CortexIndex.",
+        );
+        left.metadata
+            .insert("entities".into(), "RecursiveMAS, CortexIndex".into());
+        let right = document(
+            "right",
+            "Research Notes",
+            "The RecursiveMAS critic reviews CortexIndex route sketches.",
+        );
+
+        let shared = shared_document_entities(&left, &right);
+
+        assert!(shared.contains(&"recursivemas".to_string()));
+        assert!(shared.contains(&"cortexindex".to_string()));
+        assert!(entity_overlap_score(shared.len()) > 0.48);
+    }
+
+    #[test]
+    fn semantic_neighbor_label_exposes_confidence_band() {
+        assert_eq!(
+            semantic_neighbor_label(0.9),
+            "semantic neighbor (high confidence)"
+        );
+        assert_eq!(
+            semantic_neighbor_label(0.8),
+            "semantic neighbor (medium confidence)"
+        );
+        assert_eq!(
+            semantic_neighbor_label(0.72),
+            "semantic neighbor (low confidence)"
+        );
+    }
 }

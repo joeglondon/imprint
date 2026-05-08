@@ -510,6 +510,16 @@ impl FileMemoryStore {
         Ok(())
     }
 
+    pub fn list_agent_links(&self) -> Result<Vec<AgentLinkMemory>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, source_id, target_id, label, actor, created_at, provenance_json
+             FROM agent_links ORDER BY created_at DESC, id",
+        )?;
+        let rows = statement.query_map([], agent_link_from_row)?;
+        collect_rows(rows)
+    }
+
     pub fn insert_attention_mark(&self, mark: &AttentionMark) -> Result<()> {
         let connection = self.connection()?;
         connection.execute(
@@ -1634,6 +1644,18 @@ fn web_finding_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WebFinding>
         actor: row.get(8)?,
         created_at: row.get::<_, i64>(9)? as u64,
         provenance: from_json(row.get::<_, String>(10)?)?,
+    })
+}
+
+fn agent_link_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentLinkMemory> {
+    Ok(AgentLinkMemory {
+        id: row.get(0)?,
+        source_id: row.get(1)?,
+        target_id: row.get(2)?,
+        label: row.get(3)?,
+        actor: row.get(4)?,
+        created_at: row.get::<_, i64>(5)? as u64,
+        provenance: from_json(row.get::<_, String>(6)?)?,
     })
 }
 
