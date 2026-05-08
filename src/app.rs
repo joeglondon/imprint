@@ -371,6 +371,10 @@ pub fn rebuild_memory(store_root: &Path) -> anyhow::Result<ImportResult> {
         .into_iter()
         .filter(|document| !is_compiler_generated_document(document))
         .collect::<Vec<_>>();
+    let deleted_count = mark_missing_source_documents(&mut docs);
+    docs.retain(|document| {
+        document.metadata.get("deletion_state").map(String::as_str) != Some("deleted")
+    });
     prepare_source_documents_for_storage(store_root, &mut docs, &[])?;
     let reusable_chunks = memory.chunks;
     let config = load_model_config(store_root)?;
@@ -402,11 +406,59 @@ pub fn rebuild_memory(store_root: &Path) -> anyhow::Result<ImportResult> {
         skipped_paths: Vec::new(),
         imported_count: 0,
         replaced_count: 0,
-        skipped_count: 0,
+        skipped_count: deleted_count,
         embedded_count: stats.embedded_count,
         reused_embedding_count: stats.reused_embedding_count,
         adapter_state,
     })
+}
+
+fn mark_missing_source_documents(documents: &mut [Document]) -> usize {
+    let deleted_at = now_millis().to_string();
+    let mut deleted = 0;
+    for document in documents {
+        if document.metadata.get("source_type").map(String::as_str) != Some("local_file") {
+            continue;
+        }
+        if source_artifact_still_available(document) {
+            continue;
+        }
+        deleted += 1;
+        document
+            .metadata
+            .insert("deletion_state".into(), "deleted".into());
+        document
+            .metadata
+            .insert("source_deleted_at".into(), deleted_at.clone());
+        document.metadata.insert(
+            "source_caveat".into(),
+            "Deleted source: excluded from search and future adapter training.".into(),
+        );
+    }
+    deleted
+}
+
+fn source_artifact_still_available(document: &Document) -> bool {
+    for key in [
+        "current_path",
+        "managed_path",
+        "managed_copy_path",
+        "reference_path",
+        "path",
+    ] {
+        if let Some(path) = document.metadata.get(key) {
+            if path.starts_with("imprint://")
+                || path.starts_with("http://")
+                || path.starts_with("https://")
+            {
+                return true;
+            }
+            if Path::new(path).is_file() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub fn get_memory_summary(store_root: &Path) -> anyhow::Result<MemorySummary> {
@@ -584,7 +636,7 @@ pub fn run_query(store_root: &Path, request: QueryRequest) -> anyhow::Result<Que
     let cortex_index = store.load_current_cortex_index().unwrap_or_default();
     let config = load_model_config(store_root)?;
     let embedder = embedder_for_config(&config)?;
-    let ann = RegionIndexer.rebuild(&memory.chunks, &memory.regions);
+    let (ann, _) = store.load_or_rebuild_vector_index(&memory.chunks, &memory.regions, now)?;
     let result = MemoryQueryEngine.execute_with_signals(
         &embedder,
         &memory,
@@ -2476,6 +2528,13 @@ fn chat_session_document(session: &ChatSession, messages: &[ChatMessage]) -> Doc
     metadata.insert("path".into(), path.clone());
     metadata.insert("source".into(), "chat".into());
     metadata.insert("source_type".into(), "chat".into());
+    metadata.insert("source_trust_kind".into(), "chat_transcript".into());
+    metadata.insert("source_trust".into(), "0.70".into());
+    metadata.insert("source_trust_label".into(), "Chat transcript".into());
+    metadata.insert(
+        "source_caveat".into(),
+        "Chat transcript: preserve speaker/context before quoting.".into(),
+    );
     metadata.insert("chat_session_id".into(), session.id.clone());
     metadata.insert("content_hash".into(), content_hash.clone());
     metadata.insert("parser_version".into(), "1".into());
@@ -2493,6 +2552,9 @@ fn chat_session_document(session: &ChatSession, messages: &[ChatMessage]) -> Doc
         char_start: Some(0),
         char_end: Some(text.chars().count()),
         page: None,
+        rendered_page: None,
+        pdf_selection: None,
+        email_location: None,
         section: Some("Chat transcript".into()),
         section_hierarchy: vec!["Chat transcript".into()],
         paragraph_index: Some(1),
@@ -2529,6 +2591,13 @@ fn web_finding_document(finding: &WebFinding) -> Document {
     metadata.insert("path".into(), finding.url.clone());
     metadata.insert("source".into(), "web".into());
     metadata.insert("source_type".into(), "web_finding".into());
+    metadata.insert("source_trust_kind".into(), "web_finding".into());
+    metadata.insert("source_trust".into(), format!("{:.2}", finding.confidence));
+    metadata.insert("source_trust_label".into(), "Web finding".into());
+    metadata.insert(
+        "source_caveat".into(),
+        "Web finding: check freshness before treating it as current.".into(),
+    );
     metadata.insert("web_finding_id".into(), finding.id.clone());
     metadata.insert(
         "session_id".into(),
@@ -2554,6 +2623,9 @@ fn web_finding_document(finding: &WebFinding) -> Document {
         char_start: Some(0),
         char_end: Some(text.chars().count()),
         page: None,
+        rendered_page: None,
+        pdf_selection: None,
+        email_location: None,
         section: Some("Web finding".into()),
         section_hierarchy: vec!["Web finding".into()],
         paragraph_index: Some(1),
@@ -2586,6 +2658,13 @@ fn derived_memory_document(memory: &DerivedMemory) -> Document {
     metadata.insert("path".into(), path.clone());
     metadata.insert("source".into(), "derived".into());
     metadata.insert("source_type".into(), "derived_memory".into());
+    metadata.insert("source_trust_kind".into(), "generated_summary".into());
+    metadata.insert("source_trust".into(), "0.35".into());
+    metadata.insert("source_trust_label".into(), "Generated summary".into());
+    metadata.insert(
+        "source_caveat".into(),
+        "Derived memory: not source truth; expand original refs before citing.".into(),
+    );
     metadata.insert("derived_memory_id".into(), memory.id.clone());
     metadata.insert("actor".into(), memory.actor.clone());
     metadata.insert("confidence".into(), format!("{:.2}", memory.confidence));
@@ -2605,6 +2684,9 @@ fn derived_memory_document(memory: &DerivedMemory) -> Document {
         char_start: Some(0),
         char_end: Some(text.chars().count()),
         page: None,
+        rendered_page: None,
+        pdf_selection: None,
+        email_location: None,
         section: Some("Derived memory".into()),
         section_hierarchy: vec!["Derived memory".into()],
         paragraph_index: Some(1),
@@ -2651,6 +2733,13 @@ fn brain_artifact_document(artifact: &BrainArtifact) -> Document {
     metadata.insert("path".into(), path.clone());
     metadata.insert("source".into(), "brain".into());
     metadata.insert("source_type".into(), "brain_artifact".into());
+    metadata.insert("source_trust_kind".into(), "compiler_artifact".into());
+    metadata.insert("source_trust".into(), "0.25".into());
+    metadata.insert("source_trust_label".into(), "Compiler artifact".into());
+    metadata.insert(
+        "source_caveat".into(),
+        "Compiler artifact: routing aid only, not citation-safe source truth.".into(),
+    );
     metadata.insert("brain_artifact_id".into(), artifact.id.clone());
     metadata.insert("brain_artifact_kind".into(), format!("{:?}", artifact.kind));
     metadata.insert("content_hash".into(), content_hash.clone());
@@ -2669,6 +2758,9 @@ fn brain_artifact_document(artifact: &BrainArtifact) -> Document {
         char_start: Some(0),
         char_end: Some(text.chars().count()),
         page: None,
+        rendered_page: None,
+        pdf_selection: None,
+        email_location: None,
         section: Some("Brain artifact".into()),
         section_hierarchy: vec!["Brain artifact".into()],
         paragraph_index: Some(1),
@@ -2807,6 +2899,7 @@ fn build_chat_context_trace_with_searcher<S: WebSearcher>(
             .into(),
     ];
     let mandatory_hits = execute_memory_search(
+        Some(store),
         embedder,
         memory.as_ref(),
         &attention_marks,
@@ -2857,6 +2950,7 @@ fn build_chat_context_trace_with_searcher<S: WebSearcher>(
                 let max_regions = action.max_regions.unwrap_or(5).clamp(1, 8);
                 tool_trace.push(format!("planner step {step}: memory_search query={query:?} max_regions={max_regions} max_chunks={max_chunks}"));
                 let hits = execute_memory_search(
+                    Some(store),
                     embedder,
                     memory.as_ref(),
                     &attention_marks,
@@ -3466,6 +3560,7 @@ fn plan_memory_actions(
 }
 
 fn execute_memory_search(
+    store: Option<&FileMemoryStore>,
     embedder: &RuntimeEmbedder,
     memory: Option<&PersistedMemory>,
     attention_marks: &[AttentionMark],
@@ -3483,7 +3578,15 @@ fn execute_memory_search(
     if (memory.memory_map.is_none() && cortex_index.is_none()) || memory.chunks.is_empty() {
         return Vec::new();
     }
-    let ann = RegionIndexer.rebuild(&memory.chunks, &memory.regions);
+    let now = now_millis();
+    let ann = store
+        .and_then(|store| {
+            store
+                .load_or_rebuild_vector_index(&memory.chunks, &memory.regions, now)
+                .ok()
+                .map(|(index, _)| index)
+        })
+        .unwrap_or_else(|| RegionIndexer.rebuild(&memory.chunks, &memory.regions));
     MemoryQueryEngine
         .execute_with_signals(
             embedder,
@@ -3497,7 +3600,7 @@ fn execute_memory_search(
             },
             attention_marks,
             memory_accesses,
-            now_millis(),
+            now,
             cortex_index,
         )
         .map(|result| {
@@ -3608,6 +3711,7 @@ fn search_web_into_memory<S: WebSearcher>(
         .list_memory_accesses(None, Some(now.saturating_sub(MEMORY_ACCESS_HORIZON_MILLIS)))
         .unwrap_or_default();
     let mut snippets = execute_memory_search(
+        Some(store),
         embedder,
         Some(&refreshed),
         &attention_marks,
@@ -4493,6 +4597,9 @@ fn chat_source_anchor(
         char_start: Some(0),
         char_end: Some(content.chars().count()),
         page: None,
+        rendered_page: None,
+        pdf_selection: None,
+        email_location: None,
         section: Some("Chat transcript".into()),
         section_hierarchy: vec!["Chat transcript".into()],
         paragraph_index: Some(1),
@@ -6500,6 +6607,9 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
             char_start: Some(0),
             char_end: Some(80),
             page: None,
+            rendered_page: None,
+            pdf_selection: None,
+            email_location: None,
             section: None,
             section_hierarchy: Vec::new(),
             paragraph_index: None,
@@ -6537,6 +6647,9 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
             char_start: Some(0),
             char_end: Some(80),
             page: None,
+            rendered_page: None,
+            pdf_selection: None,
+            email_location: None,
             section: None,
             section_hierarchy: Vec::new(),
             paragraph_index: None,
@@ -6667,6 +6780,35 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
             chunk.metadata.get("section").map(String::as_str),
             Some("Intro")
         );
+    }
+
+    #[test]
+    fn persisted_vector_index_reuses_fresh_health_and_rebuilds_stale_dimension() {
+        let root = temp_store_root("vector-index-health");
+        let input = root.join("vector.md");
+        fs::write(&input, "# Vector\nalpha beta vector recall index").expect("write input");
+        ingest_paths(&root, std::slice::from_ref(&input)).expect("ingest");
+
+        let store = FileMemoryStore::new(&root);
+        let mut memory = store.load().expect("load memory");
+        let (index, health) = store
+            .load_or_rebuild_vector_index(&memory.chunks, &memory.regions, 100)
+            .expect("build vector index");
+        let (loaded, loaded_health) = store
+            .load_current_vector_index()
+            .expect("load vector index")
+            .expect("stored vector index");
+        assert_eq!(loaded, index);
+        assert_eq!(loaded_health, health);
+
+        memory.chunks[0].embedding.push(0.0);
+        memory.chunks[0].embedding_dimension = Some(memory.chunks[0].embedding.len());
+        assert!(!loaded_health.matches_memory(&memory.chunks, &memory.regions));
+        let (_, rebuilt_health) = store
+            .load_or_rebuild_vector_index(&memory.chunks, &memory.regions, 200)
+            .expect("rebuild stale vector index");
+        assert_eq!(rebuilt_health.last_rebuild_at, 200);
+        assert_ne!(rebuilt_health.dimension, loaded_health.dimension);
     }
 
     #[test]
@@ -6803,11 +6945,95 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
 
         assert_eq!(target.kind, SourceOpenTargetKind::PdfPage);
         assert_eq!(target.pdf_page, Some(1));
+        assert!(target.pdf_selection.as_ref().is_some_and(
+            |selection| selection.page == 1 && selection.text_end > selection.text_start
+        ));
+        assert!(chunk
+            .source_anchor
+            .as_ref()
+            .and_then(|anchor| anchor.rendered_page.as_ref())
+            .is_some_and(|page| page.page == 1));
         assert!(target
             .path
             .as_deref()
             .is_some_and(|path| path.ends_with("memory.pdf")));
         assert!(target.location_hint.contains("page 1"));
+    }
+
+    #[test]
+    fn derived_artifact_open_targets_are_marked_non_source_truth() {
+        let root = temp_store_root("surf-open-target-derived");
+        let input = root.join("source.txt");
+        fs::write(&input, "Original evidence for a derived memory.").expect("write source");
+        ingest_paths(&root, std::slice::from_ref(&input)).expect("ingest");
+        let memory = write_derived_memory(
+            &root,
+            DerivedMemoryWrite {
+                session_id: None,
+                kind: DerivedMemoryKind::Summary,
+                text: "A derived summary must point back to original evidence.".into(),
+                source_message_ids: Vec::new(),
+                actor: "assistant".into(),
+                confidence: 0.6,
+            },
+        )
+        .expect("write derived");
+        compile_memory_brain(&root).expect("sync derived memory");
+
+        let opened = surf_open(
+            &root,
+            &NodeRef::Document(derived_memory_document_id(&memory)),
+        )
+        .expect("open derived");
+        let target = opened.open_target.as_ref().expect("open target");
+
+        assert_eq!(target.kind, SourceOpenTargetKind::Generated);
+        assert!(target.is_derived);
+        assert_eq!(target.source_trust.kind, SourceTrustKind::GeneratedSummary);
+        assert!(target
+            .caveat
+            .as_deref()
+            .is_some_and(|caveat| caveat.contains("not source truth")));
+    }
+
+    #[test]
+    fn deleted_source_metadata_excludes_chunks_from_search() {
+        let root = temp_store_root("deleted-source-search");
+        let input = root.join("deleted-note.md");
+        fs::write(&input, "# Delete\nvanishing provenance anchor").expect("write input");
+        ingest_paths(&root, std::slice::from_ref(&input)).expect("ingest");
+        let store = FileMemoryStore::new(&root);
+        let mut memory = store.load().expect("load memory");
+        let document_id = memory.documents.first().expect("document").id.clone();
+        for document in &mut memory.documents {
+            document
+                .metadata
+                .insert("deletion_state".into(), "deleted".into());
+            document
+                .metadata
+                .insert("source_deleted_at".into(), now_millis().to_string());
+        }
+        for chunk in &mut memory.chunks {
+            if chunk.document_id == document_id {
+                chunk
+                    .metadata
+                    .insert("deletion_state".into(), "deleted".into());
+            }
+        }
+        store.save(&memory).expect("save deleted memory");
+
+        let result = run_query(
+            &root,
+            QueryRequest {
+                text: "vanishing provenance".into(),
+                filters: BTreeMap::new(),
+                max_regions: 3,
+                max_chunks: 5,
+            },
+        )
+        .expect("query");
+
+        assert!(result.hits.is_empty());
     }
 
     #[test]

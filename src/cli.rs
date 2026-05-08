@@ -1,5 +1,5 @@
 use crate::extract::{Extractor, MemoryExtractor};
-use crate::index::{HashEmbedder, Indexer, RegionIndexer};
+use crate::index::HashEmbedder;
 use crate::navigation::{MemoryNavigator, Navigator};
 use crate::query::MemoryQueryEngine;
 use crate::store::{FileMemoryStore, MemoryStore};
@@ -154,7 +154,6 @@ pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let store = FileMemoryStore::new(cli.store);
     let embedder = HashEmbedder::default();
-    let indexer = RegionIndexer;
     let engine = MemoryQueryEngine;
     let extractor = MemoryExtractor;
     let navigator = MemoryNavigator;
@@ -329,7 +328,11 @@ pub fn run() -> anyhow::Result<()> {
             max_chunks,
         } => {
             let memory = load_ready_memory(&store)?;
-            let ann = indexer.rebuild(&memory.chunks, &memory.regions);
+            let (ann, _) = store.load_or_rebuild_vector_index(
+                &memory.chunks,
+                &memory.regions,
+                now_millis(),
+            )?;
             let result = engine.execute(
                 &embedder,
                 &memory,
@@ -515,7 +518,7 @@ fn excerpt_from_doc(text: &str, start: usize, end: usize) -> String {
 mod tests {
     use super::*;
     use crate::graph::GraphBuilder;
-    use crate::index::HashEmbedder;
+    use crate::index::{HashEmbedder, Indexer, RegionIndexer};
     use crate::ingest::Ingester;
     use crate::map::MapBuilder;
 

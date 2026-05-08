@@ -2006,7 +2006,13 @@ fn source_chunk_is_trainable(
     !matches!(
         source_type(document).as_str(),
         "derived_memory" | "brain_artifact"
-    )
+    ) && !source_is_deleted(document)
+}
+
+fn source_is_deleted(document: &Document) -> bool {
+    document.metadata.contains_key("deleted_at")
+        || document.metadata.contains_key("source_deleted_at")
+        || document.metadata.get("deletion_state").map(String::as_str) == Some("deleted")
 }
 
 fn route_hints(document: &Document, chunk: &Chunk, region_examples: &[String]) -> Vec<String> {

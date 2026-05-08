@@ -1,3 +1,4 @@
+use crate::index::{RegionAnnIndex, VectorIndexHealth, VECTOR_INDEX_KIND};
 use crate::types::*;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -35,6 +36,65 @@ impl FileMemoryStore {
     pub fn list_source_artifacts(&self) -> Result<Vec<SourceArtifact>> {
         let connection = self.connection()?;
         list_source_artifacts(&connection)
+    }
+
+    pub fn load_current_vector_index(&self) -> Result<Option<(RegionAnnIndex, VectorIndexHealth)>> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT index_json, health_json FROM vector_indexes WHERE id = ?1",
+                params![VECTOR_INDEX_KIND],
+                |row| {
+                    Ok((
+                        from_json(row.get::<_, String>(0)?)?,
+                        from_json(row.get::<_, String>(1)?)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn save_current_vector_index(
+        &self,
+        index: &RegionAnnIndex,
+        health: &VectorIndexHealth,
+    ) -> Result<()> {
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT OR REPLACE INTO vector_indexes (
+                id, index_kind, index_version, corpus_hash, created_at, health_json, index_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                VECTOR_INDEX_KIND,
+                health.index_kind,
+                health.index_version as i64,
+                health.corpus_hash,
+                health.last_rebuild_at as i64,
+                to_json(health)?,
+                to_json(index)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_or_rebuild_vector_index(
+        &self,
+        chunks: &[Chunk],
+        regions: &[Region],
+        now: u64,
+    ) -> Result<(RegionAnnIndex, VectorIndexHealth)> {
+        let existing = self.load_current_vector_index()?;
+        if let Some((index, health)) = &existing {
+            if health.matches_memory(chunks, regions) {
+                return Ok((index.clone(), health.clone()));
+            }
+        }
+        let previous = existing.as_ref().map(|(index, _)| index);
+        let rebuilt = RegionAnnIndex::build_incremental(previous, chunks, regions);
+        let health = VectorIndexHealth::for_memory(chunks, regions, now);
+        self.save_current_vector_index(&rebuilt, &health)?;
+        Ok((rebuilt, health))
     }
 
     pub fn insert_chat_session(&self, session: &ChatSession) -> Result<()> {
@@ -675,6 +735,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             file_hash TEXT NOT NULL,
             parser_version INTEGER NOT NULL,
             imported_at INTEGER NOT NULL,
+            trust_json TEXT,
             provenance_json TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_source_artifacts_hash ON source_artifacts(file_hash);
@@ -859,6 +920,16 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             index_json TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_cortex_indexes_created ON cortex_indexes(created_at);
+        CREATE TABLE IF NOT EXISTS vector_indexes (
+            id TEXT PRIMARY KEY,
+            index_kind TEXT NOT NULL,
+            index_version INTEGER NOT NULL,
+            corpus_hash TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            health_json TEXT NOT NULL,
+            index_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_vector_indexes_health ON vector_indexes(index_kind, corpus_hash, created_at);
         CREATE TABLE IF NOT EXISTS cortex_adapter_jobs (
             id TEXT PRIMARY KEY,
             status TEXT NOT NULL,
@@ -934,6 +1005,12 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     if !table_has_column(connection, "source_artifacts", "managed_path")? {
         connection.execute(
             "ALTER TABLE source_artifacts ADD COLUMN managed_path TEXT",
+            [],
+        )?;
+    }
+    if !table_has_column(connection, "source_artifacts", "trust_json")? {
+        connection.execute(
+            "ALTER TABLE source_artifacts ADD COLUMN trust_json TEXT",
             [],
         )?;
     }
@@ -1132,8 +1209,8 @@ fn insert_source_artifact(connection: &Connection, artifact: &SourceArtifact) ->
     connection.execute(
         "INSERT OR REPLACE INTO source_artifacts (
             id, source_type, storage_mode_json, original_path, current_path, managed_path,
-            file_hash, parser_version, imported_at, provenance_json
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            file_hash, parser_version, imported_at, trust_json, provenance_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             artifact.id,
             artifact.source_type,
@@ -1144,6 +1221,7 @@ fn insert_source_artifact(connection: &Connection, artifact: &SourceArtifact) ->
             artifact.file_hash,
             artifact.parser_version as i64,
             artifact.imported_at as i64,
+            to_json(&artifact.trust)?,
             to_json(&artifact.provenance)?,
         ],
     )?;
@@ -1153,7 +1231,7 @@ fn insert_source_artifact(connection: &Connection, artifact: &SourceArtifact) ->
 fn list_source_artifacts(connection: &Connection) -> Result<Vec<SourceArtifact>> {
     let mut statement = connection.prepare(
         "SELECT id, source_type, storage_mode_json, original_path, current_path, managed_path, file_hash,
-            parser_version, imported_at, provenance_json FROM source_artifacts ORDER BY id",
+            parser_version, imported_at, trust_json, provenance_json FROM source_artifacts ORDER BY id",
     )?;
     let rows = statement.query_map([], source_artifact_from_row)?;
     let stored = collect_rows(rows)?;
@@ -1169,6 +1247,11 @@ fn source_artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceA
     Ok(SourceArtifact {
         id: row.get(0)?,
         source_type: row.get(1)?,
+        trust: row
+            .get::<_, Option<String>>(9)?
+            .map(from_json)
+            .transpose()?
+            .unwrap_or_default(),
         storage_mode: from_json(row.get::<_, String>(2)?)?,
         original_path: row.get(3)?,
         current_path: row.get(4)?,
@@ -1176,7 +1259,7 @@ fn source_artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceA
         file_hash: row.get(6)?,
         parser_version: row.get::<_, i64>(7)? as u32,
         imported_at: row.get::<_, i64>(8)? as u64,
-        provenance: from_json(row.get::<_, String>(9)?)?,
+        provenance: from_json(row.get::<_, String>(10)?)?,
     })
 }
 
@@ -1225,6 +1308,7 @@ fn source_artifact_from_document(document: &Document) -> Option<SourceArtifact> 
             .or_else(|| metadata.get("source"))
             .cloned()
             .unwrap_or_else(|| "unknown".into()),
+        trust: source_trust_policy(metadata),
         storage_mode: source_storage_mode(metadata),
         original_path: original_path.clone(),
         current_path: Some(
@@ -1269,6 +1353,85 @@ fn source_artifact_from_document(document: &Document) -> Option<SourceArtifact> 
             },
         },
     })
+}
+
+fn source_trust_policy(metadata: &BTreeMap<String, String>) -> SourceTrustPolicy {
+    let kind_raw = metadata
+        .get("source_trust_kind")
+        .map(String::as_str)
+        .unwrap_or_else(|| match metadata.get("source_type").map(String::as_str) {
+            Some("web_finding") => "web_finding",
+            Some("derived_memory") => "generated_summary",
+            Some("brain_artifact") => "compiler_artifact",
+            Some("chat") => "chat_transcript",
+            Some("local_file") => "imported_document",
+            _ => "unknown",
+        });
+    let (kind, default_score, label, caveat) = match kind_raw {
+        "local_source" => (
+            SourceTrustKind::LocalSource,
+            0.86,
+            "Local source",
+            "Local source: verify exact claims against the source anchor.",
+        ),
+        "user_authored_note" => (
+            SourceTrustKind::UserAuthoredNote,
+            0.9,
+            "User-authored note",
+            "User-authored note: still cite anchors for exact recall.",
+        ),
+        "imported_document" => (
+            SourceTrustKind::ImportedDocument,
+            0.82,
+            "Imported document",
+            "Imported document: use anchors for exact quotes and dates.",
+        ),
+        "web_finding" => (
+            SourceTrustKind::WebFinding,
+            0.58,
+            "Web finding",
+            "Web finding: check freshness before treating it as current.",
+        ),
+        "generated_summary" => (
+            SourceTrustKind::GeneratedSummary,
+            0.35,
+            "Generated summary",
+            "Derived summary: not source truth; expand original refs before citing.",
+        ),
+        "compiler_artifact" => (
+            SourceTrustKind::CompilerArtifact,
+            0.25,
+            "Compiler artifact",
+            "Compiler artifact: routing aid only, not citation-safe source truth.",
+        ),
+        "chat_transcript" => (
+            SourceTrustKind::ChatTranscript,
+            0.7,
+            "Chat transcript",
+            "Chat transcript: preserve speaker/context before quoting.",
+        ),
+        _ => (
+            SourceTrustKind::Unknown,
+            0.5,
+            "Unknown source",
+            "Verify against an original source anchor before making exact claims.",
+        ),
+    };
+    SourceTrustPolicy {
+        kind,
+        score: metadata
+            .get("source_trust")
+            .and_then(|value| value.parse::<f32>().ok())
+            .unwrap_or(default_score),
+        label: metadata
+            .get("source_trust_label")
+            .cloned()
+            .unwrap_or_else(|| label.into()),
+        caveat: metadata
+            .get("source_caveat")
+            .cloned()
+            .unwrap_or_else(|| caveat.into()),
+    }
 }
 
 fn source_storage_mode(metadata: &BTreeMap<String, String>) -> SourceStorageMode {

@@ -33,7 +33,7 @@ pub struct ImportSkip {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DocumentImportBatch {
     pub documents: Vec<Document>,
     pub imported_paths: Vec<String>,
@@ -381,6 +381,7 @@ fn document_from_parsed(
     let source_artifact_id = source_artifact_id(&content_hash);
     metadata.insert("source_artifact_id".into(), source_artifact_id.clone());
     metadata.insert("source_type".into(), "local_file".into());
+    apply_source_trust_metadata(&mut metadata, path);
     metadata.insert("storage_mode".into(), "reference_in_place".into());
     metadata.insert("original_path".into(), path.display().to_string());
     metadata.insert("current_path".into(), path.display().to_string());
@@ -418,6 +419,20 @@ fn document_from_parsed(
         page: page_spans
             .first()
             .and_then(|span| span.value.parse::<usize>().ok()),
+        rendered_page: page_spans.first().and_then(|span| {
+            span.value
+                .parse::<usize>()
+                .ok()
+                .map(|page| RenderedPageMetadata {
+                    page,
+                    label: Some(page.to_string()),
+                    width: None,
+                    height: None,
+                    unit: None,
+                })
+        }),
+        pdf_selection: pdf_selection_for_path(path, 0, text_len, page_spans.first()),
+        email_location: None,
         section: section_spans.first().map(|span| span.value.clone()),
         section_hierarchy: section_hierarchy_spans
             .first()
@@ -498,6 +513,17 @@ fn source_anchor_for_chunk(
         char_start: Some(start),
         char_end: Some(end),
         page: span_value_at::<usize>(&document.metadata, PAGE_SPANS_KEY, start),
+        rendered_page: span_value_at::<usize>(&document.metadata, PAGE_SPANS_KEY, start).map(
+            |page| RenderedPageMetadata {
+                page,
+                label: Some(page.to_string()),
+                width: None,
+                height: None,
+                unit: None,
+            },
+        ),
+        pdf_selection: pdf_selection_for_document(document, start, end),
+        email_location: email_location_for_document(document),
         section: span_value_at::<String>(&document.metadata, SECTION_SPANS_KEY, start),
         section_hierarchy: span_value_at::<String>(
             &document.metadata,
@@ -535,6 +561,97 @@ fn split_hierarchy(value: &str) -> Vec<String> {
         .filter(|part| !part.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn apply_source_trust_metadata(metadata: &mut BTreeMap<String, String>, path: &Path) {
+    if matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .as_deref(),
+        Some("md" | "markdown" | "mdown")
+    ) {
+        metadata.insert("source_trust_kind".into(), "user_authored_note".into());
+        metadata.insert("source_trust".into(), "0.90".into());
+        metadata.insert(
+            "source_trust_label".into(),
+            "User-authored local note".into(),
+        );
+        metadata.insert(
+            "source_caveat".into(),
+            "Local note: cite exact anchors for quoted or mutable claims.".into(),
+        );
+    } else {
+        metadata.insert("source_trust_kind".into(), "imported_document".into());
+        metadata.insert("source_trust".into(), "0.82".into());
+        metadata.insert(
+            "source_trust_label".into(),
+            "Imported local document".into(),
+        );
+        metadata.insert(
+            "source_caveat".into(),
+            "Imported document: use source anchors for exact recall.".into(),
+        );
+    }
+}
+
+fn pdf_selection_for_path(
+    path: &Path,
+    start: usize,
+    end: usize,
+    page_span: Option<&TextSpan>,
+) -> Option<PdfTextSelection> {
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+    {
+        return None;
+    }
+    let page = page_span
+        .and_then(|span| span.value.parse::<usize>().ok())
+        .unwrap_or(1);
+    Some(PdfTextSelection {
+        page,
+        text_start: start,
+        text_end: end,
+        selected_text: None,
+        bounding_box: None,
+    })
+}
+
+fn pdf_selection_for_document(
+    document: &Document,
+    start: usize,
+    end: usize,
+) -> Option<PdfTextSelection> {
+    let path = document.metadata.get("path")?;
+    let path = Path::new(path);
+    let page = span_value_at::<usize>(&document.metadata, PAGE_SPANS_KEY, start).unwrap_or(1);
+    pdf_selection_for_path(
+        path,
+        start,
+        end,
+        Some(&TextSpan {
+            start,
+            end,
+            value: page.to_string(),
+        }),
+    )
+}
+
+fn email_location_for_document(document: &Document) -> Option<EmailThreadLocation> {
+    let thread_id = document.metadata.get("email_thread_id")?.clone();
+    Some(EmailThreadLocation {
+        thread_id,
+        message_id: document.metadata.get("email_message_id").cloned(),
+        mailbox: document.metadata.get("email_mailbox").cloned(),
+        subject: document
+            .metadata
+            .get("email_subject")
+            .cloned()
+            .or_else(|| Some(document.title.clone())),
+    })
 }
 
 fn source_artifact_id(file_hash: &str) -> String {

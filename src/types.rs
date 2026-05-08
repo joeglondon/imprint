@@ -29,10 +29,12 @@ pub enum SourceStorageMode {
     Generated,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SourceArtifact {
     pub id: SourceArtifactId,
     pub source_type: String,
+    #[serde(default)]
+    pub trust: SourceTrustPolicy,
     pub storage_mode: SourceStorageMode,
     pub original_path: String,
     #[serde(default)]
@@ -46,6 +48,37 @@ pub struct SourceArtifact {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SourceTrustKind {
+    LocalSource,
+    UserAuthoredNote,
+    ImportedDocument,
+    WebFinding,
+    GeneratedSummary,
+    CompilerArtifact,
+    ChatTranscript,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SourceTrustPolicy {
+    pub kind: SourceTrustKind,
+    pub score: f32,
+    pub label: String,
+    pub caveat: String,
+}
+
+impl Default for SourceTrustPolicy {
+    fn default() -> Self {
+        Self {
+            kind: SourceTrustKind::Unknown,
+            score: 0.5,
+            label: "Unknown source".into(),
+            caveat: "Verify against an original source anchor before making exact claims.".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SourceOpenTargetKind {
     TextOffset,
     MarkdownHeading,
@@ -55,7 +88,54 @@ pub enum SourceOpenTargetKind {
     Generated,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RenderedPageMetadata {
+    pub page: usize,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub width: Option<f32>,
+    #[serde(default)]
+    pub height: Option<f32>,
+    #[serde(default)]
+    pub unit: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BoundingBox {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    #[serde(default)]
+    pub page: Option<usize>,
+    #[serde(default)]
+    pub unit: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmailThreadLocation {
+    pub thread_id: String,
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub mailbox: Option<String>,
+    #[serde(default)]
+    pub subject: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PdfTextSelection {
+    pub page: usize,
+    pub text_start: usize,
+    pub text_end: usize,
+    #[serde(default)]
+    pub selected_text: Option<String>,
+    #[serde(default)]
+    pub bounding_box: Option<BoundingBox>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SourceOpenTarget {
     pub kind: SourceOpenTargetKind,
     pub uri: String,
@@ -74,11 +154,21 @@ pub struct SourceOpenTarget {
     #[serde(default)]
     pub pdf_page: Option<usize>,
     #[serde(default)]
+    pub pdf_selection: Option<PdfTextSelection>,
+    #[serde(default)]
     pub browser_url: Option<String>,
+    #[serde(default)]
+    pub email_location: Option<EmailThreadLocation>,
+    #[serde(default)]
+    pub source_trust: SourceTrustPolicy,
+    #[serde(default)]
+    pub is_derived: bool,
+    #[serde(default)]
+    pub caveat: Option<String>,
     pub location_hint: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Document {
     pub id: DocumentId,
     pub title: String,
@@ -92,7 +182,7 @@ pub struct Document {
     pub parser_version: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SourceAnchor {
     pub id: AnchorId,
     pub document_id: DocumentId,
@@ -114,6 +204,12 @@ pub struct SourceAnchor {
     pub char_end: Option<usize>,
     #[serde(default)]
     pub page: Option<usize>,
+    #[serde(default)]
+    pub rendered_page: Option<RenderedPageMetadata>,
+    #[serde(default)]
+    pub pdf_selection: Option<PdfTextSelection>,
+    #[serde(default)]
+    pub email_location: Option<EmailThreadLocation>,
     #[serde(default)]
     pub section: Option<String>,
     #[serde(default)]

@@ -360,6 +360,9 @@ impl MemoryQueryEngine {
                 let Some(document) = documents_by_id.get(&chunk.document_id) else {
                     continue;
                 };
+                if is_deleted_source(document, chunk) {
+                    continue;
+                }
                 let lexical = lexical_overlap_score(
                     &request.text,
                     &format!(
@@ -405,6 +408,9 @@ impl MemoryQueryEngine {
                 let Some(document) = documents_by_id.get(&chunk.document_id) else {
                     continue;
                 };
+                if is_deleted_source(document, chunk) {
+                    continue;
+                }
                 let lexical = lexical_overlap_score(
                     &request.text,
                     &format!(
@@ -614,6 +620,12 @@ fn source_recall_signal(document: &Document, chunk: &Chunk, now: u64) -> f32 {
     }
 
     signal.clamp(-0.18, 0.18)
+}
+
+fn is_deleted_source(document: &Document, chunk: &Chunk) -> bool {
+    metadata_value(document, chunk, "deleted_at").is_some()
+        || metadata_value(document, chunk, "source_deleted_at").is_some()
+        || metadata_value(document, chunk, "deletion_state").as_deref() == Some("deleted")
 }
 
 fn freshness_signal(retrieved_at: u64, now: u64) -> f32 {

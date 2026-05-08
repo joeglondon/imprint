@@ -235,7 +235,10 @@ fn source_chunk_ref(memory: &PersistedMemory, chunk_id: &str) -> Option<String> 
     if matches!(
         chunk.metadata.get("source_type").map(String::as_str),
         Some("derived_memory") | Some("brain_artifact")
-    ) {
+    ) || chunk.metadata.contains_key("deleted_at")
+        || chunk.metadata.contains_key("source_deleted_at")
+        || chunk.metadata.get("deletion_state").map(String::as_str) == Some("deleted")
+    {
         return None;
     }
     Some(format!("imprint://chunk/{chunk_id}"))
@@ -274,7 +277,10 @@ fn cortex_corpus_hash(memory: &PersistedMemory, artifact_ids: &[String]) -> Stri
         if !matches!(
             chunk.metadata.get("source_type").map(String::as_str),
             Some("derived_memory") | Some("brain_artifact")
-        ) {
+        ) && !chunk.metadata.contains_key("deleted_at")
+            && !chunk.metadata.contains_key("source_deleted_at")
+            && chunk.metadata.get("deletion_state").map(String::as_str) != Some("deleted")
+        {
             parts.push(format!(
                 "chunk:{}:{}:{}",
                 chunk.id,
@@ -294,7 +300,13 @@ fn is_source_document(document: &Document) -> bool {
     !matches!(
         document.metadata.get("source_type").map(String::as_str),
         Some("derived_memory") | Some("brain_artifact")
-    )
+    ) && !source_is_deleted(document)
+}
+
+fn source_is_deleted(document: &Document) -> bool {
+    document.metadata.contains_key("deleted_at")
+        || document.metadata.contains_key("source_deleted_at")
+        || document.metadata.get("deletion_state").map(String::as_str) == Some("deleted")
 }
 
 fn region_has_source_chunks(memory: &PersistedMemory, region: &Region) -> bool {
@@ -307,7 +319,9 @@ fn region_has_source_chunks(memory: &PersistedMemory, region: &Region) -> bool {
                 !matches!(
                     chunk.metadata.get("source_type").map(String::as_str),
                     Some("derived_memory") | Some("brain_artifact")
-                )
+                ) && !chunk.metadata.contains_key("deleted_at")
+                    && !chunk.metadata.contains_key("source_deleted_at")
+                    && chunk.metadata.get("deletion_state").map(String::as_str) != Some("deleted")
             })
     })
 }

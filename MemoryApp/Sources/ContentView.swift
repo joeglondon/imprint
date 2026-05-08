@@ -619,6 +619,10 @@ private struct MapInspector: View {
                             .foregroundStyle(theme.ink.quaternary)
                             .lineLimit(3)
                     }
+                    if appState.inspector.sourceAnchor != nil || appState.inspector.openTarget != nil {
+                        provenanceInspector(anchor: appState.inspector.sourceAnchor, target: appState.inspector.openTarget)
+                            .padding(.top, 6)
+                    }
                     HStack(spacing: 8) {
                         TextField("Grep or search selection", text: $appState.grepText)
                             .textFieldStyle(.plain)
@@ -796,7 +800,50 @@ private struct MapInspector: View {
         } else if let url = target.browserUrl {
             parts.append(url)
         }
+        if let selection = target.pdfSelection {
+            parts.append("pdf text \(selection.textStart)-\(selection.textEnd)")
+            if selection.boundingBox != nil {
+                parts.append("bbox")
+            }
+        }
+        if let email = target.emailLocation {
+            parts.append("thread \(email.threadId)")
+        }
+        parts.append(target.sourceTrust.label)
         return parts.joined(separator: " · ")
+    }
+
+    private func shortHash(_ hash: String) -> String {
+        String(hash.prefix(12))
+    }
+
+    @ViewBuilder
+    private func provenanceInspector(anchor: SourceAnchor?, target: SourceOpenTarget?) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            SectionLabel("Provenance")
+            if let target {
+                DetailRow(label: "Trust", value: "\(target.sourceTrust.label) · \(String(format: "%.2f", target.sourceTrust.score))")
+                if target.isDerived {
+                    DetailRow(label: "Truth", value: "Derived artifact, expand originals before citing")
+                }
+                if let caveat = target.caveat {
+                    DetailRow(label: "Caveat", value: caveat)
+                }
+            }
+            if let anchor {
+                DetailRow(label: "Hash", value: shortHash(anchor.contentHash))
+                DetailRow(label: "Parser", value: "\(anchor.parserVersion)")
+                if let artifact = anchor.sourceArtifactId {
+                    DetailRow(label: "Artifact", value: artifact)
+                }
+                if let rendered = anchor.renderedPage {
+                    DetailRow(label: "Rendered", value: "page \(rendered.label ?? "\(rendered.page)")")
+                }
+                if let email = anchor.emailLocation {
+                    DetailRow(label: "Email", value: email.subject ?? email.threadId)
+                }
+            }
+        }
     }
 }
 
@@ -1828,6 +1875,10 @@ private struct PassageRow: View {
         }
         if let target = passage.openTarget {
             parts.append(target.locationHint)
+            parts.append(target.sourceTrust.label)
+            if target.isDerived {
+                parts.append("derived")
+            }
         }
         parts.append("\(passage.start)-\(passage.end)")
         return parts.joined(separator: " · ")

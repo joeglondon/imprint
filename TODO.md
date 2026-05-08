@@ -233,50 +233,50 @@ Goal: make exact recall trustworthy, deep-linkable, and reversible.
   - [x] both, with reconciliation
 - [x] Add source artifact migration for existing documents.
 - [x] Preserve stable IDs across moves/renames when content hash matches.
-- [ ] Add durable file opening:
+- [x] Add durable file opening:
   - [x] text offset
   - [x] Markdown heading
   - [x] PDF page
-  - [ ] PDF text selection or bounding box when possible
-  - [ ] email/thread location
+  - [x] PDF text selection or bounding box when possible
+  - [x] email/thread location
   - [x] browser URL/archive location
-- [ ] Improve `SourceAnchor` precision:
-  - [ ] rendered page metadata
+- [x] Improve `SourceAnchor` precision:
+  - [x] rendered page metadata
   - [x] section hierarchy
   - [x] paragraph index
   - [x] byte offsets plus character offsets
   - [x] source artifact ID
-- [ ] Add provenance inspector UI for every hit/chunk/document.
-- [ ] Add source trust policy:
-  - [ ] local source
-  - [ ] user-authored note
-  - [ ] imported document
-  - [ ] web finding
-  - [ ] generated summary
-  - [ ] compiler artifact
-- [ ] Make derived artifacts visibly derived, never source truth.
-- [ ] Add deletion/correction semantics:
-  - [ ] deleted source removed from search
-  - [ ] deleted source excluded from future adapter training
-  - [ ] stale adapters marked stale when deleted content was included
-  - [ ] re-train/revoke workflow for personal adapters
+- [x] Add provenance inspector UI for every hit/chunk/document.
+- [x] Add source trust policy:
+  - [x] local source
+  - [x] user-authored note
+  - [x] imported document
+  - [x] web finding
+  - [x] generated summary
+  - [x] compiler artifact
+- [x] Make derived artifacts visibly derived, never source truth.
+- [x] Add deletion/correction semantics:
+  - [x] deleted source removed from search
+  - [x] deleted source excluded from future adapter training
+  - [x] stale adapters marked stale when deleted content was included
+  - [x] re-train/revoke workflow for personal adapters
 
 ## Phase 6: Vector Index And Graph Quality
 
 Goal: scale beyond in-memory approximate region search while making memory surfable.
 
-- [ ] Add a real ANN index:
-  - [ ] HNSW or equivalent local ANN
-  - [ ] incremental update support
-  - [ ] rebuild path
-  - [ ] persistence
-  - [ ] compatibility with embedding dimension changes
-- [ ] Add index health metadata:
-  - [ ] embedding model
-  - [ ] dimension
-  - [ ] corpus hash
-  - [ ] index version
-  - [ ] last rebuild time
+- [x] Add a real ANN index:
+  - [x] HNSW or equivalent local ANN
+  - [x] incremental update support
+  - [x] rebuild path
+  - [x] persistence
+  - [x] compatibility with embedding dimension changes
+- [x] Add index health metadata:
+  - [x] embedding model
+  - [x] dimension
+  - [x] corpus hash
+  - [x] index version
+  - [x] last rebuild time
 - [ ] Improve region derivation:
   - [ ] stable clustering
   - [ ] better labels

@@ -20,7 +20,7 @@ pub use app::*;
 pub use cli::run;
 pub use extract::{Extractor, MemoryExtractor};
 pub use graph::GraphBuilder;
-pub use index::{Embedder, HashEmbedder, Indexer, RegionAnnIndex};
+pub use index::{Embedder, HashEmbedder, Indexer, RegionAnnIndex, VectorIndexHealth};
 pub use ingest::Ingester;
 pub use map::MapBuilder;
 pub use navigation::{MemoryNavigator, Navigator};

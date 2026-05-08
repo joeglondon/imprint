@@ -351,6 +351,13 @@ pub fn expand_chunk(
         char_start: Some(start),
         char_end: Some(end),
         page: anchor.page,
+        rendered_page: anchor.rendered_page.clone(),
+        pdf_selection: anchor.pdf_selection.clone().map(|mut selection| {
+            selection.text_start = start;
+            selection.text_end = end;
+            selection
+        }),
+        email_location: anchor.email_location.clone(),
         section: anchor.section.clone(),
         section_hierarchy: anchor.section_hierarchy.clone(),
         paragraph_index: anchor.paragraph_index,
@@ -392,6 +399,52 @@ fn source_open_target(
                 .then(|| anchor.path.clone())
         });
 
+    let source_trust = metadata.map(source_trust_policy).unwrap_or_default();
+    let source_type = source_type.unwrap_or("unknown");
+    let is_derived = matches!(source_type, "derived_memory" | "brain_artifact");
+    let caveat = metadata
+        .and_then(|metadata| metadata.get("source_caveat"))
+        .cloned()
+        .or_else(|| is_derived.then(|| source_trust.caveat.clone()));
+    let email_location = anchor.email_location.clone().or_else(|| {
+        metadata.and_then(|metadata| {
+            metadata
+                .get("email_thread_id")
+                .cloned()
+                .map(|thread_id| EmailThreadLocation {
+                    thread_id,
+                    message_id: metadata.get("email_message_id").cloned(),
+                    mailbox: metadata.get("email_mailbox").cloned(),
+                    subject: metadata.get("email_subject").cloned(),
+                })
+        })
+    });
+
+    if let Some(email_location) = email_location.clone() {
+        return Some(SourceOpenTarget {
+            kind: SourceOpenTargetKind::EmailThread,
+            uri: format!("imprint://email/thread/{}", email_location.thread_id),
+            path: None,
+            original_path: None,
+            managed_path: None,
+            source_artifact_id: metadata
+                .and_then(|metadata| metadata.get("source_artifact_id"))
+                .cloned()
+                .or_else(|| anchor.source_artifact_id.clone()),
+            text_start,
+            text_end,
+            markdown_heading: anchor.section.clone(),
+            pdf_page: anchor.page,
+            pdf_selection: anchor.pdf_selection.clone(),
+            browser_url: None,
+            email_location: Some(email_location),
+            source_trust,
+            is_derived,
+            caveat,
+            location_hint: location_hint(anchor, text_start, text_end),
+        });
+    }
+
     if let Some(url) = browser_url {
         return Some(SourceOpenTarget {
             kind: SourceOpenTargetKind::Url,
@@ -407,7 +460,12 @@ fn source_open_target(
             text_end,
             markdown_heading: anchor.section.clone(),
             pdf_page: anchor.page,
+            pdf_selection: anchor.pdf_selection.clone(),
             browser_url: Some(url),
+            email_location: None,
+            source_trust,
+            is_derived,
+            caveat,
             location_hint: location_hint(anchor, text_start, text_end),
         });
     }
@@ -446,7 +504,7 @@ fn source_open_target(
         SourceOpenTargetKind::MarkdownHeading
     } else {
         match source_type {
-            Some("chat" | "derived_memory" | "brain_artifact") => SourceOpenTargetKind::Generated,
+            "chat" | "derived_memory" | "brain_artifact" => SourceOpenTargetKind::Generated,
             _ => SourceOpenTargetKind::TextOffset,
         }
     };
@@ -464,9 +522,93 @@ fn source_open_target(
         text_end,
         markdown_heading: anchor.section.clone().filter(|_| is_markdown),
         pdf_page: anchor.page.filter(|_| is_pdf),
+        pdf_selection: anchor.pdf_selection.clone().filter(|_| is_pdf),
         browser_url: None,
+        email_location: None,
+        source_trust,
+        is_derived,
+        caveat,
         location_hint: location_hint(anchor, text_start, text_end),
     })
+}
+
+fn source_trust_policy(metadata: &std::collections::BTreeMap<String, String>) -> SourceTrustPolicy {
+    let kind_raw = metadata
+        .get("source_trust_kind")
+        .map(String::as_str)
+        .unwrap_or_else(|| match metadata.get("source_type").map(String::as_str) {
+            Some("web_finding") => "web_finding",
+            Some("derived_memory") => "generated_summary",
+            Some("brain_artifact") => "compiler_artifact",
+            Some("chat") => "chat_transcript",
+            Some("local_file") => "imported_document",
+            _ => "unknown",
+        });
+    let (kind, default_score, label, caveat) = match kind_raw {
+        "local_source" => (
+            SourceTrustKind::LocalSource,
+            0.86,
+            "Local source",
+            "Local source: verify exact claims against the source anchor.",
+        ),
+        "user_authored_note" => (
+            SourceTrustKind::UserAuthoredNote,
+            0.9,
+            "User-authored note",
+            "User-authored note: still cite anchors for exact recall.",
+        ),
+        "imported_document" => (
+            SourceTrustKind::ImportedDocument,
+            0.82,
+            "Imported document",
+            "Imported document: use anchors for exact quotes and dates.",
+        ),
+        "web_finding" => (
+            SourceTrustKind::WebFinding,
+            0.58,
+            "Web finding",
+            "Web finding: check freshness before treating it as current.",
+        ),
+        "generated_summary" => (
+            SourceTrustKind::GeneratedSummary,
+            0.35,
+            "Generated summary",
+            "Derived summary: not source truth; expand original refs before citing.",
+        ),
+        "compiler_artifact" => (
+            SourceTrustKind::CompilerArtifact,
+            0.25,
+            "Compiler artifact",
+            "Compiler artifact: routing aid only, not citation-safe source truth.",
+        ),
+        "chat_transcript" => (
+            SourceTrustKind::ChatTranscript,
+            0.7,
+            "Chat transcript",
+            "Chat transcript: preserve speaker/context before quoting.",
+        ),
+        _ => (
+            SourceTrustKind::Unknown,
+            0.5,
+            "Unknown source",
+            "Verify against an original source anchor before making exact claims.",
+        ),
+    };
+    SourceTrustPolicy {
+        kind,
+        score: metadata
+            .get("source_trust")
+            .and_then(|value| value.parse::<f32>().ok())
+            .unwrap_or(default_score),
+        label: metadata
+            .get("source_trust_label")
+            .cloned()
+            .unwrap_or_else(|| label.into()),
+        caveat: metadata
+            .get("source_caveat")
+            .cloned()
+            .unwrap_or_else(|| caveat.into()),
+    }
 }
 
 fn location_hint(anchor: &SourceAnchor, text_start: usize, text_end: usize) -> String {

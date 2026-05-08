@@ -159,10 +159,63 @@ struct SourceAnchor: Codable, Equatable, Identifiable {
     var charStart: Int?
     var charEnd: Int?
     var page: Int?
+    var renderedPage: RenderedPageMetadata?
+    var pdfSelection: PdfTextSelection?
+    var emailLocation: EmailThreadLocation?
     var section: String?
     var sectionHierarchy: [String]
     var paragraphIndex: Int?
     var parserVersion: UInt32
+}
+
+enum SourceTrustKind: String, Codable, Equatable {
+    case localSource = "LocalSource"
+    case userAuthoredNote = "UserAuthoredNote"
+    case importedDocument = "ImportedDocument"
+    case webFinding = "WebFinding"
+    case generatedSummary = "GeneratedSummary"
+    case compilerArtifact = "CompilerArtifact"
+    case chatTranscript = "ChatTranscript"
+    case unknown = "Unknown"
+}
+
+struct SourceTrustPolicy: Codable, Equatable {
+    var kind: SourceTrustKind
+    var score: Float
+    var label: String
+    var caveat: String
+}
+
+struct RenderedPageMetadata: Codable, Equatable {
+    var page: Int
+    var label: String?
+    var width: Float?
+    var height: Float?
+    var unit: String?
+}
+
+struct BoundingBox: Codable, Equatable {
+    var x: Float
+    var y: Float
+    var width: Float
+    var height: Float
+    var page: Int?
+    var unit: String?
+}
+
+struct EmailThreadLocation: Codable, Equatable {
+    var threadId: String
+    var messageId: String?
+    var mailbox: String?
+    var subject: String?
+}
+
+struct PdfTextSelection: Codable, Equatable {
+    var page: Int
+    var textStart: Int
+    var textEnd: Int
+    var selectedText: String?
+    var boundingBox: BoundingBox?
 }
 
 enum SourceStorageMode: String, Codable, Equatable {
@@ -176,6 +229,7 @@ enum SourceStorageMode: String, Codable, Equatable {
 struct SourceArtifact: Codable, Equatable, Identifiable {
     var id: String
     var sourceType: String
+    var trust: SourceTrustPolicy
     var storageMode: SourceStorageMode
     var originalPath: String
     var currentPath: String?
@@ -206,7 +260,12 @@ struct SourceOpenTarget: Codable, Equatable {
     var textEnd: Int
     var markdownHeading: String?
     var pdfPage: Int?
+    var pdfSelection: PdfTextSelection?
     var browserUrl: String?
+    var emailLocation: EmailThreadLocation?
+    var sourceTrust: SourceTrustPolicy
+    var isDerived: Bool
+    var caveat: String?
     var locationHint: String
 }
 
