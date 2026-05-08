@@ -4,6 +4,7 @@ use crate::types::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExpandMode {
@@ -400,6 +401,9 @@ fn source_open_target(
         });
 
     let source_trust = metadata.map(source_trust_policy).unwrap_or_default();
+    let source_freshness = metadata
+        .map(|metadata| SourceFreshnessPolicy::from_metadata(metadata, now_millis()))
+        .unwrap_or_default();
     let source_type = source_type.unwrap_or("unknown");
     let is_derived = matches!(source_type, "derived_memory" | "brain_artifact");
     let caveat = metadata
@@ -439,6 +443,7 @@ fn source_open_target(
             browser_url: None,
             email_location: Some(email_location),
             source_trust,
+            source_freshness,
             is_derived,
             caveat,
             location_hint: location_hint(anchor, text_start, text_end),
@@ -464,6 +469,7 @@ fn source_open_target(
             browser_url: Some(url),
             email_location: None,
             source_trust,
+            source_freshness,
             is_derived,
             caveat,
             location_hint: location_hint(anchor, text_start, text_end),
@@ -526,10 +532,18 @@ fn source_open_target(
         browser_url: None,
         email_location: None,
         source_trust,
+        source_freshness,
         is_derived,
         caveat,
         location_hint: location_hint(anchor, text_start, text_end),
     })
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn source_trust_policy(metadata: &std::collections::BTreeMap<String, String>) -> SourceTrustPolicy {

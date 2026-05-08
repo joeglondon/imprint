@@ -19,6 +19,12 @@ pub type AuditEventId = String;
 pub type CortexIndexId = String;
 pub type CortexAdapterJobId = String;
 pub type SourceArtifactId = String;
+pub type ImportQueueItemId = String;
+pub type ImportBatchId = String;
+pub type FileWatchRootId = String;
+pub type CollectionId = String;
+pub type SavedViewId = String;
+pub type SavedTrailId = String;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SourceStorageMode {
@@ -45,6 +51,204 @@ pub struct SourceArtifact {
     pub parser_version: u32,
     pub imported_at: u64,
     pub provenance: ProvenanceRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ImportQueueStatus {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportQueueItem {
+    pub id: ImportQueueItemId,
+    pub batch_id: ImportBatchId,
+    pub path: String,
+    pub status: ImportQueueStatus,
+    pub progress_completed: usize,
+    pub progress_total: usize,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub imported_document_ids: Vec<DocumentId>,
+    pub created_at: u64,
+    pub updated_at: u64,
+    #[serde(default)]
+    pub started_at: Option<u64>,
+    #[serde(default)]
+    pub finished_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportQueueBatch {
+    pub id: ImportBatchId,
+    pub items: Vec<ImportQueueItem>,
+    pub pending: usize,
+    pub running: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub cancelled: usize,
+    pub progress_completed: usize,
+    pub progress_total: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileWatchRoot {
+    pub id: FileWatchRootId,
+    pub path: String,
+    pub recursive: bool,
+    pub enabled: bool,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FileUpdateKind {
+    ChangedFile,
+    MovedFile,
+    DeletedFile,
+    DuplicateFile,
+    ReplacedFile,
+    Unchanged,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileUpdate {
+    pub kind: FileUpdateKind,
+    pub source_artifact_id: SourceArtifactId,
+    #[serde(default)]
+    pub document_id: Option<DocumentId>,
+    pub original_path: String,
+    #[serde(default)]
+    pub current_path: Option<String>,
+    #[serde(default)]
+    pub candidate_path: Option<String>,
+    #[serde(default)]
+    pub previous_hash: Option<String>,
+    #[serde(default)]
+    pub current_hash: Option<String>,
+    pub detected_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DedupeMatchKind {
+    SameHash,
+    SamePath,
+    SimilarTitle,
+    SimilarContent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DedupeCandidate {
+    pub incoming_path: String,
+    pub existing_document_id: DocumentId,
+    pub existing_title: String,
+    pub match_kind: DedupeMatchKind,
+    pub score: f32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DedupeReport {
+    pub candidates: Vec<DedupeCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DedupeDecisionAction {
+    KeepBoth,
+    Merge,
+    Replace,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DedupeDecision {
+    pub incoming_path: String,
+    pub existing_document_id: DocumentId,
+    pub action: DedupeDecisionAction,
+    pub actor: String,
+    pub reason: String,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Collection {
+    pub id: CollectionId,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CollectionMember {
+    pub collection_id: CollectionId,
+    pub target_id: String,
+    pub target_kind: AttentionTargetKind,
+    pub added_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SavedView {
+    pub id: SavedViewId,
+    pub name: String,
+    pub filters: BTreeMap<String, String>,
+    pub sort: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SavedTrail {
+    pub id: SavedTrailId,
+    pub name: String,
+    pub session_id: SessionId,
+    pub steps: Vec<SurfTrailStep>,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SurfTrailStep {
+    pub node: NodeRef,
+    #[serde(default)]
+    pub source_anchor: Option<SourceAnchor>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceTypeFilterSummary {
+    pub source_type: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LibraryManagementSnapshot {
+    pub import_queue: ImportQueueBatch,
+    pub watch_roots: Vec<FileWatchRoot>,
+    pub updates: Vec<FileUpdate>,
+    pub collections: Vec<Collection>,
+    pub saved_views: Vec<SavedView>,
+    pub saved_trails: Vec<SavedTrail>,
+    pub source_type_filters: Vec<SourceTypeFilterSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LibraryDeleteResult {
+    pub deleted_document_ids: Vec<DocumentId>,
+    pub deleted_source_artifact_ids: Vec<SourceArtifactId>,
+    pub deleted_derived_memory_ids: Vec<DerivedMemoryId>,
+    pub adapter_marked_stale: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LibraryBackupManifest {
+    pub schema_version: u32,
+    pub created_at: u64,
+    pub store_path: String,
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -75,6 +279,137 @@ impl Default for SourceTrustPolicy {
             label: "Unknown source".into(),
             caveat: "Verify against an original source anchor before making exact claims.".into(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SourceFreshnessStatus {
+    Unknown,
+    Fresh,
+    Aging,
+    Stale,
+    RefreshNeeded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceFreshnessPolicy {
+    #[serde(default)]
+    pub retrieved_at: Option<u64>,
+    #[serde(default)]
+    pub freshness_expires_at: Option<u64>,
+    pub status: SourceFreshnessStatus,
+    #[serde(default)]
+    pub stale_warning: Option<String>,
+    pub refresh_needed: bool,
+    #[serde(default)]
+    pub recapture_url: Option<String>,
+    #[serde(default)]
+    pub recapture_query: Option<String>,
+}
+
+impl Default for SourceFreshnessPolicy {
+    fn default() -> Self {
+        Self {
+            retrieved_at: None,
+            freshness_expires_at: None,
+            status: SourceFreshnessStatus::Unknown,
+            stale_warning: None,
+            refresh_needed: false,
+            recapture_url: None,
+            recapture_query: None,
+        }
+    }
+}
+
+impl SourceFreshnessPolicy {
+    pub fn from_metadata(metadata: &BTreeMap<String, String>, now: u64) -> Self {
+        let retrieved_at = metadata
+            .get("retrieved_at")
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(normalize_epoch_millis);
+        let freshness_expires_at = metadata
+            .get("freshness_expires_at")
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(normalize_epoch_millis);
+        let status = metadata
+            .get("freshness_status")
+            .and_then(|value| match value.as_str() {
+                "fresh" => Some(SourceFreshnessStatus::Fresh),
+                "aging" => Some(SourceFreshnessStatus::Aging),
+                "stale" => Some(SourceFreshnessStatus::Stale),
+                "refresh_needed" => Some(SourceFreshnessStatus::RefreshNeeded),
+                "unknown" => Some(SourceFreshnessStatus::Unknown),
+                _ => None,
+            })
+            .unwrap_or_else(|| computed_freshness_status(retrieved_at, freshness_expires_at, now));
+        let refresh_needed = matches!(
+            status,
+            SourceFreshnessStatus::RefreshNeeded | SourceFreshnessStatus::Stale
+        );
+        let stale_warning = match status {
+            SourceFreshnessStatus::Stale => {
+                Some("Source may be stale; verify or refresh before treating it as current.".into())
+            }
+            SourceFreshnessStatus::RefreshNeeded => Some(
+                "Freshness window expired; recapture this source before relying on current facts."
+                    .into(),
+            ),
+            SourceFreshnessStatus::Aging => {
+                Some("Source is aging; prefer fresher evidence for time-sensitive claims.".into())
+            }
+            SourceFreshnessStatus::Fresh | SourceFreshnessStatus::Unknown => None,
+        };
+        Self {
+            retrieved_at,
+            freshness_expires_at,
+            status,
+            stale_warning,
+            refresh_needed,
+            recapture_url: metadata
+                .get("url")
+                .or_else(|| metadata.get("source_url"))
+                .or_else(|| metadata.get("path"))
+                .filter(|value| value.starts_with("http://") || value.starts_with("https://"))
+                .cloned(),
+            recapture_query: metadata.get("query").cloned(),
+        }
+    }
+}
+
+pub fn normalize_epoch_millis(value: u64) -> u64 {
+    if value < 10_000_000_000 {
+        value * 1000
+    } else {
+        value
+    }
+}
+
+fn computed_freshness_status(
+    retrieved_at: Option<u64>,
+    freshness_expires_at: Option<u64>,
+    now: u64,
+) -> SourceFreshnessStatus {
+    if now > 0 {
+        if let Some(expires_at) = freshness_expires_at {
+            if now > expires_at {
+                return SourceFreshnessStatus::RefreshNeeded;
+            }
+        }
+    }
+    let Some(retrieved_at) = retrieved_at else {
+        return SourceFreshnessStatus::Unknown;
+    };
+    if now == 0 {
+        return SourceFreshnessStatus::Unknown;
+    }
+    let age = now.saturating_sub(retrieved_at);
+    let day = 24 * 60 * 60 * 1000;
+    if age <= 14 * day {
+        SourceFreshnessStatus::Fresh
+    } else if age <= 60 * day {
+        SourceFreshnessStatus::Aging
+    } else {
+        SourceFreshnessStatus::Stale
     }
 }
 
@@ -161,6 +496,8 @@ pub struct SourceOpenTarget {
     pub email_location: Option<EmailThreadLocation>,
     #[serde(default)]
     pub source_trust: SourceTrustPolicy,
+    #[serde(default)]
+    pub source_freshness: SourceFreshnessPolicy,
     #[serde(default)]
     pub is_derived: bool,
     #[serde(default)]
@@ -392,6 +729,8 @@ pub struct ChunkHit {
     pub end: usize,
     #[serde(default)]
     pub source_anchor: Option<SourceAnchor>,
+    #[serde(default)]
+    pub source_freshness: SourceFreshnessPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -535,6 +874,8 @@ pub struct WebFinding {
     pub title: String,
     pub summary: String,
     pub retrieved_at: u64,
+    #[serde(default)]
+    pub freshness_expires_at: Option<u64>,
     pub confidence: f32,
     pub actor: String,
     pub created_at: u64,
@@ -550,6 +891,8 @@ pub struct WebFindingWrite {
     pub title: String,
     pub summary: String,
     pub retrieved_at: u64,
+    #[serde(default)]
+    pub freshness_expires_at: Option<u64>,
     pub confidence: f32,
     pub actor: String,
 }
@@ -643,6 +986,44 @@ pub struct MemoryAccess {
     pub reason: String,
     pub actor: String,
     pub accessed_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RetrievalTraceLabel {
+    pub query: String,
+    pub expected_chunk_ids: Vec<ChunkId>,
+    #[serde(default)]
+    pub expected_document_ids: Vec<DocumentId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RankingFeatureRow {
+    pub query: String,
+    pub chunk_id: ChunkId,
+    pub document_id: DocumentId,
+    pub score: f32,
+    pub relevant: bool,
+    pub source_type: String,
+    pub source_trust: f32,
+    #[serde(default)]
+    pub confidence: Option<f32>,
+    #[serde(default)]
+    pub retrieved_at: Option<u64>,
+    #[serde(default)]
+    pub freshness_expires_at: Option<u64>,
+    pub freshness_status: SourceFreshnessStatus,
+    pub refresh_needed: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RankingEvaluationReport {
+    pub trace_count: usize,
+    pub hit_count: usize,
+    pub top1_accuracy: f32,
+    pub mean_reciprocal_rank: f32,
+    pub refresh_needed_hits: usize,
+    pub stale_warning_hits: usize,
+    pub feature_rows: Vec<RankingFeatureRow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

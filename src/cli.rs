@@ -29,6 +29,10 @@ enum Command {
         input: PathBuf,
     },
     Rebuild,
+    Library {
+        #[command(subcommand)]
+        command: LibraryCommand,
+    },
     Cortex {
         #[command(subcommand)]
         command: CortexCommand,
@@ -174,6 +178,69 @@ enum CortexCommand {
     Dataset,
 }
 
+#[derive(Debug, Subcommand)]
+enum LibraryCommand {
+    Snapshot,
+    Queue {
+        inputs: Vec<PathBuf>,
+    },
+    RunQueue {
+        #[arg(long)]
+        batch: Option<String>,
+    },
+    RetryFailed {
+        #[arg(long)]
+        batch: Option<String>,
+    },
+    CancelQueue {
+        #[arg(long)]
+        batch: Option<String>,
+        item_ids: Vec<String>,
+    },
+    Watch {
+        path: PathBuf,
+        #[arg(long)]
+        recursive: bool,
+    },
+    Updates,
+    Dedupe {
+        inputs: Vec<PathBuf>,
+    },
+    Collection {
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    AddToCollection {
+        collection_id: String,
+        target_id: String,
+        #[arg(long, default_value = "document")]
+        target_kind: String,
+    },
+    SavedView {
+        name: String,
+        #[arg(long)]
+        source_type: Option<String>,
+        #[arg(long, default_value = "updated_desc")]
+        sort: String,
+    },
+    SourceTypes,
+    Delete {
+        #[arg(long)]
+        document: Vec<String>,
+        #[arg(long)]
+        source_artifact: Vec<String>,
+        #[arg(long)]
+        derived_memory: Vec<String>,
+    },
+    Backup {
+        destination: PathBuf,
+    },
+    Restore {
+        source: PathBuf,
+    },
+}
+
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let store = FileMemoryStore::new(cli.store);
@@ -191,6 +258,95 @@ pub fn run() -> anyhow::Result<()> {
             let result = crate::app::rebuild_memory(store.root())?;
             println!("{}", serde_json::to_string_pretty(&result.summary)?);
         }
+        Command::Library { command } => match command {
+            LibraryCommand::Snapshot => {
+                let snapshot = crate::app::library_management_snapshot(store.root())?;
+                println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            }
+            LibraryCommand::Queue { inputs } => {
+                let batch = crate::app::enqueue_import_batch(store.root(), &inputs)?;
+                println!("{}", serde_json::to_string_pretty(&batch)?);
+            }
+            LibraryCommand::RunQueue { batch } => {
+                let batch = crate::app::run_import_queue(store.root(), batch.as_deref())?;
+                println!("{}", serde_json::to_string_pretty(&batch)?);
+            }
+            LibraryCommand::RetryFailed { batch } => {
+                let batch = crate::app::retry_failed_imports(store.root(), batch.as_deref())?;
+                println!("{}", serde_json::to_string_pretty(&batch)?);
+            }
+            LibraryCommand::CancelQueue { batch, item_ids } => {
+                let batch = crate::app::cancel_import_queue_items(
+                    store.root(),
+                    batch.as_deref(),
+                    &item_ids,
+                )?;
+                println!("{}", serde_json::to_string_pretty(&batch)?);
+            }
+            LibraryCommand::Watch { path, recursive } => {
+                let root = crate::app::add_file_watch_root(store.root(), &path, recursive)?;
+                println!("{}", serde_json::to_string_pretty(&root)?);
+            }
+            LibraryCommand::Updates => {
+                let updates = crate::app::detect_library_updates(store.root())?;
+                println!("{}", serde_json::to_string_pretty(&updates)?);
+            }
+            LibraryCommand::Dedupe { inputs } => {
+                let report = crate::app::analyze_dedupe_candidates(store.root(), &inputs)?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
+            LibraryCommand::Collection { name, description } => {
+                let collection = crate::app::create_collection(store.root(), &name, description)?;
+                println!("{}", serde_json::to_string_pretty(&collection)?);
+            }
+            LibraryCommand::AddToCollection {
+                collection_id,
+                target_id,
+                target_kind,
+            } => {
+                let kind = parse_attention_target_kind(&target_kind)?;
+                let member =
+                    crate::app::add_to_collection(store.root(), &collection_id, &target_id, kind)?;
+                println!("{}", serde_json::to_string_pretty(&member)?);
+            }
+            LibraryCommand::SavedView {
+                name,
+                source_type,
+                sort,
+            } => {
+                let mut filters = BTreeMap::new();
+                if let Some(source_type) = source_type {
+                    filters.insert("source_type".into(), source_type);
+                }
+                let view = crate::app::save_view(store.root(), &name, filters, &sort)?;
+                println!("{}", serde_json::to_string_pretty(&view)?);
+            }
+            LibraryCommand::SourceTypes => {
+                let filters = crate::app::list_source_type_filters(store.root())?;
+                println!("{}", serde_json::to_string_pretty(&filters)?);
+            }
+            LibraryCommand::Delete {
+                document,
+                source_artifact,
+                derived_memory,
+            } => {
+                let result = crate::app::delete_library_items(
+                    store.root(),
+                    &document,
+                    &source_artifact,
+                    &derived_memory,
+                )?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            LibraryCommand::Backup { destination } => {
+                let manifest = crate::app::export_library_backup(store.root(), &destination)?;
+                println!("{}", serde_json::to_string_pretty(&manifest)?);
+            }
+            LibraryCommand::Restore { source } => {
+                let manifest = crate::app::import_library_backup(&source, store.root())?;
+                println!("{}", serde_json::to_string_pretty(&manifest)?);
+            }
+        },
         Command::Cortex { command } => match command {
             CortexCommand::Status { max_jobs } => {
                 let snapshot = crate::app::load_cortex_adapter_snapshot(store.root())?;
@@ -571,6 +727,26 @@ fn parse_node(raw: &str) -> anyhow::Result<NodeRef> {
         "chunk" => Ok(NodeRef::Chunk(value.into())),
         "region" => Ok(NodeRef::Region(value.into())),
         _ => Err(anyhow!("unknown node kind {kind}")),
+    }
+}
+
+fn parse_attention_target_kind(raw: &str) -> anyhow::Result<AttentionTargetKind> {
+    match raw.to_ascii_lowercase().replace('-', "_").as_str() {
+        "chat_session" => Ok(AttentionTargetKind::ChatSession),
+        "session" => Ok(AttentionTargetKind::Session),
+        "project" => Ok(AttentionTargetKind::Project),
+        "workspace" => Ok(AttentionTargetKind::Workspace),
+        "collection" => Ok(AttentionTargetKind::Collection),
+        "task" => Ok(AttentionTargetKind::Task),
+        "chat_message" => Ok(AttentionTargetKind::ChatMessage),
+        "transcript_chunk" => Ok(AttentionTargetKind::TranscriptChunk),
+        "derived_memory" => Ok(AttentionTargetKind::DerivedMemory),
+        "web_finding" => Ok(AttentionTargetKind::WebFinding),
+        "document" => Ok(AttentionTargetKind::Document),
+        "chunk" => Ok(AttentionTargetKind::Chunk),
+        "region" => Ok(AttentionTargetKind::Region),
+        "link" => Ok(AttentionTargetKind::Link),
+        _ => Err(anyhow!("unknown attention target kind {raw}")),
     }
 }
 

@@ -174,6 +174,7 @@ fn call_tool(store_root: &Path, params: Value) -> anyhow::Result<Value> {
                     .get("retrieved_at")
                     .and_then(Value::as_u64)
                     .unwrap_or(0),
+                freshness_expires_at: args.get("freshness_expires_at").and_then(Value::as_u64),
                 confidence: args
                     .get("confidence")
                     .and_then(Value::as_f64)
@@ -344,6 +345,7 @@ fn tools() -> Vec<Value> {
                     "title": { "type": "string" },
                     "summary": { "type": "string" },
                     "retrieved_at": { "type": "integer" },
+                    "freshness_expires_at": { "type": "integer" },
                     "confidence": { "type": "number" },
                     "actor": { "type": "string" }
                 },

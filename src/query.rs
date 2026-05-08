@@ -399,6 +399,7 @@ impl MemoryQueryEngine {
                     start: chunk.start,
                     end: chunk.end,
                     source_anchor: chunk.source_anchor.clone(),
+                    source_freshness: source_freshness_policy(document, chunk, now),
                 });
             }
 
@@ -449,6 +450,7 @@ impl MemoryQueryEngine {
                     start: chunk.start,
                     end: chunk.end,
                     source_anchor: chunk.source_anchor.clone(),
+                    source_freshness: source_freshness_policy(document, chunk, now),
                 });
             }
         }
@@ -462,6 +464,143 @@ impl MemoryQueryEngine {
         hits.retain(|hit| seen_chunks.insert(hit.chunk_id.clone()));
         hits.truncate(request.max_chunks.max(1));
         Ok(QueryResult { routed, hits })
+    }
+
+    pub fn evaluate_ranking_traces<E: Embedder>(
+        &self,
+        embedder: &E,
+        memory: &PersistedMemory,
+        ann_index: &RegionAnnIndex,
+        traces: &[RetrievalTraceLabel],
+        attention_marks: &[AttentionMark],
+        memory_accesses: &[MemoryAccess],
+        now: u64,
+        cortex_index: Option<&CortexIndex>,
+    ) -> anyhow::Result<RankingEvaluationReport> {
+        let documents_by_id = memory
+            .documents
+            .iter()
+            .map(|document| (document.id.clone(), document))
+            .collect::<HashMap<_, _>>();
+        let chunks_by_id = memory
+            .chunks
+            .iter()
+            .map(|chunk| (chunk.id.clone(), chunk))
+            .collect::<HashMap<_, _>>();
+        let mut reciprocal_rank_sum = 0.0f32;
+        let mut top1_matches = 0usize;
+        let mut hit_count = 0usize;
+        let mut refresh_needed_hits = 0usize;
+        let mut stale_warning_hits = 0usize;
+        let mut feature_rows = Vec::new();
+
+        for trace in traces {
+            let result = self.execute_with_signals(
+                embedder,
+                memory,
+                ann_index,
+                QueryRequest {
+                    text: trace.query.clone(),
+                    filters: BTreeMap::new(),
+                    max_regions: 5,
+                    max_chunks: 10,
+                },
+                attention_marks,
+                memory_accesses,
+                now,
+                cortex_index,
+            )?;
+            let expected_chunks = trace.expected_chunk_ids.iter().collect::<HashSet<_>>();
+            let expected_documents = trace.expected_document_ids.iter().collect::<HashSet<_>>();
+            if result.hits.first().is_some_and(|hit| {
+                expected_chunks.contains(&hit.chunk_id)
+                    || expected_documents.contains(&hit.document_id)
+            }) {
+                top1_matches += 1;
+            }
+            if let Some((rank, _)) = result.hits.iter().enumerate().find(|(_, hit)| {
+                expected_chunks.contains(&hit.chunk_id)
+                    || expected_documents.contains(&hit.document_id)
+            }) {
+                reciprocal_rank_sum += 1.0 / (rank as f32 + 1.0);
+            }
+            for hit in result.hits {
+                hit_count += 1;
+                if hit.source_freshness.refresh_needed {
+                    refresh_needed_hits += 1;
+                }
+                if hit.source_freshness.stale_warning.is_some() {
+                    stale_warning_hits += 1;
+                }
+                let source_type = documents_by_id
+                    .get(&hit.document_id)
+                    .and_then(|document| document.metadata.get("source_type"))
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".into());
+                let source_trust = documents_by_id
+                    .get(&hit.document_id)
+                    .and_then(|document| document.metadata.get("source_trust"))
+                    .and_then(|value| value.parse::<f32>().ok())
+                    .unwrap_or(0.5);
+                let confidence = documents_by_id
+                    .get(&hit.document_id)
+                    .and_then(|document| document.metadata.get("confidence"))
+                    .and_then(|value| value.parse::<f32>().ok());
+                feature_rows.push(RankingFeatureRow {
+                    query: trace.query.clone(),
+                    chunk_id: hit.chunk_id.clone(),
+                    document_id: hit.document_id.clone(),
+                    score: hit.score,
+                    relevant: expected_chunks.contains(&hit.chunk_id)
+                        || expected_documents.contains(&hit.document_id),
+                    source_type,
+                    source_trust,
+                    confidence,
+                    retrieved_at: chunks_by_id
+                        .get(&hit.chunk_id)
+                        .and_then(|chunk| {
+                            documents_by_id
+                                .get(&chunk.document_id)
+                                .map(|doc| (doc, chunk))
+                        })
+                        .and_then(|(document, chunk)| {
+                            parse_metadata_u64(document, chunk, "retrieved_at")
+                        })
+                        .map(normalize_epoch_millis),
+                    freshness_expires_at: chunks_by_id
+                        .get(&hit.chunk_id)
+                        .and_then(|chunk| {
+                            documents_by_id
+                                .get(&chunk.document_id)
+                                .map(|doc| (doc, chunk))
+                        })
+                        .and_then(|(document, chunk)| {
+                            parse_metadata_u64(document, chunk, "freshness_expires_at")
+                        })
+                        .map(normalize_epoch_millis),
+                    freshness_status: hit.source_freshness.status.clone(),
+                    refresh_needed: hit.source_freshness.refresh_needed,
+                });
+            }
+        }
+        let trace_count = traces.len();
+        Ok(RankingEvaluationReport {
+            trace_count,
+            hit_count,
+            top1_accuracy: if trace_count == 0 {
+                0.0
+            } else {
+                top1_matches as f32 / trace_count as f32
+            },
+            mean_reciprocal_rank: if trace_count == 0 {
+                0.0
+            } else {
+                reciprocal_rank_sum / trace_count as f32
+            },
+            refresh_needed_hits,
+            stale_warning_hits,
+            feature_rows,
+        })
     }
 
     pub fn trace(&self, memory_map: &MemoryMap, query: &str, max_regions: usize) -> QueryTrace {
@@ -807,7 +946,7 @@ fn source_recall_signal(document: &Document, chunk: &Chunk, now: u64) -> f32 {
     }
 
     if let Some(expires_at) = parse_metadata_u64(document, chunk, "freshness_expires_at") {
-        let expires_at = normalize_epoch_millis(expires_at);
+        let expires_at = crate::types::normalize_epoch_millis(expires_at);
         if now > 0 && now > expires_at {
             signal -= 0.12;
         }
@@ -826,7 +965,7 @@ fn freshness_signal(retrieved_at: u64, now: u64) -> f32 {
     if now == 0 {
         return 0.0;
     }
-    let retrieved_at = normalize_epoch_millis(retrieved_at);
+    let retrieved_at = crate::types::normalize_epoch_millis(retrieved_at);
     let age = now.saturating_sub(retrieved_at);
     let day = 24 * 60 * 60 * 1000;
     if age <= 7 * day {
@@ -837,14 +976,6 @@ fn freshness_signal(retrieved_at: u64, now: u64) -> f32 {
         -0.03
     } else {
         -0.08
-    }
-}
-
-fn normalize_epoch_millis(value: u64) -> u64 {
-    if value < 10_000_000_000 {
-        value * 1000
-    } else {
-        value
     }
 }
 
@@ -862,6 +993,12 @@ fn metadata_value(document: &Document, chunk: &Chunk, key: &str) -> Option<Strin
         .get(key)
         .or_else(|| document.metadata.get(key))
         .cloned()
+}
+
+fn source_freshness_policy(document: &Document, chunk: &Chunk, now: u64) -> SourceFreshnessPolicy {
+    let mut metadata = document.metadata.clone();
+    metadata.extend(chunk.metadata.clone());
+    SourceFreshnessPolicy::from_metadata(&metadata, now)
 }
 
 fn attention_scores(marks: &[AttentionMark]) -> HashMap<String, f32> {
@@ -1894,5 +2031,93 @@ mod tests {
             Some("chunk-trusted-local")
         );
         assert!(result.hits[0].score > result.hits[1].score);
+    }
+
+    #[test]
+    fn ranking_eval_reports_refresh_needed_web_hits() {
+        let embedder = crate::index::HashEmbedder::default();
+        let text = "current policy evidence for refreshable web recall";
+        let embedding = embedder.embed(text).expect("embedding");
+        let mut metadata = BTreeMap::new();
+        metadata.insert("source_type".into(), "web_finding".into());
+        metadata.insert("source_trust".into(), "0.80".into());
+        metadata.insert("confidence".into(), "0.80".into());
+        metadata.insert("retrieved_at".into(), "1000".into());
+        metadata.insert("freshness_expires_at".into(), "2000".into());
+        metadata.insert("url".into(), "https://example.com/policy".into());
+        metadata.insert("query".into(), "current policy".into());
+        let document = Document {
+            id: "doc-web".into(),
+            title: "Web policy".into(),
+            text: text.into(),
+            metadata,
+            source_anchor: None,
+            content_hash: None,
+            parser_version: None,
+        };
+        let chunk = Chunk {
+            id: "chunk-web".into(),
+            document_id: "doc-web".into(),
+            region_id: "region".into(),
+            ordinal: 0,
+            start: 0,
+            end: text.chars().count(),
+            text: text.into(),
+            metadata: BTreeMap::new(),
+            source_anchor: None,
+            embedding: embedding.clone(),
+            embedding_text_hash: None,
+            embedding_provider: None,
+            embedding_model: None,
+            embedding_endpoint: None,
+            embedding_dimension: None,
+            chunking_version: None,
+        };
+        let memory = PersistedMemory {
+            documents: vec![document],
+            chunks: vec![chunk],
+            regions: vec![Region {
+                id: "region".into(),
+                label: "Region".into(),
+                summary: text.into(),
+                filters: BTreeMap::new(),
+                chunk_ids: vec!["chunk-web".into()],
+                centroid: embedding,
+                neighbors: Vec::new(),
+            }],
+            links: Vec::new(),
+            memory_map: Some(MemoryMap {
+                budget_bytes: 2048,
+                serialized: String::new(),
+                entries: vec![entry("region", "Region", text)],
+            }),
+        };
+        let ann = crate::index::RegionIndexer.rebuild(&memory.chunks, &memory.regions);
+        let report = MemoryQueryEngine
+            .evaluate_ranking_traces(
+                &embedder,
+                &memory,
+                &ann,
+                &[RetrievalTraceLabel {
+                    query: text.into(),
+                    expected_chunk_ids: vec!["chunk-web".into()],
+                    expected_document_ids: Vec::new(),
+                }],
+                &[],
+                &[],
+                3_000_000,
+                None,
+            )
+            .expect("eval");
+
+        assert_eq!(report.trace_count, 1);
+        assert_eq!(report.top1_accuracy, 1.0);
+        assert_eq!(report.refresh_needed_hits, 1);
+        assert!(report.stale_warning_hits >= 1);
+        assert!(report.feature_rows[0].refresh_needed);
+        assert_eq!(
+            report.feature_rows[0].freshness_status,
+            SourceFreshnessStatus::RefreshNeeded
+        );
     }
 }

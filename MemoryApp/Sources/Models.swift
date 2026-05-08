@@ -264,9 +264,28 @@ struct SourceOpenTarget: Codable, Equatable {
     var browserUrl: String?
     var emailLocation: EmailThreadLocation?
     var sourceTrust: SourceTrustPolicy
+    var sourceFreshness: SourceFreshnessPolicy?
     var isDerived: Bool
     var caveat: String?
     var locationHint: String
+}
+
+enum SourceFreshnessStatus: String, Codable, Equatable {
+    case unknown = "Unknown"
+    case fresh = "Fresh"
+    case aging = "Aging"
+    case stale = "Stale"
+    case refreshNeeded = "RefreshNeeded"
+}
+
+struct SourceFreshnessPolicy: Codable, Equatable {
+    var retrievedAt: UInt64?
+    var freshnessExpiresAt: UInt64?
+    var status: SourceFreshnessStatus
+    var staleWarning: String?
+    var refreshNeeded: Bool
+    var recaptureUrl: String?
+    var recaptureQuery: String?
 }
 
 struct ImportResult: Codable, Equatable {
@@ -388,6 +407,7 @@ struct WebFindingWrite: Codable, Equatable {
     var title: String
     var summary: String
     var retrievedAt: UInt64
+    var freshnessExpiresAt: UInt64?
     var confidence: Float
     var actor: String
 }
@@ -400,6 +420,7 @@ struct WebFinding: Codable, Equatable, Identifiable {
     var title: String
     var summary: String
     var retrievedAt: UInt64
+    var freshnessExpiresAt: UInt64?
     var confidence: Float
     var actor: String
     var createdAt: UInt64
@@ -756,6 +777,7 @@ struct ChunkHit: Codable, Equatable, Identifiable {
     var start: Int
     var end: Int
     var sourceAnchor: SourceAnchor?
+    var sourceFreshness: SourceFreshnessPolicy?
 
     var id: String { hitId }
 }

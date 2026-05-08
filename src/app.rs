@@ -37,6 +37,7 @@ const MAX_CONTEXT_SNIPPET_CHARS: usize = 2200;
 const WEB_SEARCH_MAX_RESULTS: usize = 4;
 const WEB_SEARCH_MIN_LOCAL_SCORE: f32 = 0.45;
 const MEMORY_ACCESS_HORIZON_MILLIS: u64 = 30 * 24 * 60 * 60 * 1000;
+const DEFAULT_WEB_FRESHNESS_WINDOW_MILLIS: u64 = 30 * 24 * 60 * 60 * 1000;
 #[cfg(not(test))]
 const MAX_WEB_BODY_CHARS: usize = 12_000;
 const MAX_WEB_SUMMARY_CHARS: usize = 16_000;
@@ -411,6 +412,665 @@ pub fn rebuild_memory(store_root: &Path) -> anyhow::Result<ImportResult> {
         reused_embedding_count: stats.reused_embedding_count,
         adapter_state,
     })
+}
+
+pub fn enqueue_import_batch(
+    store_root: &Path,
+    paths: &[PathBuf],
+) -> anyhow::Result<ImportQueueBatch> {
+    let store = FileMemoryStore::new(store_root);
+    let now = now_millis();
+    let batch_id = unique_id("import-batch");
+    for path in paths {
+        let item = ImportQueueItem {
+            id: unique_id("import-item"),
+            batch_id: batch_id.clone(),
+            path: path.display().to_string(),
+            status: ImportQueueStatus::Pending,
+            progress_completed: 0,
+            progress_total: 1,
+            error: None,
+            imported_document_ids: Vec::new(),
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            finished_at: None,
+        };
+        store.upsert_import_queue_item(&item)?;
+    }
+    import_queue_batch(store_root, Some(&batch_id))
+}
+
+pub fn import_queue_batch(
+    store_root: &Path,
+    batch_id: Option<&str>,
+) -> anyhow::Result<ImportQueueBatch> {
+    let items = FileMemoryStore::new(store_root).list_import_queue_items(batch_id)?;
+    let id = batch_id
+        .map(str::to_string)
+        .or_else(|| items.first().map(|item| item.batch_id.clone()))
+        .unwrap_or_default();
+    Ok(summarize_import_queue(id, items))
+}
+
+pub fn run_import_queue(
+    store_root: &Path,
+    batch_id: Option<&str>,
+) -> anyhow::Result<ImportQueueBatch> {
+    let store = FileMemoryStore::new(store_root);
+    let items = store.list_import_queue_items(batch_id)?;
+    for mut item in items
+        .into_iter()
+        .filter(|item| item.status == ImportQueueStatus::Pending)
+    {
+        let started = now_millis();
+        item.status = ImportQueueStatus::Running;
+        item.updated_at = started;
+        item.started_at = Some(started);
+        item.progress_completed = 0;
+        item.progress_total = 1;
+        item.error = None;
+        store.upsert_import_queue_item(&item)?;
+
+        match ingest_paths(store_root, &[PathBuf::from(&item.path)]) {
+            Ok(result) => {
+                item.status = ImportQueueStatus::Succeeded;
+                item.progress_completed = 1;
+                item.imported_document_ids = result
+                    .imported_paths
+                    .iter()
+                    .chain(result.replaced_paths.iter())
+                    .map(|path| format!("path:{path}"))
+                    .collect();
+            }
+            Err(error) => {
+                item.status = ImportQueueStatus::Failed;
+                item.error = Some(error.to_string());
+            }
+        }
+        let finished = now_millis();
+        item.updated_at = finished;
+        item.finished_at = Some(finished);
+        store.upsert_import_queue_item(&item)?;
+    }
+    import_queue_batch(store_root, batch_id)
+}
+
+pub fn retry_failed_imports(
+    store_root: &Path,
+    batch_id: Option<&str>,
+) -> anyhow::Result<ImportQueueBatch> {
+    let store = FileMemoryStore::new(store_root);
+    let now = now_millis();
+    for mut item in store.list_import_queue_items(batch_id)? {
+        if item.status == ImportQueueStatus::Failed || item.status == ImportQueueStatus::Cancelled {
+            item.status = ImportQueueStatus::Pending;
+            item.progress_completed = 0;
+            item.error = None;
+            item.updated_at = now;
+            item.started_at = None;
+            item.finished_at = None;
+            store.upsert_import_queue_item(&item)?;
+        }
+    }
+    import_queue_batch(store_root, batch_id)
+}
+
+pub fn cancel_import_queue_items(
+    store_root: &Path,
+    batch_id: Option<&str>,
+    item_ids: &[ImportQueueItemId],
+) -> anyhow::Result<ImportQueueBatch> {
+    let store = FileMemoryStore::new(store_root);
+    let now = now_millis();
+    let selected = item_ids.iter().cloned().collect::<HashSet<_>>();
+    for mut item in store.list_import_queue_items(batch_id)? {
+        if !selected.is_empty() && !selected.contains(&item.id) {
+            continue;
+        }
+        if matches!(
+            item.status,
+            ImportQueueStatus::Pending | ImportQueueStatus::Running
+        ) {
+            item.status = ImportQueueStatus::Cancelled;
+            item.updated_at = now;
+            item.finished_at = Some(now);
+            item.error = Some("Cancelled before import completed.".into());
+            store.upsert_import_queue_item(&item)?;
+        }
+    }
+    import_queue_batch(store_root, batch_id)
+}
+
+pub fn add_file_watch_root(
+    store_root: &Path,
+    path: &Path,
+    recursive: bool,
+) -> anyhow::Result<FileWatchRoot> {
+    let store = FileMemoryStore::new(store_root);
+    let now = now_millis();
+    let root = FileWatchRoot {
+        id: format!("watch-root:{}", hash_text(&path.display().to_string())),
+        path: path.display().to_string(),
+        recursive,
+        enabled: true,
+        created_at: now,
+        updated_at: now,
+    };
+    store.upsert_file_watch_root(&root)?;
+    Ok(root)
+}
+
+pub fn detect_library_updates(store_root: &Path) -> anyhow::Result<Vec<FileUpdate>> {
+    let store = FileMemoryStore::new(store_root);
+    let memory = store.load()?;
+    let documents_by_artifact = memory
+        .documents
+        .iter()
+        .filter_map(|document| {
+            document
+                .metadata
+                .get("source_artifact_id")
+                .map(|id| (id.clone(), document.id.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let watch_files = collect_watch_file_hashes(&store)?;
+    let mut seen_hashes = BTreeMap::<String, Vec<String>>::new();
+    for (path, hash) in &watch_files {
+        seen_hashes
+            .entry(hash.clone())
+            .or_default()
+            .push(path.clone());
+    }
+    let mut updates = Vec::new();
+    let detected_at = now_millis();
+    let artifacts = store.list_source_artifacts()?;
+    let artifact_hash_counts = artifacts
+        .iter()
+        .fold(BTreeMap::new(), |mut counts, artifact| {
+            *counts.entry(artifact.file_hash.clone()).or_insert(0usize) += 1;
+            counts
+        });
+    for artifact in artifacts {
+        let live_path = Path::new(&artifact.original_path)
+            .is_file()
+            .then(|| Path::new(&artifact.original_path));
+        let current_hash = live_path.and_then(|path| file_content_hash(path).ok());
+        let candidate_path = seen_hashes
+            .get(&artifact.file_hash)
+            .and_then(|paths| paths.first())
+            .cloned();
+        let kind = if current_hash.as_deref() == Some(artifact.file_hash.as_str()) {
+            if artifact_hash_counts
+                .get(&artifact.file_hash)
+                .copied()
+                .unwrap_or(0)
+                > 1
+                || seen_hashes
+                    .get(&artifact.file_hash)
+                    .is_some_and(|paths| paths.len() > 1)
+            {
+                FileUpdateKind::DuplicateFile
+            } else {
+                FileUpdateKind::Unchanged
+            }
+        } else if current_hash.is_some() {
+            if candidate_path.is_some() {
+                FileUpdateKind::ReplacedFile
+            } else {
+                FileUpdateKind::ChangedFile
+            }
+        } else if candidate_path.is_some() {
+            FileUpdateKind::MovedFile
+        } else {
+            FileUpdateKind::DeletedFile
+        };
+        if kind != FileUpdateKind::Unchanged {
+            updates.push(FileUpdate {
+                kind,
+                source_artifact_id: artifact.id.clone(),
+                document_id: documents_by_artifact.get(&artifact.id).cloned(),
+                original_path: artifact.original_path.clone(),
+                current_path: artifact.current_path.clone(),
+                candidate_path,
+                previous_hash: Some(artifact.file_hash.clone()),
+                current_hash,
+                detected_at,
+            });
+        }
+    }
+    Ok(updates)
+}
+
+pub fn analyze_dedupe_candidates(
+    store_root: &Path,
+    paths: &[PathBuf],
+) -> anyhow::Result<DedupeReport> {
+    let memory = FileMemoryStore::new(store_root).load()?;
+    let mut candidates = Vec::new();
+    for path in paths {
+        let incoming_hash = file_content_hash(path).ok();
+        let incoming_title = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        for document in &memory.documents {
+            let existing_path = document
+                .metadata
+                .get("path")
+                .or_else(|| document.metadata.get("original_path"));
+            let existing_hash = source_file_hash(document);
+            let title_score = title_similarity(&incoming_title, &document.title.to_lowercase());
+            let (match_kind, score) = if incoming_hash.as_deref().is_some()
+                && incoming_hash.as_deref() == existing_hash
+            {
+                (DedupeMatchKind::SameHash, 1.0)
+            } else if existing_path.is_some_and(|existing| existing == &path.display().to_string())
+            {
+                (DedupeMatchKind::SamePath, 0.98)
+            } else if title_score >= 0.82 {
+                (DedupeMatchKind::SimilarTitle, title_score)
+            } else {
+                continue;
+            };
+            candidates.push(DedupeCandidate {
+                incoming_path: path.display().to_string(),
+                existing_document_id: document.id.clone(),
+                existing_title: document.title.clone(),
+                match_kind,
+                score,
+            });
+        }
+    }
+    candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
+    Ok(DedupeReport { candidates })
+}
+
+pub fn create_collection(
+    store_root: &Path,
+    name: &str,
+    description: Option<String>,
+) -> anyhow::Result<Collection> {
+    let now = now_millis();
+    let collection = Collection {
+        id: format!("collection:{}", hash_text(&format!("{name}:{now}"))),
+        name: name.into(),
+        description,
+        created_at: now,
+        updated_at: now,
+    };
+    FileMemoryStore::new(store_root).upsert_collection(&collection)?;
+    Ok(collection)
+}
+
+pub fn add_to_collection(
+    store_root: &Path,
+    collection_id: &str,
+    target_id: &str,
+    target_kind: AttentionTargetKind,
+) -> anyhow::Result<CollectionMember> {
+    let member = CollectionMember {
+        collection_id: collection_id.into(),
+        target_id: target_id.into(),
+        target_kind,
+        added_at: now_millis(),
+    };
+    FileMemoryStore::new(store_root).add_collection_member(&member)?;
+    Ok(member)
+}
+
+pub fn save_view(
+    store_root: &Path,
+    name: &str,
+    filters: BTreeMap<String, String>,
+    sort: &str,
+) -> anyhow::Result<SavedView> {
+    let now = now_millis();
+    let view = SavedView {
+        id: format!("saved-view:{}", hash_text(&format!("{name}:{now}"))),
+        name: name.into(),
+        filters,
+        sort: sort.into(),
+        created_at: now,
+        updated_at: now,
+    };
+    FileMemoryStore::new(store_root).upsert_saved_view(&view)?;
+    Ok(view)
+}
+
+pub fn save_trail_from_session(
+    store_root: &Path,
+    session: &SessionState,
+    name: &str,
+) -> anyhow::Result<SavedTrail> {
+    let store = FileMemoryStore::new(store_root);
+    let memory = store.load()?;
+    let steps = trail_nodes_for_session(session)
+        .into_iter()
+        .map(|node| SurfTrailStep {
+            source_anchor: source_anchor_for_node(&memory, &node),
+            node,
+            note: None,
+        })
+        .collect();
+    let trail = SavedTrail {
+        id: format!(
+            "saved-trail:{}",
+            hash_text(&format!("{}:{name}:{}", session.id, now_millis()))
+        ),
+        name: name.into(),
+        session_id: session.id.clone(),
+        steps,
+        created_at: now_millis(),
+    };
+    store.upsert_saved_trail(&trail)?;
+    Ok(trail)
+}
+
+pub fn list_source_type_filters(store_root: &Path) -> anyhow::Result<Vec<SourceTypeFilterSummary>> {
+    let memory = FileMemoryStore::new(store_root).load()?;
+    let mut counts = BTreeMap::<String, usize>::new();
+    for document in memory.documents {
+        let source_type = document
+            .metadata
+            .get("source_type")
+            .cloned()
+            .unwrap_or_else(|| "unknown".into());
+        *counts.entry(source_type).or_default() += 1;
+    }
+    Ok(counts
+        .into_iter()
+        .map(|(source_type, count)| SourceTypeFilterSummary { source_type, count })
+        .collect())
+}
+
+pub fn library_management_snapshot(store_root: &Path) -> anyhow::Result<LibraryManagementSnapshot> {
+    let store = FileMemoryStore::new(store_root);
+    Ok(LibraryManagementSnapshot {
+        import_queue: import_queue_batch(store_root, None).unwrap_or_default(),
+        watch_roots: store.list_file_watch_roots().unwrap_or_default(),
+        updates: detect_library_updates(store_root).unwrap_or_default(),
+        collections: store.list_collections().unwrap_or_default(),
+        saved_views: store.list_saved_views().unwrap_or_default(),
+        saved_trails: store.list_saved_trails().unwrap_or_default(),
+        source_type_filters: list_source_type_filters(store_root).unwrap_or_default(),
+    })
+}
+
+pub fn delete_library_items(
+    store_root: &Path,
+    document_ids: &[DocumentId],
+    source_artifact_ids: &[SourceArtifactId],
+    derived_memory_ids: &[DerivedMemoryId],
+) -> anyhow::Result<LibraryDeleteResult> {
+    let store = FileMemoryStore::new(store_root);
+    let memory = store.load()?;
+    let remove_documents = document_ids.iter().cloned().collect::<HashSet<_>>();
+    let remove_artifacts = source_artifact_ids.iter().cloned().collect::<HashSet<_>>();
+    let original_document_count = memory.documents.len();
+    let remaining_documents = memory
+        .documents
+        .into_iter()
+        .filter(|document| {
+            !remove_documents.contains(&document.id)
+                && !document
+                    .metadata
+                    .get("source_artifact_id")
+                    .is_some_and(|id| remove_artifacts.contains(id))
+        })
+        .collect::<Vec<_>>();
+    let removed_source_documents = remaining_documents.len() != original_document_count;
+    let config = load_model_config(store_root)?;
+    let (rebuilt, _) =
+        rebuild_from_documents(store_root, remaining_documents, &memory.chunks, &config)?;
+    store.save(&rebuilt)?;
+    let mut deleted_derived_memory_ids = Vec::new();
+    for id in derived_memory_ids {
+        if store.delete_derived_memory(id)? || store.delete_brain_artifact(id)? {
+            deleted_derived_memory_ids.push(id.clone());
+        }
+    }
+    let mut adapter_marked_stale = false;
+    if removed_source_documents {
+        if let Some(mut state) = store.load_cortex_adapter_state()? {
+            state.freshness = "stale".into();
+            state.data_freshness = "stale".into();
+            state.reason = Some("Library deletion changed the source corpus.".into());
+            state.checked_at = now_millis();
+            store.save_cortex_adapter_state(&state)?;
+            adapter_marked_stale = true;
+        }
+    }
+    Ok(LibraryDeleteResult {
+        deleted_document_ids: document_ids.to_vec(),
+        deleted_source_artifact_ids: source_artifact_ids.to_vec(),
+        deleted_derived_memory_ids,
+        adapter_marked_stale,
+    })
+}
+
+pub fn export_library_backup(
+    store_root: &Path,
+    destination: &Path,
+) -> anyhow::Result<LibraryBackupManifest> {
+    if destination.starts_with(store_root) {
+        return Err(anyhow!(
+            "backup destination must be outside the store to avoid recursive copies"
+        ));
+    }
+    if destination.exists() {
+        std::fs::remove_dir_all(destination)?;
+    }
+    copy_dir_all(store_root, destination)?;
+    let manifest = LibraryBackupManifest {
+        schema_version: 1,
+        created_at: now_millis(),
+        store_path: store_root.display().to_string(),
+        files: list_relative_files(destination)?,
+    };
+    std::fs::write(
+        destination.join("backup-manifest.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
+    Ok(manifest)
+}
+
+pub fn import_library_backup(
+    source: &Path,
+    store_root: &Path,
+) -> anyhow::Result<LibraryBackupManifest> {
+    let manifest_path = source.join("backup-manifest.json");
+    let manifest = if manifest_path.is_file() {
+        serde_json::from_slice::<LibraryBackupManifest>(&std::fs::read(&manifest_path)?)?
+    } else {
+        LibraryBackupManifest {
+            schema_version: 1,
+            created_at: now_millis(),
+            store_path: source.display().to_string(),
+            files: list_relative_files(source)?,
+        }
+    };
+    copy_dir_all(source, store_root)?;
+    Ok(manifest)
+}
+
+fn summarize_import_queue(id: String, items: Vec<ImportQueueItem>) -> ImportQueueBatch {
+    let mut batch = ImportQueueBatch {
+        id,
+        progress_total: items.len(),
+        items,
+        ..Default::default()
+    };
+    for item in &batch.items {
+        batch.progress_completed += item.progress_completed.min(item.progress_total);
+        match item.status {
+            ImportQueueStatus::Pending => batch.pending += 1,
+            ImportQueueStatus::Running => batch.running += 1,
+            ImportQueueStatus::Succeeded => batch.succeeded += 1,
+            ImportQueueStatus::Failed => batch.failed += 1,
+            ImportQueueStatus::Cancelled => batch.cancelled += 1,
+        }
+    }
+    batch
+}
+
+fn collect_watch_file_hashes(store: &FileMemoryStore) -> anyhow::Result<BTreeMap<String, String>> {
+    let mut files = BTreeMap::new();
+    for root in store
+        .list_file_watch_roots()?
+        .into_iter()
+        .filter(|root| root.enabled)
+    {
+        collect_hashes_under(Path::new(&root.path), root.recursive, &mut files)?;
+    }
+    Ok(files)
+}
+
+fn collect_hashes_under(
+    path: &Path,
+    recursive: bool,
+    files: &mut BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    if path.is_file() {
+        if let Ok(hash) = file_content_hash(path) {
+            files.insert(path.display().to_string(), hash);
+        }
+        return Ok(());
+    }
+    if !path.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let entry_path = entry.path();
+        if entry_path.is_dir() && recursive {
+            collect_hashes_under(&entry_path, true, files)?;
+        } else if entry_path.is_file() {
+            if let Ok(hash) = file_content_hash(&entry_path) {
+                files.insert(entry_path.display().to_string(), hash);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn title_similarity(left: &str, right: &str) -> f32 {
+    let left_terms = left
+        .split(|c: char| !c.is_alphanumeric())
+        .collect::<HashSet<_>>();
+    let right_terms = right
+        .split(|c: char| !c.is_alphanumeric())
+        .collect::<HashSet<_>>();
+    let left_terms = left_terms
+        .into_iter()
+        .filter(|term| !term.is_empty())
+        .collect::<HashSet<_>>();
+    let right_terms = right_terms
+        .into_iter()
+        .filter(|term| !term.is_empty())
+        .collect::<HashSet<_>>();
+    if left_terms.is_empty() || right_terms.is_empty() {
+        return 0.0;
+    }
+    let intersection = left_terms.intersection(&right_terms).count() as f32;
+    let union = left_terms.union(&right_terms).count() as f32;
+    intersection / union
+}
+
+fn trail_nodes_for_session(session: &SessionState) -> Vec<NodeRef> {
+    let mut nodes = session.history.clone();
+    if let Some(current) = &session.current {
+        nodes.push(current.clone());
+    }
+    for node in &session.visited {
+        if !nodes.contains(node) {
+            nodes.push(node.clone());
+        }
+    }
+    nodes
+}
+
+fn source_anchor_for_node(memory: &PersistedMemory, node: &NodeRef) -> Option<SourceAnchor> {
+    match node {
+        NodeRef::Document(id) => memory
+            .documents
+            .iter()
+            .find(|document| &document.id == id)
+            .and_then(|document| document.source_anchor.clone()),
+        NodeRef::Chunk(id) => memory
+            .chunks
+            .iter()
+            .find(|chunk| &chunk.id == id)
+            .and_then(|chunk| chunk.source_anchor.clone()),
+        NodeRef::Region(id) => memory
+            .regions
+            .iter()
+            .find(|region| &region.id == id)
+            .and_then(|region| region.chunk_ids.first())
+            .and_then(|chunk_id| {
+                memory
+                    .chunks
+                    .iter()
+                    .find(|chunk| &chunk.id == chunk_id)
+                    .and_then(|chunk| chunk.source_anchor.clone())
+            }),
+    }
+}
+
+fn copy_dir_all(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    if source.is_file() {
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(source, destination)?;
+        return Ok(());
+    }
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+fn list_relative_files(root: &Path) -> anyhow::Result<Vec<String>> {
+    let mut files = Vec::new();
+    list_relative_files_inner(root, root, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn list_relative_files_inner(
+    root: &Path,
+    path: &Path,
+    files: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    if path.is_file() {
+        files.push(
+            path.strip_prefix(root)
+                .unwrap_or(path)
+                .display()
+                .to_string(),
+        );
+        return Ok(());
+    }
+    if !path.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(path)? {
+        list_relative_files_inner(root, &entry?.path(), files)?;
+    }
+    Ok(())
 }
 
 fn mark_missing_source_documents(documents: &mut [Document]) -> usize {
@@ -1281,6 +1941,9 @@ pub fn write_web_finding(store_root: &Path, write: WebFindingWrite) -> anyhow::R
         title: write.title,
         summary: write.summary,
         retrieved_at: write.retrieved_at,
+        freshness_expires_at: write
+            .freshness_expires_at
+            .or_else(|| default_freshness_expiration(write.retrieved_at)),
         confidence: write.confidence,
         actor: write.actor,
         created_at,
@@ -2853,6 +3516,20 @@ fn web_finding_document(finding: &WebFinding) -> Document {
     metadata.insert("query".into(), finding.query.clone());
     metadata.insert("url".into(), finding.url.clone());
     metadata.insert("retrieved_at".into(), finding.retrieved_at.to_string());
+    if let Some(expires_at) = finding.freshness_expires_at {
+        metadata.insert("freshness_expires_at".into(), expires_at.to_string());
+    }
+    let freshness = SourceFreshnessPolicy::from_metadata(&metadata, now_millis());
+    metadata.insert(
+        "freshness_status".into(),
+        freshness_status_label(&freshness.status).into(),
+    );
+    if let Some(warning) = &freshness.stale_warning {
+        metadata.insert("stale_warning".into(), warning.clone());
+    }
+    if freshness.refresh_needed {
+        metadata.insert("refresh_needed".into(), "true".into());
+    }
     metadata.insert("confidence".into(), format!("{:.2}", finding.confidence));
     metadata.insert("content_hash".into(), content_hash.clone());
     metadata.insert("parser_version".into(), PARSER_VERSION.to_string());
@@ -2891,6 +3568,22 @@ fn web_finding_document(finding: &WebFinding) -> Document {
 
 fn web_finding_document_id(finding: &WebFinding) -> String {
     format!("web:{}", hash_text(&finding.url))
+}
+
+fn default_freshness_expiration(retrieved_at: u64) -> Option<u64> {
+    (retrieved_at > 0).then(|| {
+        crate::types::normalize_epoch_millis(retrieved_at) + DEFAULT_WEB_FRESHNESS_WINDOW_MILLIS
+    })
+}
+
+fn freshness_status_label(status: &SourceFreshnessStatus) -> &'static str {
+    match status {
+        SourceFreshnessStatus::Unknown => "unknown",
+        SourceFreshnessStatus::Fresh => "fresh",
+        SourceFreshnessStatus::Aging => "aging",
+        SourceFreshnessStatus::Stale => "stale",
+        SourceFreshnessStatus::RefreshNeeded => "refresh_needed",
+    }
 }
 
 fn derived_memory_document(memory: &DerivedMemory) -> Document {
@@ -4032,6 +4725,7 @@ fn web_search_result_finding(session_id: &str, query: &str, result: WebSearchRes
         },
         summary,
         retrieved_at: now_secs(),
+        freshness_expires_at: default_freshness_expiration(now_secs()),
         confidence: 0.72,
         actor: "web-search-agent".into(),
         created_at,
@@ -5627,6 +6321,151 @@ mod tests {
     }
 
     #[test]
+    fn import_queue_runs_files_and_keeps_retryable_state() {
+        let root = temp_store_root("import-queue");
+        let input = root.join("queue-note.md");
+        fs::write(&input, "# Queue\n\nQueued imports keep per-file progress.").expect("write");
+
+        let queued = enqueue_import_batch(&root, std::slice::from_ref(&input)).expect("enqueue");
+        assert_eq!(queued.pending, 1);
+        assert_eq!(queued.progress_total, 1);
+
+        let cancelled =
+            cancel_import_queue_items(&root, Some(&queued.id), &[]).expect("cancel queue");
+        assert_eq!(cancelled.cancelled, 1);
+        assert_eq!(cancelled.pending, 0);
+
+        let retried = retry_failed_imports(&root, Some(&queued.id)).expect("retry cancelled");
+        assert_eq!(retried.pending, 1);
+        assert_eq!(retried.cancelled, 0);
+
+        let finished = run_import_queue(&root, Some(&queued.id)).expect("run queue");
+        assert_eq!(finished.succeeded, 1);
+        assert_eq!(finished.failed, 0);
+        assert_eq!(finished.progress_completed, 1);
+
+        let snapshot = library_management_snapshot(&root).expect("snapshot");
+        assert!(snapshot
+            .source_type_filters
+            .iter()
+            .any(|filter| filter.source_type == "local_file" && filter.count >= 1));
+    }
+
+    #[test]
+    fn file_watch_update_detection_reports_changed_and_moved_files() {
+        let root = temp_store_root("watch-updates");
+        let watched = root.join("watched");
+        fs::create_dir_all(&watched).expect("watched dir");
+        let input = watched.join("source.md");
+        fs::write(&input, "# Watch\n\nOriginal watched content.").expect("write");
+        ingest_paths(&root, std::slice::from_ref(&input)).expect("ingest");
+        add_file_watch_root(&root, &watched, true).expect("watch");
+
+        fs::write(&input, "# Watch\n\nChanged watched content.").expect("change");
+        let changed = detect_library_updates(&root).expect("detect changed");
+        assert!(changed
+            .iter()
+            .any(|update| update.kind == FileUpdateKind::ChangedFile));
+
+        fs::write(&input, "# Watch\n\nOriginal watched content.").expect("restore");
+        let moved = watched.join("moved.md");
+        fs::rename(&input, &moved).expect("rename");
+        let updates = detect_library_updates(&root).expect("detect moved");
+        assert!(updates
+            .iter()
+            .any(|update| update.kind == FileUpdateKind::MovedFile
+                && update.candidate_path.as_deref() == Some(moved.to_string_lossy().as_ref())));
+    }
+
+    #[test]
+    fn library_collections_views_dedupe_delete_and_backup_are_durable() {
+        let root = temp_store_root("library-management");
+        let input = root.join("library-note.md");
+        fs::write(
+            &input,
+            "# Library Note\n\nCollections, saved views, deletion, and backup live together.",
+        )
+        .expect("write");
+        ingest_paths(&root, std::slice::from_ref(&input)).expect("ingest");
+
+        let collection =
+            create_collection(&root, "Research", Some("Durable set".into())).expect("collection");
+        let view = save_view(
+            &root,
+            "Local files",
+            BTreeMap::from([("source_type".into(), "local_file".into())]),
+            "title_asc",
+        )
+        .expect("view");
+        let memory = FileMemoryStore::new(&root).load().expect("memory");
+        let document_id = memory.documents[0].id.clone();
+        add_to_collection(
+            &root,
+            &collection.id,
+            &document_id,
+            AttentionTargetKind::Document,
+        )
+        .expect("member");
+        let dedupe =
+            analyze_dedupe_candidates(&root, std::slice::from_ref(&input)).expect("dedupe");
+        assert!(dedupe
+            .candidates
+            .iter()
+            .any(|candidate| candidate.match_kind == DedupeMatchKind::SameHash));
+
+        let backup = std::env::temp_dir().join("ai-memory-library-management-backup");
+        let _ = fs::remove_dir_all(&backup);
+        let manifest = export_library_backup(&root, &backup).expect("backup");
+        assert!(manifest.files.iter().any(|file| file == "memory.sqlite"));
+        assert!(backup.join("backup-manifest.json").is_file());
+
+        FileMemoryStore::new(&root)
+            .save_cortex_adapter_state(&CortexAdapterState {
+                freshness: "fresh".into(),
+                status: "active".into(),
+                reason: None,
+                data_freshness: "fresh".into(),
+                training_status: "trained".into(),
+                activation_status: "active".into(),
+                base_model: None,
+                adapter_path: None,
+                manifest_path: None,
+                source_dataset_hash: None,
+                current_source_dataset_hash: "dataset".into(),
+                trained_source_dataset_hash: Some("dataset".into()),
+                active_adapter_hash: Some("adapter".into()),
+                prepared_dataset_hash: None,
+                eval_score: Some(1.0),
+                failure_reason: None,
+                train_records: None,
+                valid_records: None,
+                test_records: None,
+                iters: None,
+                last_successful_training_at: Some(now_millis()),
+                activated_at: Some(now_millis()),
+                checked_at: now_millis(),
+            })
+            .expect("adapter state");
+        let no_op_delete = delete_library_items(&root, &[], &[], &[]).expect("no-op delete");
+        assert!(!no_op_delete.adapter_marked_stale);
+
+        let deleted = delete_library_items(&root, std::slice::from_ref(&document_id), &[], &[])
+            .expect("delete");
+        assert_eq!(deleted.deleted_document_ids, vec![document_id]);
+        assert!(deleted.adapter_marked_stale);
+
+        let snapshot = library_management_snapshot(&root).expect("snapshot");
+        assert!(snapshot
+            .collections
+            .iter()
+            .any(|stored| stored.id == collection.id));
+        assert!(snapshot
+            .saved_views
+            .iter()
+            .any(|stored| stored.id == view.id));
+    }
+
+    #[test]
     fn unchanged_rebuild_reuses_cached_embeddings() {
         let root = temp_store_root("reuse");
         let input = root.join("doc.txt");
@@ -6690,6 +7529,7 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
                 title: "Liquid MLX docs".into(),
                 summary: "MLX can serve LFM models through an OpenAI-compatible API.".into(),
                 retrieved_at: 1_777_311_476,
+                freshness_expires_at: None,
                 confidence: 0.9,
                 actor: "assistant".into(),
             },
@@ -6813,6 +7653,7 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
                 title: "Current memory filesystem research".into(),
                 summary: "Fresh web evidence says semantic filesystems should preserve URL provenance and retrieval dates.".into(),
                 retrieved_at: 1_777_311_476,
+                freshness_expires_at: None,
                 confidence: 0.86,
                 actor: "assistant".into(),
             },
@@ -6827,6 +7668,7 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
                 title: "Updated current memory filesystem research".into(),
                 summary: "Updated fresh web evidence says semantic filesystems still preserve URL provenance and retrieval dates.".into(),
                 retrieved_at: 1_777_311_500,
+                freshness_expires_at: None,
                 confidence: 0.88,
                 actor: "assistant".into(),
             },
@@ -7066,6 +7908,7 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
                 summary: "A pending web finding should not blank the library if embedding fails."
                     .into(),
                 retrieved_at: now_secs(),
+                freshness_expires_at: None,
                 confidence: 0.7,
                 actor: "test".into(),
                 created_at,
@@ -7377,6 +8220,7 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
                 title: "Imprint provenance".into(),
                 summary: "Web findings keep URL provenance for source recall.".into(),
                 retrieved_at: 42,
+                freshness_expires_at: None,
                 confidence: 0.8,
                 actor: "assistant".into(),
             },

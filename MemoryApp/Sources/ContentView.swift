@@ -918,6 +918,15 @@ private struct MapInspector: View {
             SectionLabel("Provenance")
             if let target {
                 DetailRow(label: "Trust", value: "\(target.sourceTrust.label) · \(String(format: "%.2f", target.sourceTrust.score))")
+                if let freshness = target.sourceFreshness {
+                    DetailRow(label: "Freshness", value: freshnessLine(freshness))
+                    if let warning = freshness.staleWarning {
+                        DetailRow(label: "Warning", value: warning)
+                    }
+                    if freshness.refreshNeeded, let url = freshness.recaptureUrl {
+                        DetailRow(label: "Refresh", value: url)
+                    }
+                }
                 if target.isDerived {
                     DetailRow(label: "Truth", value: "Derived artifact, expand originals before citing")
                 }
@@ -939,6 +948,22 @@ private struct MapInspector: View {
                 }
             }
         }
+    }
+
+    private func freshnessLine(_ freshness: SourceFreshnessPolicy) -> String {
+        var parts = [freshness.status.rawValue]
+        if let retrievedAt = freshness.retrievedAt {
+            parts.append("retrieved \(freshnessTimeLabel(retrievedAt))")
+        }
+        if let expiresAt = freshness.freshnessExpiresAt {
+            parts.append("expires \(freshnessTimeLabel(expiresAt))")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func freshnessTimeLabel(_ millis: UInt64) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(millis) / 1000)
+        return date.formatted(date: .abbreviated, time: .shortened)
     }
 }
 

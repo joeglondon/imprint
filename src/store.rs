@@ -38,6 +38,187 @@ impl FileMemoryStore {
         list_source_artifacts(&connection)
     }
 
+    pub fn upsert_import_queue_item(&self, item: &ImportQueueItem) -> Result<()> {
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT OR REPLACE INTO import_queue_items (
+                id, batch_id, path, status_json, progress_completed, progress_total, error,
+                imported_document_ids_json, created_at, updated_at, started_at, finished_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                item.id,
+                item.batch_id,
+                item.path,
+                to_json(&item.status)?,
+                item.progress_completed as i64,
+                item.progress_total as i64,
+                item.error,
+                to_json(&item.imported_document_ids)?,
+                item.created_at as i64,
+                item.updated_at as i64,
+                item.started_at.map(|value| value as i64),
+                item.finished_at.map(|value| value as i64),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_import_queue_item(&self, id: &str) -> Result<Option<ImportQueueItem>> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT id, batch_id, path, status_json, progress_completed, progress_total, error,
+                    imported_document_ids_json, created_at, updated_at, started_at, finished_at
+                 FROM import_queue_items WHERE id = ?1",
+                params![id],
+                import_queue_item_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn list_import_queue_items(&self, batch_id: Option<&str>) -> Result<Vec<ImportQueueItem>> {
+        let connection = self.connection()?;
+        let sql =
+            "SELECT id, batch_id, path, status_json, progress_completed, progress_total, error,
+                imported_document_ids_json, created_at, updated_at, started_at, finished_at
+             FROM import_queue_items";
+        if let Some(batch_id) = batch_id {
+            let mut statement = connection.prepare(&format!(
+                "{sql} WHERE batch_id = ?1 ORDER BY created_at, id"
+            ))?;
+            let rows = statement.query_map(params![batch_id], import_queue_item_from_row)?;
+            collect_rows(rows)
+        } else {
+            let mut statement =
+                connection.prepare(&format!("{sql} ORDER BY created_at DESC, id"))?;
+            let rows = statement.query_map([], import_queue_item_from_row)?;
+            collect_rows(rows)
+        }
+    }
+
+    pub fn upsert_file_watch_root(&self, root: &FileWatchRoot) -> Result<()> {
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT OR REPLACE INTO file_watch_roots (
+                id, path, recursive, enabled, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                root.id,
+                root.path,
+                root.recursive,
+                root.enabled,
+                root.created_at as i64,
+                root.updated_at as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_file_watch_roots(&self) -> Result<Vec<FileWatchRoot>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, path, recursive, enabled, created_at, updated_at
+             FROM file_watch_roots ORDER BY path, id",
+        )?;
+        let rows = statement.query_map([], file_watch_root_from_row)?;
+        collect_rows(rows)
+    }
+
+    pub fn upsert_collection(&self, collection: &Collection) -> Result<()> {
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT OR REPLACE INTO collections (id, name, description, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                collection.id,
+                collection.name,
+                collection.description,
+                collection.created_at as i64,
+                collection.updated_at as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_collection_member(&self, member: &CollectionMember) -> Result<()> {
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT OR REPLACE INTO collection_members (
+                collection_id, target_id, target_kind_json, added_at
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                member.collection_id,
+                member.target_id,
+                to_json(&member.target_kind)?,
+                member.added_at as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_collections(&self) -> Result<Vec<Collection>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, description, created_at, updated_at FROM collections ORDER BY name, id",
+        )?;
+        let rows = statement.query_map([], collection_from_row)?;
+        collect_rows(rows)
+    }
+
+    pub fn upsert_saved_view(&self, view: &SavedView) -> Result<()> {
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT OR REPLACE INTO saved_views (
+                id, name, filters_json, sort, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                view.id,
+                view.name,
+                to_json(&view.filters)?,
+                view.sort,
+                view.created_at as i64,
+                view.updated_at as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_saved_views(&self) -> Result<Vec<SavedView>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, filters_json, sort, created_at, updated_at
+             FROM saved_views ORDER BY name, id",
+        )?;
+        let rows = statement.query_map([], saved_view_from_row)?;
+        collect_rows(rows)
+    }
+
+    pub fn upsert_saved_trail(&self, trail: &SavedTrail) -> Result<()> {
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT OR REPLACE INTO saved_trails (id, name, session_id, steps_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                trail.id,
+                trail.name,
+                trail.session_id,
+                to_json(&trail.steps)?,
+                trail.created_at as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_saved_trails(&self) -> Result<Vec<SavedTrail>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, session_id, steps_json, created_at FROM saved_trails ORDER BY created_at DESC, id",
+        )?;
+        let rows = statement.query_map([], saved_trail_from_row)?;
+        collect_rows(rows)
+    }
+
     pub fn load_current_vector_index(&self) -> Result<Option<(RegionAnnIndex, VectorIndexHealth)>> {
         let connection = self.connection()?;
         connection
@@ -278,6 +459,13 @@ impl FileMemoryStore {
         }
     }
 
+    pub fn delete_derived_memory(&self, id: &str) -> Result<bool> {
+        let connection = self.connection()?;
+        let changed =
+            connection.execute("DELETE FROM derived_memories WHERE id = ?1", params![id])?;
+        Ok(changed > 0)
+    }
+
     pub fn insert_brain_artifact(&self, artifact: &BrainArtifact) -> Result<()> {
         let connection = self.connection()?;
         connection.execute(
@@ -319,6 +507,13 @@ impl FileMemoryStore {
             let rows = statement.query_map([], brain_artifact_from_row)?;
             collect_rows(rows)
         }
+    }
+
+    pub fn delete_brain_artifact(&self, id: &str) -> Result<bool> {
+        let connection = self.connection()?;
+        let changed =
+            connection.execute("DELETE FROM brain_artifacts WHERE id = ?1", params![id])?;
+        Ok(changed > 0)
     }
 
     pub fn save_cortex_index(&self, index: &CortexIndex) -> Result<()> {
@@ -454,8 +649,8 @@ impl FileMemoryStore {
         connection.execute(
             "INSERT OR REPLACE INTO web_findings (
                 id, session_id, query, url, title, summary, retrieved_at, confidence,
-                actor, created_at, provenance_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                actor, created_at, provenance_json, freshness_expires_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 finding.id,
                 finding.session_id,
@@ -468,6 +663,7 @@ impl FileMemoryStore {
                 finding.actor,
                 finding.created_at as i64,
                 to_json(&finding.provenance)?,
+                finding.freshness_expires_at.map(|value| value as i64),
             ],
         )?;
         Ok(())
@@ -476,7 +672,7 @@ impl FileMemoryStore {
     pub fn list_web_findings(&self, session_id: Option<&str>) -> Result<Vec<WebFinding>> {
         let connection = self.connection()?;
         let sql = "SELECT id, session_id, query, url, title, summary, retrieved_at, confidence,
-                actor, created_at, provenance_json FROM web_findings";
+                actor, created_at, provenance_json, freshness_expires_at FROM web_findings";
         if let Some(session_id) = session_id {
             let mut statement = connection.prepare(&format!(
                 "{sql} WHERE session_id = ?1 ORDER BY created_at DESC, id"
@@ -765,6 +961,62 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_source_artifacts_hash ON source_artifacts(file_hash);
         CREATE INDEX IF NOT EXISTS idx_source_artifacts_path ON source_artifacts(original_path);
+        CREATE TABLE IF NOT EXISTS import_queue_items (
+            id TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            status_json TEXT NOT NULL,
+            progress_completed INTEGER NOT NULL,
+            progress_total INTEGER NOT NULL,
+            error TEXT,
+            imported_document_ids_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            started_at INTEGER,
+            finished_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_import_queue_batch ON import_queue_items(batch_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_import_queue_status ON import_queue_items(status_json, updated_at);
+        CREATE TABLE IF NOT EXISTS file_watch_roots (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL,
+            recursive INTEGER NOT NULL,
+            enabled INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_file_watch_roots_path ON file_watch_roots(path);
+        CREATE TABLE IF NOT EXISTS collections (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS collection_members (
+            collection_id TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            target_kind_json TEXT NOT NULL,
+            added_at INTEGER NOT NULL,
+            PRIMARY KEY (collection_id, target_id, target_kind_json)
+        );
+        CREATE INDEX IF NOT EXISTS idx_collection_members_target ON collection_members(target_id);
+        CREATE TABLE IF NOT EXISTS saved_views (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            filters_json TEXT NOT NULL,
+            sort TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS saved_trails (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            steps_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_saved_trails_session ON saved_trails(session_id, created_at);
         CREATE TABLE IF NOT EXISTS chunks (
             id TEXT PRIMARY KEY,
             document_id TEXT NOT NULL,
@@ -903,7 +1155,8 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             confidence REAL NOT NULL,
             actor TEXT NOT NULL,
             created_at INTEGER NOT NULL,
-            provenance_json TEXT NOT NULL
+            provenance_json TEXT NOT NULL,
+            freshness_expires_at INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_web_findings_session ON web_findings(session_id, created_at);
         CREATE TABLE IF NOT EXISTS agent_links (
@@ -1036,6 +1289,12 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     if !table_has_column(connection, "source_artifacts", "trust_json")? {
         connection.execute(
             "ALTER TABLE source_artifacts ADD COLUMN trust_json TEXT",
+            [],
+        )?;
+    }
+    if !table_has_column(connection, "web_findings", "freshness_expires_at")? {
+        connection.execute(
+            "ALTER TABLE web_findings ADD COLUMN freshness_expires_at INTEGER",
             [],
         )?;
     }
@@ -1285,6 +1544,65 @@ fn source_artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceA
         parser_version: row.get::<_, i64>(7)? as u32,
         imported_at: row.get::<_, i64>(8)? as u64,
         provenance: from_json(row.get::<_, String>(10)?)?,
+    })
+}
+
+fn import_queue_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImportQueueItem> {
+    Ok(ImportQueueItem {
+        id: row.get(0)?,
+        batch_id: row.get(1)?,
+        path: row.get(2)?,
+        status: from_json(row.get::<_, String>(3)?)?,
+        progress_completed: row.get::<_, i64>(4)? as usize,
+        progress_total: row.get::<_, i64>(5)? as usize,
+        error: row.get(6)?,
+        imported_document_ids: from_json(row.get::<_, String>(7)?)?,
+        created_at: row.get::<_, i64>(8)? as u64,
+        updated_at: row.get::<_, i64>(9)? as u64,
+        started_at: row.get::<_, Option<i64>>(10)?.map(|value| value as u64),
+        finished_at: row.get::<_, Option<i64>>(11)?.map(|value| value as u64),
+    })
+}
+
+fn file_watch_root_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileWatchRoot> {
+    Ok(FileWatchRoot {
+        id: row.get(0)?,
+        path: row.get(1)?,
+        recursive: row.get(2)?,
+        enabled: row.get(3)?,
+        created_at: row.get::<_, i64>(4)? as u64,
+        updated_at: row.get::<_, i64>(5)? as u64,
+    })
+}
+
+fn collection_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Collection> {
+    Ok(Collection {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        created_at: row.get::<_, i64>(3)? as u64,
+        updated_at: row.get::<_, i64>(4)? as u64,
+    })
+}
+
+fn saved_view_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SavedView> {
+    Ok(SavedView {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        filters: from_json(row.get::<_, String>(2)?)?,
+        sort: row.get(3)?,
+        created_at: row.get::<_, i64>(4)? as u64,
+        updated_at: row.get::<_, i64>(5)? as u64,
+    })
+}
+
+fn saved_trail_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SavedTrail> {
+    Ok(SavedTrail {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        session_id: row.get(2)?,
+        steps: from_json(row.get::<_, String>(3)?)?,
+        created_at: row.get::<_, i64>(4)? as u64,
     })
 }
 
@@ -1659,6 +1977,7 @@ fn web_finding_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WebFinding>
         actor: row.get(8)?,
         created_at: row.get::<_, i64>(9)? as u64,
         provenance: from_json(row.get::<_, String>(10)?)?,
+        freshness_expires_at: row.get::<_, Option<i64>>(11)?.map(|value| value as u64),
     })
 }
 

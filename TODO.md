@@ -43,7 +43,7 @@ Important gaps:
 - [x] Adapter freshness is split from trained/active selection and source recall fallback.
 - [ ] True latent RecursiveMAS/RecursiveLink is not implemented.
 - [ ] CLI/MCP/UI still expose legacy map language in places.
-- [ ] Human library, exact deep links, and import queue are still early.
+- [ ] Human library UI and exact deep-link polish are still early.
 
 ## Phase 1: Make Cortex Adapter Training Real
 
@@ -319,47 +319,47 @@ Goal: make attention inspectable, reversible, and useful instead of hidden scori
   - [x] active workspace/folder
   - [x] active collection
   - [x] current task/session
-- [ ] Add source freshness policy:
-  - [ ] retrieved_at
-  - [ ] freshness_expires_at
-  - [ ] stale warning
-  - [ ] refresh needed
-  - [ ] web recapture workflow
-- [ ] Add learned ranking experiments after deterministic baseline is stable.
-- [ ] Evaluate ranking with held-out retrieval traces and user feedback.
+- [x] Add source freshness policy:
+  - [x] retrieved_at
+  - [x] freshness_expires_at
+  - [x] stale warning
+  - [x] refresh needed
+  - [x] web recapture workflow
+- [x] Add learned ranking experiments after deterministic baseline is stable.
+- [x] Evaluate ranking with held-out retrieval traces and user feedback.
 
 ## Phase 8: Import, Watchers, And Library Management
 
 Goal: make the library feel like a real local memory filesystem.
 
-- [ ] Add import queue:
-  - [ ] pending/running/succeeded/failed/cancelled states
-  - [ ] resumability
-  - [ ] per-file progress
-  - [ ] batch progress
-  - [ ] retry failed imports
-- [ ] Add file watcher support.
-- [ ] Add update detection:
-  - [ ] changed file
-  - [ ] moved file
-  - [ ] deleted file
-  - [ ] duplicate file
-  - [ ] replaced file
-- [ ] Add dedupe UX:
-  - [ ] same hash
-  - [ ] same path
-  - [ ] similar title/content
-  - [ ] choose keep/merge/replace
-- [ ] Add delete workflows:
-  - [ ] delete document
-  - [ ] delete source artifact
-  - [ ] delete derived artifacts
-  - [ ] mark adapter stale when needed
-- [ ] Add collections and saved views.
-- [ ] Add source type filters.
-- [ ] Add saved trails from surf sessions.
-- [ ] Add durable "open original" actions.
-- [ ] Add backup/export/import for the whole local library.
+- [x] Add import queue:
+  - [x] pending/running/succeeded/failed/cancelled states
+  - [x] resumability
+  - [x] per-file progress
+  - [x] batch progress
+  - [x] retry failed imports
+- [x] Add file watcher support.
+- [x] Add update detection:
+  - [x] changed file
+  - [x] moved file
+  - [x] deleted file
+  - [x] duplicate file
+  - [x] replaced file
+- [x] Add dedupe UX:
+  - [x] same hash
+  - [x] same path
+  - [x] similar title/content
+  - [x] choose keep/merge/replace
+- [x] Add delete workflows:
+  - [x] delete document
+  - [x] delete source artifact
+  - [x] delete derived artifacts
+  - [x] mark adapter stale when needed
+- [x] Add collections and saved views.
+- [x] Add source type filters.
+- [x] Add saved trails from surf sessions.
+- [x] Add durable "open original" actions.
+- [x] Add backup/export/import for the whole local library.
 
 ## Phase 9: Human UI As Memory Instrument
 
