@@ -433,27 +433,27 @@ Goal: expose imprint as an agent-native memory filesystem.
 
 Goal: make web search a memory expansion path, not disposable prompt context.
 
-- [ ] Add browser capture with:
-  - [ ] URL
-  - [ ] title
-  - [ ] retrieved_at
-  - [ ] content hash
-  - [ ] extracted text
-  - [ ] summary
-  - [ ] citations/source refs
-  - [ ] freshness expiry
-  - [ ] source trust
-- [ ] Add refresh policy:
-  - [ ] manual refresh
-  - [ ] stale warning
-  - [ ] scheduled refresh for pinned web findings
-- [ ] Add web finding diff/history.
-- [ ] Add source trust defaults by domain/source type.
-- [ ] Add capture-to-cortex behavior:
-  - [ ] index immediately
-  - [ ] mark hot
-  - [ ] include in next adapter training
-  - [ ] preserve exact source provenance
+- [x] Add browser capture with:
+  - [x] URL
+  - [x] title
+  - [x] retrieved_at
+  - [x] content hash
+  - [x] extracted text
+  - [x] summary
+  - [x] citations/source refs
+  - [x] freshness expiry
+  - [x] source trust
+- [x] Add refresh policy:
+  - [x] manual refresh
+  - [x] stale warning
+  - [x] scheduled refresh for pinned web findings
+- [x] Add web finding diff/history.
+- [x] Add source trust defaults by domain/source type.
+- [x] Add capture-to-cortex behavior:
+  - [x] index immediately
+  - [x] mark hot
+  - [x] include in next adapter training
+  - [x] preserve exact source provenance
 
 ## Phase 12: Privacy, Forgetting, And Safety
 

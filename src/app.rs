@@ -1940,6 +1940,26 @@ pub fn write_web_finding(store_root: &Path, write: WebFindingWrite) -> anyhow::R
     let store = FileMemoryStore::new(store_root);
     let config = load_model_config(store_root)?;
     let created_at = now_millis();
+    let extracted_text = write.extracted_text.unwrap_or_default();
+    let content_hash = hash_text(&format!(
+        "{}\n{}\n{}",
+        write.url,
+        write.summary.trim(),
+        extracted_text.trim()
+    ));
+    let mut source_refs = write.source_refs;
+    if source_refs.is_empty() {
+        source_refs.push(write.url.clone());
+    }
+    let source_trust = write
+        .source_trust
+        .unwrap_or_else(|| web_source_trust_policy(&write.url, write.confidence));
+    let actor = write.actor;
+    let previous = store
+        .list_web_findings(None)?
+        .into_iter()
+        .filter(|finding| finding.url == write.url)
+        .max_by_key(|finding| finding.retrieved_at);
     let finding = WebFinding {
         id: unique_id("web"),
         session_id: write.session_id.clone(),
@@ -1947,21 +1967,39 @@ pub fn write_web_finding(store_root: &Path, write: WebFindingWrite) -> anyhow::R
         url: write.url.clone(),
         title: write.title,
         summary: write.summary,
+        extracted_text,
         retrieved_at: write.retrieved_at,
         freshness_expires_at: write
             .freshness_expires_at
             .or_else(|| default_freshness_expiration(write.retrieved_at)),
+        content_hash,
+        source_refs: source_refs.clone(),
+        source_trust,
         confidence: write.confidence,
-        actor: write.actor,
+        actor: actor.clone(),
         created_at,
         provenance: ProvenanceRecord {
-            actor: "assistant".into(),
+            actor,
             reason: "Web finding supplied by user or agent.".into(),
             created_at,
-            source_refs: vec![write.url],
+            source_refs,
         },
     };
     store.insert_web_finding(&finding)?;
+    if let Some(previous) = previous {
+        if previous.content_hash != finding.content_hash {
+            let revision = web_finding_revision(&previous, &finding, created_at);
+            store.insert_web_finding_revision(&revision)?;
+            audit_write(
+                &store,
+                finding.session_id.clone(),
+                "web_finding.revision",
+                &finding.id,
+                &finding.actor,
+                &revision,
+            )?;
+        }
+    }
     audit_write(
         &store,
         finding.session_id.clone(),
@@ -1970,6 +2008,16 @@ pub fn write_web_finding(store_root: &Path, write: WebFindingWrite) -> anyhow::R
         &finding.actor,
         &finding,
     )?;
+    let _ = apply_attention_mark(
+        store_root,
+        AttentionMarkWrite {
+            target_id: finding.id.clone(),
+            target_kind: AttentionTargetKind::WebFinding,
+            action: AttentionAction::Hot,
+            reason: "Newly captured web finding should be easy to recall until it cools.".into(),
+            actor: finding.actor.clone(),
+        },
+    );
     sync_web_findings_with_config(store_root, &store, &config)?;
     Ok(finding)
 }
@@ -1998,6 +2046,41 @@ pub fn set_web_finding_freshness(
     )?;
     sync_web_findings(store_root)?;
     Ok(finding)
+}
+
+pub fn list_web_finding_history(
+    store_root: &Path,
+    url: Option<String>,
+) -> anyhow::Result<Vec<WebFindingRevision>> {
+    FileMemoryStore::new(store_root).list_web_finding_revisions(url.as_deref())
+}
+
+pub fn list_pinned_web_refresh_candidates(store_root: &Path) -> anyhow::Result<Vec<WebFinding>> {
+    let store = FileMemoryStore::new(store_root);
+    let now = now_millis();
+    let pinned = store
+        .list_attention_marks(None)?
+        .into_iter()
+        .filter(|mark| {
+            mark.reverted_at.is_none()
+                && mark.target_kind == AttentionTargetKind::WebFinding
+                && mark.action == AttentionAction::Pin
+        })
+        .map(|mark| mark.target_id)
+        .collect::<HashSet<_>>();
+    Ok(store
+        .list_web_findings(None)?
+        .into_iter()
+        .filter(|finding| pinned.contains(&finding.id))
+        .filter(|finding| {
+            let mut metadata = BTreeMap::new();
+            metadata.insert("retrieved_at".into(), finding.retrieved_at.to_string());
+            if let Some(expires_at) = finding.freshness_expires_at {
+                metadata.insert("freshness_expires_at".into(), expires_at.to_string());
+            }
+            SourceFreshnessPolicy::from_metadata(&metadata, now).refresh_needed
+        })
+        .collect())
 }
 
 pub fn cite_source_anchor(
@@ -3539,27 +3622,51 @@ fn chat_document_id(session_id: &str) -> String {
 
 fn web_finding_document(finding: &WebFinding) -> Document {
     let id = web_finding_document_id(finding);
-    let text = format!(
-        "Web finding: {}\nURL: {}\nQuery: {}\nRetrieved at: {}\nConfidence: {:.2}\n\n{}",
-        finding.title,
-        finding.url,
-        finding.query,
-        finding.retrieved_at,
-        finding.confidence,
-        finding.summary
-    );
-    let content_hash = hash_text(&text);
+    let text = if finding.extracted_text.trim().is_empty() {
+        format!(
+            "Web finding: {}\nURL: {}\nQuery: {}\nRetrieved at: {}\nConfidence: {:.2}\nContent hash: {}\nSource refs: {}\n\nSummary:\n{}",
+            finding.title,
+            finding.url,
+            finding.query,
+            finding.retrieved_at,
+            finding.confidence,
+            finding.content_hash,
+            finding.source_refs.join(", "),
+            finding.summary
+        )
+    } else {
+        format!(
+            "Web finding: {}\nURL: {}\nQuery: {}\nRetrieved at: {}\nConfidence: {:.2}\nContent hash: {}\nSource refs: {}\n\nSummary:\n{}\n\nExtracted text:\n{}",
+            finding.title,
+            finding.url,
+            finding.query,
+            finding.retrieved_at,
+            finding.confidence,
+            finding.content_hash,
+            finding.source_refs.join(", "),
+            finding.summary,
+            finding.extracted_text
+        )
+    };
+    let content_hash = if finding.content_hash.is_empty() {
+        hash_text(&text)
+    } else {
+        finding.content_hash.clone()
+    };
     let mut metadata = BTreeMap::new();
     metadata.insert("path".into(), finding.url.clone());
     metadata.insert("source".into(), "web".into());
     metadata.insert("source_type".into(), "web_finding".into());
     metadata.insert("source_trust_kind".into(), "web_finding".into());
-    metadata.insert("source_trust".into(), format!("{:.2}", finding.confidence));
-    metadata.insert("source_trust_label".into(), "Web finding".into());
     metadata.insert(
-        "source_caveat".into(),
-        "Web finding: check freshness before treating it as current.".into(),
+        "source_trust".into(),
+        format!("{:.2}", finding.source_trust.score),
     );
+    metadata.insert(
+        "source_trust_label".into(),
+        finding.source_trust.label.clone(),
+    );
+    metadata.insert("source_caveat".into(), finding.source_trust.caveat.clone());
     metadata.insert("web_finding_id".into(), finding.id.clone());
     metadata.insert(
         "session_id".into(),
@@ -3567,6 +3674,7 @@ fn web_finding_document(finding: &WebFinding) -> Document {
     );
     metadata.insert("query".into(), finding.query.clone());
     metadata.insert("url".into(), finding.url.clone());
+    metadata.insert("source_refs".into(), finding.source_refs.join(", "));
     metadata.insert("retrieved_at".into(), finding.retrieved_at.to_string());
     if let Some(expires_at) = finding.freshness_expires_at {
         metadata.insert("freshness_expires_at".into(), expires_at.to_string());
@@ -3620,6 +3728,81 @@ fn web_finding_document(finding: &WebFinding) -> Document {
 
 fn web_finding_document_id(finding: &WebFinding) -> String {
     format!("web:{}", hash_text(&finding.url))
+}
+
+fn web_finding_revision(
+    previous: &WebFinding,
+    current: &WebFinding,
+    created_at: u64,
+) -> WebFindingRevision {
+    WebFindingRevision {
+        id: unique_id("web-revision"),
+        web_finding_id: current.id.clone(),
+        previous_web_finding_id: Some(previous.id.clone()),
+        url: current.url.clone(),
+        previous_content_hash: previous.content_hash.clone(),
+        content_hash: current.content_hash.clone(),
+        summary_diff: web_summary_diff(previous, current),
+        created_at,
+        actor: current.actor.clone(),
+        provenance: ProvenanceRecord {
+            actor: current.actor.clone(),
+            reason: "Web finding recapture changed captured content.".into(),
+            created_at,
+            source_refs: current.source_refs.clone(),
+        },
+    }
+}
+
+fn web_summary_diff(previous: &WebFinding, current: &WebFinding) -> String {
+    let old_words = previous.summary.split_whitespace().count()
+        + previous.extracted_text.split_whitespace().count();
+    let new_words = current.summary.split_whitespace().count()
+        + current.extracted_text.split_whitespace().count();
+    let delta = new_words as isize - old_words as isize;
+    let title_changed = previous.title != current.title;
+    let confidence_delta = current.confidence - previous.confidence;
+    format!(
+        "content_hash changed {} -> {}; words_delta={delta}; title_changed={title_changed}; confidence_delta={confidence_delta:.2}",
+        previous.content_hash, current.content_hash
+    )
+}
+
+fn web_source_trust_policy(url: &str, confidence: f32) -> SourceTrustPolicy {
+    let domain = url_domain(url).unwrap_or_else(|| "unknown domain".into());
+    let score = confidence.clamp(0.0, 1.0);
+    let trusted_domains = ["wikipedia.org", "docs.rs", "github.com", "openai.com"];
+    let officialish = trusted_domains
+        .iter()
+        .any(|trusted| domain == *trusted || domain.ends_with(&format!(".{trusted}")));
+    let label = if officialish {
+        format!("Web finding from recognized source: {domain}")
+    } else {
+        format!("Web finding from {domain}")
+    };
+    let caveat = if officialish {
+        "Web finding: verify freshness and exact claims against the captured URL.".into()
+    } else {
+        "Web finding: domain trust is not user-calibrated; verify before relying on current or high-stakes claims.".into()
+    };
+    SourceTrustPolicy {
+        kind: SourceTrustKind::WebFinding,
+        score,
+        label,
+        caveat,
+    }
+}
+
+fn url_domain(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let host = after_scheme.split('/').next()?.split('@').next_back()?;
+    let host = host
+        .split(':')
+        .next()
+        .unwrap_or(host)
+        .trim()
+        .to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
 }
 
 fn default_freshness_expiration(retrieved_at: u64) -> Option<u64> {
@@ -4765,6 +4948,7 @@ fn web_search_result_finding(session_id: &str, query: &str, result: WebSearchRes
         ),
         MAX_WEB_SUMMARY_CHARS,
     );
+    let content_hash = hash_text(&format!("{}\n{}\n{}", result.url, summary, result.body));
     WebFinding {
         id: unique_id("web"),
         session_id: Some(session_id.into()),
@@ -4776,8 +4960,12 @@ fn web_search_result_finding(session_id: &str, query: &str, result: WebSearchRes
             result.title
         },
         summary,
+        extracted_text: result.body.clone(),
         retrieved_at: now_secs(),
         freshness_expires_at: default_freshness_expiration(now_secs()),
+        content_hash,
+        source_refs: vec![result.url.clone()],
+        source_trust: web_source_trust_policy(&result.url, 0.72),
         confidence: 0.72,
         actor: "web-search-agent".into(),
         created_at,
@@ -7580,8 +7768,11 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
                 url: "https://docs.liquid.ai/lfm/inference/mlx".into(),
                 title: "Liquid MLX docs".into(),
                 summary: "MLX can serve LFM models through an OpenAI-compatible API.".into(),
+                extracted_text: None,
                 retrieved_at: 1_777_311_476,
                 freshness_expires_at: None,
+                source_refs: Vec::new(),
+                source_trust: None,
                 confidence: 0.9,
                 actor: "assistant".into(),
             },
@@ -7704,8 +7895,11 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
                 url: "https://example.com/current-memory-filesystem".into(),
                 title: "Current memory filesystem research".into(),
                 summary: "Fresh web evidence says semantic filesystems should preserve URL provenance and retrieval dates.".into(),
+                extracted_text: None,
                 retrieved_at: 1_777_311_476,
                 freshness_expires_at: None,
+                source_refs: Vec::new(),
+                source_trust: None,
                 confidence: 0.86,
                 actor: "assistant".into(),
             },
@@ -7719,8 +7913,11 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
                 url: "https://example.com/current-memory-filesystem".into(),
                 title: "Updated current memory filesystem research".into(),
                 summary: "Updated fresh web evidence says semantic filesystems still preserve URL provenance and retrieval dates.".into(),
+                extracted_text: None,
                 retrieved_at: 1_777_311_500,
                 freshness_expires_at: None,
+                source_refs: Vec::new(),
+                source_trust: None,
                 confidence: 0.88,
                 actor: "assistant".into(),
             },
@@ -7745,6 +7942,75 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
             .expect("web finding hit");
         let anchor = hit.source_anchor.as_ref().expect("web source anchor");
         assert_eq!(anchor.path, "https://example.com/current-memory-filesystem");
+    }
+
+    #[test]
+    fn web_finding_refresh_records_history_and_pinned_stale_candidates() {
+        let root = temp_store_root("web-finding-history");
+        let first = write_web_finding(
+            &root,
+            WebFindingWrite {
+                session_id: None,
+                query: "browser capture provenance".into(),
+                url: "https://example.com/browser-capture".into(),
+                title: "Browser capture".into(),
+                summary: "Initial capture keeps source references.".into(),
+                extracted_text: Some("Initial extracted browser text.".into()),
+                retrieved_at: 1_777_311_476,
+                freshness_expires_at: None,
+                source_refs: vec!["https://example.com/browser-capture#main".into()],
+                source_trust: None,
+                confidence: 0.81,
+                actor: "assistant".into(),
+            },
+        )
+        .expect("write first finding");
+        let refreshed = write_web_finding(
+            &root,
+            WebFindingWrite {
+                session_id: None,
+                query: "browser capture provenance".into(),
+                url: "https://example.com/browser-capture".into(),
+                title: "Browser capture updated".into(),
+                summary: "Updated capture keeps source references and new text.".into(),
+                extracted_text: Some("Updated extracted browser text with changed facts.".into()),
+                retrieved_at: 1_777_311_500,
+                freshness_expires_at: Some(1),
+                source_refs: vec!["https://example.com/browser-capture#main".into()],
+                source_trust: None,
+                confidence: 0.84,
+                actor: "assistant".into(),
+            },
+        )
+        .expect("refresh finding");
+
+        let history =
+            list_web_finding_history(&root, Some("https://example.com/browser-capture".into()))
+                .expect("history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].previous_web_finding_id.as_deref(),
+            Some(first.id.as_str())
+        );
+        assert_eq!(history[0].web_finding_id, refreshed.id);
+        assert_ne!(history[0].previous_content_hash, history[0].content_hash);
+        assert!(history[0].summary_diff.contains("content_hash changed"));
+
+        apply_attention_mark(
+            &root,
+            AttentionMarkWrite {
+                target_id: refreshed.id.clone(),
+                target_kind: AttentionTargetKind::WebFinding,
+                action: AttentionAction::Pin,
+                reason: "Keep this changing web finding fresh.".into(),
+                actor: "assistant".into(),
+            },
+        )
+        .expect("pin finding");
+        let candidates = list_pinned_web_refresh_candidates(&root).expect("refresh candidates");
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.id == refreshed.id));
     }
 
     #[derive(Debug)]
@@ -7959,8 +8225,12 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
                 title: "Pending web finding".into(),
                 summary: "A pending web finding should not blank the library if embedding fails."
                     .into(),
+                extracted_text: String::new(),
                 retrieved_at: now_secs(),
                 freshness_expires_at: None,
+                content_hash: "pending-hash".into(),
+                source_refs: vec!["https://example.com/pending".into()],
+                source_trust: web_source_trust_policy("https://example.com/pending", 0.7),
                 confidence: 0.7,
                 actor: "test".into(),
                 created_at,
@@ -8271,8 +8541,11 @@ Kevin,Tang,ktang@xage.com,Development,Senior Software Engineer\n",
                 url: "https://example.com/imprint".into(),
                 title: "Imprint provenance".into(),
                 summary: "Web findings keep URL provenance for source recall.".into(),
+                extracted_text: None,
                 retrieved_at: 42,
                 freshness_expires_at: None,
+                source_refs: Vec::new(),
+                source_trust: None,
                 confidence: 0.8,
                 actor: "assistant".into(),
             },

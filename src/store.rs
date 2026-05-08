@@ -649,8 +649,9 @@ impl FileMemoryStore {
         connection.execute(
             "INSERT OR REPLACE INTO web_findings (
                 id, session_id, query, url, title, summary, retrieved_at, confidence,
-                actor, created_at, provenance_json, freshness_expires_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                actor, created_at, provenance_json, freshness_expires_at, extracted_text,
+                content_hash, source_refs_json, source_trust_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 finding.id,
                 finding.session_id,
@@ -664,6 +665,10 @@ impl FileMemoryStore {
                 finding.created_at as i64,
                 to_json(&finding.provenance)?,
                 finding.freshness_expires_at.map(|value| value as i64),
+                finding.extracted_text,
+                finding.content_hash,
+                to_json(&finding.source_refs)?,
+                to_json(&finding.source_trust)?,
             ],
         )?;
         Ok(())
@@ -672,7 +677,8 @@ impl FileMemoryStore {
     pub fn list_web_findings(&self, session_id: Option<&str>) -> Result<Vec<WebFinding>> {
         let connection = self.connection()?;
         let sql = "SELECT id, session_id, query, url, title, summary, retrieved_at, confidence,
-                actor, created_at, provenance_json, freshness_expires_at FROM web_findings";
+                actor, created_at, provenance_json, freshness_expires_at, extracted_text,
+                content_hash, source_refs_json, source_trust_json FROM web_findings";
         if let Some(session_id) = session_id {
             let mut statement = connection.prepare(&format!(
                 "{sql} WHERE session_id = ?1 ORDER BY created_at DESC, id"
@@ -683,6 +689,48 @@ impl FileMemoryStore {
             let mut statement =
                 connection.prepare(&format!("{sql} ORDER BY created_at DESC, id"))?;
             let rows = statement.query_map([], web_finding_from_row)?;
+            collect_rows(rows)
+        }
+    }
+
+    pub fn insert_web_finding_revision(&self, revision: &WebFindingRevision) -> Result<()> {
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT OR REPLACE INTO web_finding_revisions (
+                id, web_finding_id, previous_web_finding_id, url, previous_content_hash,
+                content_hash, summary_diff, created_at, actor, provenance_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                revision.id,
+                revision.web_finding_id,
+                revision.previous_web_finding_id,
+                revision.url,
+                revision.previous_content_hash,
+                revision.content_hash,
+                revision.summary_diff,
+                revision.created_at as i64,
+                revision.actor,
+                to_json(&revision.provenance)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_web_finding_revisions(&self, url: Option<&str>) -> Result<Vec<WebFindingRevision>> {
+        let connection = self.connection()?;
+        let sql = "SELECT id, web_finding_id, previous_web_finding_id, url, previous_content_hash,
+                content_hash, summary_diff, created_at, actor, provenance_json
+             FROM web_finding_revisions";
+        if let Some(url) = url {
+            let mut statement = connection.prepare(&format!(
+                "{sql} WHERE url = ?1 ORDER BY created_at DESC, id"
+            ))?;
+            let rows = statement.query_map(params![url], web_finding_revision_from_row)?;
+            collect_rows(rows)
+        } else {
+            let mut statement =
+                connection.prepare(&format!("{sql} ORDER BY created_at DESC, id"))?;
+            let rows = statement.query_map([], web_finding_revision_from_row)?;
             collect_rows(rows)
         }
     }
@@ -1151,14 +1199,32 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             url TEXT NOT NULL,
             title TEXT NOT NULL,
             summary TEXT NOT NULL,
+            extracted_text TEXT NOT NULL DEFAULT '',
             retrieved_at INTEGER NOT NULL,
             confidence REAL NOT NULL,
             actor TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             provenance_json TEXT NOT NULL,
-            freshness_expires_at INTEGER
+            freshness_expires_at INTEGER,
+            content_hash TEXT NOT NULL DEFAULT '',
+            source_refs_json TEXT NOT NULL DEFAULT '[]',
+            source_trust_json TEXT NOT NULL DEFAULT '{\"kind\":\"Unknown\",\"score\":0.5,\"label\":\"Unknown source\",\"caveat\":\"Verify against an original source anchor before making exact claims.\"}'
         );
         CREATE INDEX IF NOT EXISTS idx_web_findings_session ON web_findings(session_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_web_findings_url ON web_findings(url, created_at);
+        CREATE TABLE IF NOT EXISTS web_finding_revisions (
+            id TEXT PRIMARY KEY,
+            web_finding_id TEXT NOT NULL,
+            previous_web_finding_id TEXT,
+            url TEXT NOT NULL,
+            previous_content_hash TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            summary_diff TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            actor TEXT NOT NULL,
+            provenance_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_web_finding_revisions_url ON web_finding_revisions(url, created_at);
         CREATE TABLE IF NOT EXISTS agent_links (
             id TEXT PRIMARY KEY,
             source_id TEXT NOT NULL,
@@ -1297,6 +1363,22 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             "ALTER TABLE web_findings ADD COLUMN freshness_expires_at INTEGER",
             [],
         )?;
+    }
+    for (column, definition) in [
+        ("extracted_text", "TEXT NOT NULL DEFAULT ''"),
+        ("content_hash", "TEXT NOT NULL DEFAULT ''"),
+        ("source_refs_json", "TEXT NOT NULL DEFAULT '[]'"),
+        (
+            "source_trust_json",
+            "TEXT NOT NULL DEFAULT '{\"kind\":\"Unknown\",\"score\":0.5,\"label\":\"Unknown source\",\"caveat\":\"Verify against an original source anchor before making exact claims.\"}'",
+        ),
+    ] {
+        if !table_has_column(connection, "web_findings", column)? {
+            connection.execute(
+                &format!("ALTER TABLE web_findings ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
     }
     for (column, definition) in [
         ("source_artifact_id", "TEXT"),
@@ -1965,19 +2047,49 @@ fn brain_artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BrainArt
 }
 
 fn web_finding_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WebFinding> {
+    let summary: String = row.get(5)?;
+    let extracted_text: String = row.get(12)?;
+    let mut content_hash: String = row.get(13)?;
+    if content_hash.is_empty() {
+        content_hash = fallback_hash_text(&format!("{summary}\n{extracted_text}"));
+    }
+    let mut source_refs: Vec<String> = from_json(row.get::<_, String>(14)?)?;
+    let url: String = row.get(3)?;
+    if source_refs.is_empty() {
+        source_refs.push(url.clone());
+    }
     Ok(WebFinding {
         id: row.get(0)?,
         session_id: row.get(1)?,
         query: row.get(2)?,
-        url: row.get(3)?,
+        url,
         title: row.get(4)?,
-        summary: row.get(5)?,
+        summary,
+        extracted_text,
         retrieved_at: row.get::<_, i64>(6)? as u64,
         confidence: row.get(7)?,
         actor: row.get(8)?,
         created_at: row.get::<_, i64>(9)? as u64,
         provenance: from_json(row.get::<_, String>(10)?)?,
         freshness_expires_at: row.get::<_, Option<i64>>(11)?.map(|value| value as u64),
+        content_hash,
+        source_refs,
+        source_trust: from_json(row.get::<_, String>(15)?)?,
+    })
+}
+
+fn web_finding_revision_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WebFindingRevision> {
+    Ok(WebFindingRevision {
+        id: row.get(0)?,
+        web_finding_id: row.get(1)?,
+        previous_web_finding_id: row.get(2)?,
+        url: row.get(3)?,
+        previous_content_hash: row.get(4)?,
+        content_hash: row.get(5)?,
+        summary_diff: row.get(6)?,
+        created_at: row.get::<_, i64>(7)? as u64,
+        actor: row.get(8)?,
+        provenance: from_json(row.get::<_, String>(9)?)?,
     })
 }
 
@@ -1991,6 +2103,15 @@ fn agent_link_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentLinkMem
         created_at: row.get::<_, i64>(5)? as u64,
         provenance: from_json(row.get::<_, String>(6)?)?,
     })
+}
+
+fn fallback_hash_text(text: &str) -> String {
+    let mut hash = 14695981039346656037u64;
+    for byte in text.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    format!("{hash:016x}")
 }
 
 fn attention_mark_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AttentionMark> {

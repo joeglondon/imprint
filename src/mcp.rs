@@ -252,11 +252,27 @@ fn call_tool(store_root: &Path, params: Value) -> anyhow::Result<Value> {
                     .unwrap_or("Web finding")
                     .to_string(),
                 summary: string_arg(&args, "summary")?,
+                extracted_text: args
+                    .get("extracted_text")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
                 retrieved_at: args
                     .get("retrieved_at")
                     .and_then(Value::as_u64)
                     .unwrap_or(0),
                 freshness_expires_at: args.get("freshness_expires_at").and_then(Value::as_u64),
+                source_refs: args
+                    .get("source_refs")
+                    .and_then(Value::as_array)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(ToOwned::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                source_trust: None,
                 confidence: args
                     .get("confidence")
                     .and_then(Value::as_f64)
@@ -286,11 +302,27 @@ fn call_tool(store_root: &Path, params: Value) -> anyhow::Result<Value> {
                         .unwrap_or(&existing.title)
                         .to_string(),
                     summary: string_arg(&args, "summary")?,
+                    extracted_text: args
+                        .get("extracted_text")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
                     retrieved_at: args
                         .get("retrieved_at")
                         .and_then(Value::as_u64)
                         .unwrap_or_else(now_secs),
                     freshness_expires_at: args.get("freshness_expires_at").and_then(Value::as_u64),
+                    source_refs: args
+                        .get("source_refs")
+                        .and_then(Value::as_array)
+                        .map(|values| {
+                            values
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(ToOwned::to_owned)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    source_trust: None,
                     confidence: args
                         .get("confidence")
                         .and_then(Value::as_f64)
@@ -313,6 +345,17 @@ fn call_tool(store_root: &Path, params: Value) -> anyhow::Result<Value> {
                 .unwrap_or("mcp-agent")
                 .to_string(),
         )?)?,
+        "memory_web_finding_history" => {
+            serde_json::to_value(crate::app::list_web_finding_history(
+                store_root,
+                args.get("url")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+            )?)?
+        }
+        "memory_web_refresh_candidates" => {
+            serde_json::to_value(crate::app::list_pinned_web_refresh_candidates(store_root)?)?
+        }
         "memory_write_link" | "memory_save_agent_link" => {
             serde_json::to_value(crate::app::write_agent_link(
                 store_root,
@@ -751,8 +794,13 @@ fn tools() -> Vec<Value> {
                     "query": { "type": "string" },
                     "title": { "type": "string" },
                     "summary": { "type": "string" },
+                    "extracted_text": { "type": "string" },
                     "retrieved_at": { "type": "integer" },
                     "freshness_expires_at": { "type": "integer" },
+                    "source_refs": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
                     "confidence": { "type": "number" },
                     "actor": { "type": "string" }
                 },
@@ -770,6 +818,24 @@ fn tools() -> Vec<Value> {
                     "actor": { "type": "string" }
                 },
                 "required": ["web_finding_id"]
+            }),
+        ),
+        tool(
+            "memory_web_finding_history",
+            "List content-hash revisions and simple diffs for captured web findings.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string" }
+                }
+            }),
+        ),
+        tool(
+            "memory_web_refresh_candidates",
+            "List pinned web findings whose freshness window requires recapture.",
+            json!({
+                "type": "object",
+                "properties": {}
             }),
         ),
         tool(
@@ -886,8 +952,13 @@ fn web_finding_write_schema() -> Value {
             "url": { "type": "string" },
             "title": { "type": "string" },
             "summary": { "type": "string" },
+            "extracted_text": { "type": "string" },
             "retrieved_at": { "type": "integer" },
             "freshness_expires_at": { "type": "integer" },
+            "source_refs": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
             "confidence": { "type": "number" },
             "actor": { "type": "string" }
         },
@@ -1037,6 +1108,8 @@ mod tests {
         assert!(names.contains(&"memory_save_search_result".to_string()));
         assert!(names.contains(&"memory_refresh_web_finding".to_string()));
         assert!(names.contains(&"memory_set_web_freshness".to_string()));
+        assert!(names.contains(&"memory_web_finding_history".to_string()));
+        assert!(names.contains(&"memory_web_refresh_candidates".to_string()));
         assert!(names.contains(&"memory_write_link".to_string()));
         assert!(names.contains(&"memory_save_agent_link".to_string()));
         assert!(names.contains(&"memory_links".to_string()));

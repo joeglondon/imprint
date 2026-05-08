@@ -42,9 +42,11 @@ Phase 10 exposes imprint as an agent-native memory filesystem. All tools return 
 
 Web tools are writeback endpoints for read-only web research performed by an agent or browser client.
 
-- `memory_write_web_finding({ query, url, summary, title?, retrieved_at?, freshness_expires_at?, confidence?, actor?, session_id? })`
+- `memory_write_web_finding({ query, url, summary, extracted_text?, source_refs?, title?, retrieved_at?, freshness_expires_at?, confidence?, actor?, session_id? })`
 - `memory_save_web_finding(...)`
 - `memory_capture_url(...)`
 - `memory_save_search_result(...)`
-- `memory_refresh_web_finding({ web_finding_id, summary, query?, title?, retrieved_at?, freshness_expires_at?, confidence?, actor? })`
+- `memory_refresh_web_finding({ web_finding_id, summary, extracted_text?, source_refs?, query?, title?, retrieved_at?, freshness_expires_at?, confidence?, actor? })`
 - `memory_set_web_freshness({ web_finding_id, freshness_expires_at?, actor? })`
+- `memory_web_finding_history({ url? })`
+- `memory_web_refresh_candidates({})`

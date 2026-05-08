@@ -13,6 +13,7 @@ pub type ChatMessageId = String;
 pub type TranscriptChunkId = String;
 pub type DerivedMemoryId = String;
 pub type WebFindingId = String;
+pub type WebFindingRevisionId = String;
 pub type AttentionMarkId = String;
 pub type MemoryAccessId = String;
 pub type AuditEventId = String;
@@ -881,9 +882,17 @@ pub struct WebFinding {
     pub url: String,
     pub title: String,
     pub summary: String,
+    #[serde(default)]
+    pub extracted_text: String,
     pub retrieved_at: u64,
     #[serde(default)]
     pub freshness_expires_at: Option<u64>,
+    #[serde(default)]
+    pub content_hash: String,
+    #[serde(default)]
+    pub source_refs: Vec<String>,
+    #[serde(default)]
+    pub source_trust: SourceTrustPolicy,
     pub confidence: f32,
     pub actor: String,
     pub created_at: u64,
@@ -898,11 +907,32 @@ pub struct WebFindingWrite {
     pub url: String,
     pub title: String,
     pub summary: String,
+    #[serde(default)]
+    pub extracted_text: Option<String>,
     pub retrieved_at: u64,
     #[serde(default)]
     pub freshness_expires_at: Option<u64>,
+    #[serde(default)]
+    pub source_refs: Vec<String>,
+    #[serde(default)]
+    pub source_trust: Option<SourceTrustPolicy>,
     pub confidence: f32,
     pub actor: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebFindingRevision {
+    pub id: WebFindingRevisionId,
+    pub web_finding_id: WebFindingId,
+    #[serde(default)]
+    pub previous_web_finding_id: Option<WebFindingId>,
+    pub url: String,
+    pub previous_content_hash: String,
+    pub content_hash: String,
+    pub summary_diff: String,
+    pub created_at: u64,
+    pub actor: String,
+    pub provenance: ProvenanceRecord,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
