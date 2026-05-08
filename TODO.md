@@ -365,37 +365,37 @@ Goal: make the library feel like a real local memory filesystem.
 
 Goal: make the macOS app a calm, dense, inspectable library, not just a graph demo.
 
-- [ ] Rename remaining Map UI concepts to Cortex or Source Recall where appropriate.
-- [ ] Keep `Map` only where it literally means spatial visualization.
-- [ ] Add document library view:
-  - [ ] list/table
-  - [ ] source type
-  - [ ] date imported
-  - [ ] trust/freshness
-  - [ ] collections
-  - [ ] open source
-- [ ] Add cortex view:
-  - [ ] adapter status
-  - [ ] corpus hash
-  - [ ] training/eval state
-  - [ ] region/source-family sketches
-  - [ ] route examples
-  - [ ] stale reasons
-- [ ] Add source recall inspector:
-  - [ ] selected chunk
-  - [ ] document context
-  - [ ] anchors
-  - [ ] graph links
-  - [ ] provenance
-  - [ ] ranking reasons
-- [ ] Add surf session UI:
-  - [ ] history
-  - [ ] backtrack
-  - [ ] neighborhood
-  - [ ] expand source
-  - [ ] cite/save trail
-- [ ] Add import queue UI.
-- [ ] Add settings for local-first storage, model endpoints, adapter policy, and privacy.
+- [x] Rename remaining Map UI concepts to Cortex or Source Recall where appropriate.
+- [x] Keep `Map` only where it literally means spatial visualization.
+- [x] Add document library view:
+  - [x] list/table
+  - [x] source type
+  - [x] date imported
+  - [x] trust/freshness
+  - [x] collections
+  - [x] open source
+- [x] Add cortex view:
+  - [x] adapter status
+  - [x] corpus hash
+  - [x] training/eval state
+  - [x] region/source-family sketches
+  - [x] route examples
+  - [x] stale reasons
+- [x] Add source recall inspector:
+  - [x] selected chunk
+  - [x] document context
+  - [x] anchors
+  - [x] graph links
+  - [x] provenance
+  - [x] ranking reasons
+- [x] Add surf session UI:
+  - [x] history
+  - [x] backtrack
+  - [x] neighborhood
+  - [x] expand source
+  - [x] cite/save trail
+- [x] Add import queue UI.
+- [x] Add settings for local-first storage, model endpoints, adapter policy, and privacy.
 
 ## Phase 10: MCP And Agent API
 

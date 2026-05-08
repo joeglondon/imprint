@@ -794,7 +794,14 @@ pub fn library_management_snapshot(store_root: &Path) -> anyhow::Result<LibraryM
         collections: store.list_collections().unwrap_or_default(),
         saved_views: store.list_saved_views().unwrap_or_default(),
         saved_trails: store.list_saved_trails().unwrap_or_default(),
+        source_artifacts: store.list_source_artifacts().unwrap_or_default(),
         source_type_filters: list_source_type_filters(store_root).unwrap_or_default(),
+    })
+}
+
+pub fn load_current_cortex_index(store_root: &Path) -> anyhow::Result<CortexIndexSnapshot> {
+    Ok(CortexIndexSnapshot {
+        current: FileMemoryStore::new(store_root).load_current_cortex_index()?,
     })
 }
 

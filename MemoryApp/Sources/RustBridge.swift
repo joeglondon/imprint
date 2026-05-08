@@ -32,6 +32,15 @@ enum RustBridge {
         try decode(ai_memory_get_visualization_snapshot(storePath))
     }
 
+    static func getLibraryManagementSnapshot(storePath: String) throws -> LibraryManagementSnapshot {
+        try decode(ai_memory_get_library_management_snapshot(storePath))
+    }
+
+    static func loadCurrentCortexIndex(storePath: String) throws -> CortexIndex? {
+        let snapshot: CortexIndexSnapshot = try decode(ai_memory_load_current_cortex_index(storePath))
+        return snapshot.current
+    }
+
     static func runQuery(storePath: String, request: QueryRequest) throws -> QueryResult {
         try decode(ai_memory_run_query(storePath, jsonString(request)))
     }

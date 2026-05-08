@@ -53,6 +53,18 @@ pub extern "C" fn ai_memory_get_visualization_snapshot(store_path: *const c_char
 }
 
 #[no_mangle]
+pub extern "C" fn ai_memory_get_library_management_snapshot(
+    store_path: *const c_char,
+) -> *mut c_char {
+    respond(|| app::library_management_snapshot(&path_arg(store_path)?))
+}
+
+#[no_mangle]
+pub extern "C" fn ai_memory_load_current_cortex_index(store_path: *const c_char) -> *mut c_char {
+    respond(|| app::load_current_cortex_index(&path_arg(store_path)?))
+}
+
+#[no_mangle]
 pub extern "C" fn ai_memory_run_query(
     store_path: *const c_char,
     query_json: *const c_char,

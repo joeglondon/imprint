@@ -9,9 +9,12 @@ struct ResponseEnvelope<T: Decodable>: Decodable {
 enum SidebarSection: String, CaseIterable, Identifiable {
     case library = "Library"
     case chat = "Chat"
+    case sourceRecall = "Source Recall"
+    case cortex = "Cortex"
+    case surf = "Surf"
+    case importQueue = "Import Queue"
     case connections = "Connections"
-    case model = "Model"
-    case map = "Map"
+    case settings = "Settings"
 
     var id: String { rawValue }
 }
@@ -238,6 +241,122 @@ struct SourceArtifact: Codable, Equatable, Identifiable {
     var parserVersion: UInt32
     var importedAt: UInt64
     var provenance: ProvenanceRecord
+}
+
+enum ImportQueueStatus: String, Codable, Equatable {
+    case pending = "Pending"
+    case running = "Running"
+    case succeeded = "Succeeded"
+    case failed = "Failed"
+    case cancelled = "Cancelled"
+}
+
+struct ImportQueueItem: Codable, Equatable, Identifiable {
+    var id: String
+    var batchId: String
+    var path: String
+    var status: ImportQueueStatus
+    var progressCompleted: Int
+    var progressTotal: Int
+    var error: String?
+    var importedDocumentIds: [String]
+    var createdAt: UInt64
+    var updatedAt: UInt64
+    var startedAt: UInt64?
+    var finishedAt: UInt64?
+}
+
+struct ImportQueueBatch: Codable, Equatable {
+    var id: String
+    var items: [ImportQueueItem]
+    var pending: Int
+    var running: Int
+    var succeeded: Int
+    var failed: Int
+    var cancelled: Int
+    var progressCompleted: Int
+    var progressTotal: Int
+}
+
+struct FileWatchRoot: Codable, Equatable, Identifiable {
+    var id: String
+    var path: String
+    var recursive: Bool
+    var enabled: Bool
+    var createdAt: UInt64
+    var updatedAt: UInt64
+}
+
+enum FileUpdateKind: String, Codable, Equatable {
+    case changedFile = "ChangedFile"
+    case movedFile = "MovedFile"
+    case deletedFile = "DeletedFile"
+    case duplicateFile = "DuplicateFile"
+    case replacedFile = "ReplacedFile"
+    case unchanged = "Unchanged"
+}
+
+struct FileUpdate: Codable, Equatable, Identifiable {
+    var kind: FileUpdateKind
+    var sourceArtifactId: String
+    var documentId: String?
+    var originalPath: String
+    var currentPath: String?
+    var candidatePath: String?
+    var previousHash: String?
+    var currentHash: String?
+    var detectedAt: UInt64
+
+    var id: String { "\(sourceArtifactId):\(kind.rawValue):\(detectedAt)" }
+}
+
+struct Collection: Codable, Equatable, Identifiable {
+    var id: String
+    var name: String
+    var description: String?
+    var createdAt: UInt64
+    var updatedAt: UInt64
+}
+
+struct SavedView: Codable, Equatable, Identifiable {
+    var id: String
+    var name: String
+    var filters: [String: String]
+    var sort: String
+    var createdAt: UInt64
+    var updatedAt: UInt64
+}
+
+struct SurfTrailStep: Codable, Equatable {
+    var node: NodeRef
+    var sourceAnchor: SourceAnchor?
+    var note: String?
+}
+
+struct SavedTrail: Codable, Equatable, Identifiable {
+    var id: String
+    var name: String
+    var sessionId: String
+    var steps: [SurfTrailStep]
+    var createdAt: UInt64
+}
+
+struct SourceTypeFilterSummary: Codable, Equatable, Identifiable {
+    var sourceType: String
+    var count: Int
+
+    var id: String { sourceType }
+}
+
+struct LibraryManagementSnapshot: Codable, Equatable {
+    var importQueue: ImportQueueBatch
+    var watchRoots: [FileWatchRoot]
+    var updates: [FileUpdate]
+    var collections: [Collection]
+    var savedViews: [SavedView]
+    var savedTrails: [SavedTrail]
+    var sourceArtifacts: [SourceArtifact]
+    var sourceTypeFilters: [SourceTypeFilterSummary]
 }
 
 enum SourceOpenTargetKind: String, Codable, Equatable {
@@ -651,6 +770,10 @@ struct CortexIndex: Codable, Equatable {
     var artifactIds: [String]
     var regions: [CortexRegionSketch]
     var compatibilityMap: MemoryMap
+}
+
+struct CortexIndexSnapshot: Codable, Equatable {
+    var current: CortexIndex?
 }
 
 enum NodeRef: Codable, Equatable, Hashable {

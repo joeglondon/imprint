@@ -119,7 +119,7 @@ private struct GraphiteTitleBar: View {
                     .disabled(appState.isBusy)
                 IconButton("Compile Cortex", systemImage: "brain.head.profile", action: appState.compileMemoryBrain)
                     .disabled(appState.isBusy)
-                IconButton("Refresh Map", systemImage: "arrow.clockwise", action: appState.refreshSnapshot)
+                IconButton("Refresh", systemImage: "arrow.clockwise", action: appState.refreshSnapshot)
                     .disabled(appState.isBusy)
             }
         }
@@ -186,9 +186,9 @@ private struct GraphiteSidebar: View {
                         .foregroundStyle(theme.ink.quaternary)
                 }
                 VStack(spacing: 3) {
-                    if let entries = appState.snapshot?.map.entries, !entries.isEmpty {
+                    if let entries = appState.cortexIndex?.regions, !entries.isEmpty {
                         ForEach(Array(entries.prefix(8).enumerated()), id: \.element.id) { index, entry in
-                            RegionRow(entry: entry, count: regionCount(entry.regionId), tone: tone(for: index))
+                            CortexRegionRow(entry: entry, count: regionCount(entry.regionId), tone: tone(for: index))
                         }
                     } else {
                         EmptyHint("Import files to build regions.")
@@ -228,7 +228,7 @@ private struct GraphiteSidebar: View {
     }
 
     private var currentRegionLabel: String {
-        appState.inspector.selectedNode?.label ?? "map"
+        appState.inspector.selectedNode?.label ?? "library"
     }
 
     private var currentAgentRegionLabel: String {
@@ -242,10 +242,13 @@ private struct GraphiteSidebar: View {
         switch section {
         case .library: return appState.summary.documents
         case .chat: return appState.chatSessions.count
+        case .sourceRecall: return appState.summary.chunks
+        case .cortex: return appState.summary.regions
+        case .surf: return appState.session.history.count
+        case .importQueue: return appState.librarySnapshot?.importQueue.items.count
         case .connections:
             return appState.workspaceConnections.filter { $0.status == .connected }.count
-        case .model: return nil
-        case .map: return appState.summary.regions
+        case .settings: return nil
         }
     }
 
@@ -265,14 +268,29 @@ private struct CenterWorkspace: View {
     var body: some View {
         if appState.selectedSection == .chat {
             ChatWorkspace()
+        } else if appState.selectedSection == .library {
+            LibraryWorkspace()
+        } else if appState.selectedSection == .cortex {
+            CortexWorkspace()
+        } else if appState.selectedSection == .sourceRecall {
+            mapWorkspace(title: "Source Recall", footer: "spatial recall map · click chunks and documents to inspect exact anchors")
+        } else if appState.selectedSection == .surf {
+            SurfWorkspace()
+        } else if appState.selectedSection == .importQueue {
+            ImportQueueWorkspace()
+        } else if appState.selectedSection == .settings || appState.selectedSection == .connections {
+            SettingsWorkspace()
         } else {
-            mapWorkspace
+            mapWorkspace(title: "Semantic Map", footer: "2D map · click nodes to inspect")
         }
     }
 
-    private var mapWorkspace: some View {
+    private func mapWorkspace(title: String, footer: String) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
+                Text(title)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(theme.ink.secondary)
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 13))
@@ -314,7 +332,7 @@ private struct CenterWorkspace: View {
             DividerLine()
 
             HStack(spacing: 14) {
-                Text("2D map · click nodes to inspect")
+                Text(footer)
                     .font(.system(size: 11, design: .monospaced))
                 Spacer()
                 Text(appState.modelConfig.embeddingModel ?? "embedding model unset")
@@ -339,6 +357,312 @@ private struct CenterWorkspace: View {
 
     private var statusColor: Color {
         appState.modelConfig.health?.status == "connected" ? theme.accents.success : theme.ink.tertiary
+    }
+}
+
+private struct LibraryWorkspace: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    private var documentNodes: [GraphNode] {
+        (appState.snapshot?.nodes ?? [])
+            .filter { $0.kind == .document }
+            .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            WorkspaceHeader(title: "Document Library", detail: "\(documentNodes.count) documents · \(appState.librarySnapshot?.sourceArtifacts.count ?? 0) source artifacts") {
+                GraphiteButton("Refresh", systemImage: "arrow.clockwise", style: .ghost, action: appState.refreshSnapshot)
+            }
+            DividerLine()
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    LibraryTableHeader()
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            if documentNodes.isEmpty {
+                                EmptyTableState("Import local documents to browse source type, trust, freshness, collections, and original locations.")
+                                    .padding(18)
+                            } else {
+                                ForEach(documentNodes) { node in
+                                    LibraryDocumentRow(
+                                        node: node,
+                                        artifact: artifact(for: node),
+                                        selected: appState.inspector.selectedNode?.id == node.id
+                                    ) {
+                                        appState.selectNode(node)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(minWidth: 520)
+
+                DividerLine(axis: .vertical)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    SectionLabel("Source Types")
+                    if let filters = appState.librarySnapshot?.sourceTypeFilters, !filters.isEmpty {
+                        ForEach(filters.prefix(8)) { filter in
+                            SummaryLine(title: filter.sourceType, value: filter.count)
+                        }
+                    } else {
+                        EmptyHint("No source type summary yet.")
+                    }
+                    InspectorDivider()
+                    SectionLabel("Collections")
+                    if let collections = appState.librarySnapshot?.collections, !collections.isEmpty {
+                        ForEach(collections.prefix(8)) { collection in
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(collection.name)
+                                    .font(.system(size: 12, weight: .medium))
+                                Text(collection.description ?? collection.id)
+                                    .font(.system(size: 10.5))
+                                    .foregroundStyle(theme.ink.tertiary)
+                                    .lineLimit(2)
+                            }
+                        }
+                    } else {
+                        EmptyHint("Collections and saved views will appear here.")
+                    }
+                }
+                .padding(14)
+                .frame(minWidth: 260, idealWidth: 260, maxWidth: 260, maxHeight: .infinity, alignment: .topLeading)
+                .background(theme.surfaces.surface2)
+            }
+        }
+    }
+
+    private func artifact(for node: GraphNode) -> SourceArtifact? {
+        guard let artifacts = appState.librarySnapshot?.sourceArtifacts else { return nil }
+        if let exact = artifacts.first(where: { node.detail.contains($0.originalPath) || node.detail.contains($0.id) }) {
+            return exact
+        }
+        return artifacts.first { artifact in
+            let last = (artifact.originalPath as NSString).lastPathComponent
+            return !last.isEmpty && node.label.localizedCaseInsensitiveContains(last)
+        }
+    }
+}
+
+private struct CortexWorkspace: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        VStack(spacing: 0) {
+            WorkspaceHeader(title: "Cortex", detail: cortexDetail) {
+                GraphiteButton("Compile", systemImage: "brain.head.profile", style: .ghost, action: appState.compileMemoryBrain)
+                GraphiteButton("Train", systemImage: "play.fill", style: .ghost, action: appState.trainCortexAdapterNow)
+                GraphiteButton("Probe", systemImage: "arrow.left.arrow.right", style: .ghost, action: appState.compareBaseVsAdaptedRouting)
+            }
+            DividerLine()
+            HStack(spacing: 0) {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        if let regions = appState.cortexIndex?.regions, !regions.isEmpty {
+                            ForEach(regions) { region in
+                                CortexRegionCard(region: region)
+                            }
+                        } else {
+                            EmptyTableState("Compile the cortex to inspect region sketches, source-family hints, route examples, and source refs.")
+                                .padding(18)
+                        }
+                    }
+                    .padding(14)
+                }
+
+                DividerLine(axis: .vertical)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        AdapterStateSummary(
+                            state: appState.cortexAdapterState,
+                            jobs: appState.cortexAdapterJobs,
+                            retryAction: appState.retryLatestCortexAdapterJob
+                        )
+                        if let index = appState.cortexIndex {
+                            InspectorDivider()
+                            DetailRow(label: "Corpus", value: shortHash(index.corpusHash))
+                            DetailRow(label: "Schema", value: "\(index.schemaVersion)")
+                            DetailRow(label: "Compiler", value: index.compiler)
+                            DetailRow(label: "Created", value: timeLabel(index.createdAt))
+                            DetailRow(label: "Sources", value: "\(index.sourceRefs.count)")
+                            DetailRow(label: "Artifacts", value: "\(index.artifactIds.count)")
+                        }
+                        if let probe = appState.cortexRouteProbe {
+                            InspectorDivider()
+                            SectionLabel("Route Probe")
+                            DetailRow(label: "Expected", value: probe.expectedSourceFamily)
+                            DetailRow(label: "Matched", value: probe.matched ? "yes" : "no")
+                            if let family = probe.modelSourceFamily {
+                                DetailRow(label: "Model", value: family)
+                            }
+                        }
+                    }
+                    .padding(14)
+                }
+                .frame(width: 320)
+                .background(theme.surfaces.surface2)
+            }
+        }
+    }
+
+    private var cortexDetail: String {
+        guard let index = appState.cortexIndex else { return "No persisted cortex index" }
+        return "\(index.regions.count) regions · corpus \(shortHash(index.corpusHash))"
+    }
+}
+
+private struct SurfWorkspace: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                WorkspaceHeader(title: "Surf Session", detail: "\(appState.session.history.count) steps · \(appState.session.visited.count) visited") {
+                    GraphiteButton("Backtrack", systemImage: "chevron.left", style: .ghost, action: appState.backtrack)
+                }
+                DividerLine()
+                SemanticCloudView(
+                    snapshot: appState.snapshot,
+                    selectedNode: appState.inspector.selectedNode,
+                    agentPresence: GraphAgentPresence.from(progress: appState.isBusy ? appState.operationProgress : nil)
+                ) { node in
+                    appState.selectNode(node)
+                }
+            }
+
+            DividerLine(axis: .vertical)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    SectionLabel("History")
+                    if appState.session.history.isEmpty {
+                        EmptyHint("Open nodes and follow links to build a reversible surf trail.")
+                    } else {
+                        ForEach(Array(appState.session.history.enumerated()), id: \.offset) { index, node in
+                            DetailRow(label: "#\(index + 1)", value: node.id)
+                        }
+                    }
+                    InspectorDivider()
+                    SectionLabel("Neighborhood")
+                    if appState.inspector.neighbors.isEmpty {
+                        EmptyHint("Select a node to load semantic, citation, and same-source neighbors.")
+                    } else {
+                        ForEach(appState.inspector.neighbors.prefix(8)) { neighbor in
+                            SurfNeighborRow(neighbor: neighbor)
+                        }
+                    }
+                    InspectorDivider()
+                    SectionLabel("Saved Trails")
+                    if let trails = appState.librarySnapshot?.savedTrails, !trails.isEmpty {
+                        ForEach(trails.prefix(6)) { trail in
+                            DetailRow(label: trail.name, value: "\(trail.steps.count) steps")
+                        }
+                    } else {
+                        EmptyHint("Saved trails will appear after cite/save workflows run.")
+                    }
+                }
+                .padding(14)
+            }
+            .frame(width: 340)
+            .background(theme.surfaces.surface2)
+        }
+    }
+}
+
+private struct ImportQueueWorkspace: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        VStack(spacing: 0) {
+            WorkspaceHeader(title: "Import Queue", detail: queueDetail) {
+                GraphiteButton("Refresh", systemImage: "arrow.clockwise", style: .ghost, action: appState.refreshSnapshot)
+            }
+            DividerLine()
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    if let queue = appState.librarySnapshot?.importQueue, !queue.items.isEmpty {
+                        ForEach(queue.items) { item in
+                            ImportQueueItemRow(item: item)
+                        }
+                    } else {
+                        EmptyTableState("Queued, running, succeeded, failed, and cancelled imports will appear here with per-file progress.")
+                            .padding(18)
+                    }
+                }
+                .padding(14)
+            }
+            DividerLine()
+            HStack(spacing: 16) {
+                QueueMetric("Pending", appState.librarySnapshot?.importQueue.pending ?? 0)
+                QueueMetric("Running", appState.librarySnapshot?.importQueue.running ?? 0)
+                QueueMetric("Succeeded", appState.librarySnapshot?.importQueue.succeeded ?? 0)
+                QueueMetric("Failed", appState.librarySnapshot?.importQueue.failed ?? 0)
+                QueueMetric("Cancelled", appState.librarySnapshot?.importQueue.cancelled ?? 0)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 36)
+            .background(theme.surfaces.surface2)
+        }
+    }
+
+    private var queueDetail: String {
+        guard let queue = appState.librarySnapshot?.importQueue else { return "No queue snapshot" }
+        return "\(queue.items.count) files · \(queue.progressCompleted)/\(queue.progressTotal)"
+    }
+}
+
+private struct SettingsWorkspace: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                WorkspaceHeader(title: "Settings", detail: "local-first storage, model endpoints, adapter policy, privacy") {
+                    GraphiteButton("Save", systemImage: "checkmark", style: .primary, action: appState.saveModelConfig)
+                    GraphiteButton("Test", systemImage: "bolt", style: .ghost, action: appState.testModelConnection)
+                }
+                SettingsBand(title: "Local Storage") {
+                    DetailRow(label: "Store", value: appState.storePath)
+                    DetailRow(label: "Mode", value: "local managed copies plus original path reconciliation")
+                    DetailRow(label: "Artifacts", value: "\(appState.librarySnapshot?.sourceArtifacts.count ?? 0)")
+                }
+                SettingsBand(title: "Model Endpoints") {
+                    LabeledField("Chat Endpoint", text: $appState.modelConfig.endpoint)
+                    LabeledField("Planner Endpoint", text: stringBinding($appState.modelConfig.plannerEndpoint))
+                    LabeledField("Embedding Endpoint", text: stringBinding($appState.modelConfig.embeddingEndpoint))
+                    LabeledField("Response Model", text: stringBinding($appState.modelConfig.responseModel))
+                    LabeledField("Compiler Model", text: stringBinding($appState.modelConfig.compilerModel))
+                }
+                SettingsBand(title: "Adapter Policy") {
+                    Picker("Adapter Policy", selection: $appState.modelConfig.adapterActivationPolicy) {
+                        Text("Automatic").tag("automatic")
+                        Text("Manual").tag("manual")
+                        Text("Disabled").tag("disabled")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    Toggle("Cortex routing", isOn: $appState.modelConfig.cortexEnabled)
+                        .toggleStyle(.switch)
+                    Toggle("Latent recursion research", isOn: $appState.modelConfig.latentRecursiveEnabled)
+                        .toggleStyle(.switch)
+                }
+                SettingsBand(title: "Privacy") {
+                    PolicyLine(systemImage: "externaldrive", text: "Imports are stored in the local application support library.")
+                    PolicyLine(systemImage: "lock", text: "Adapters and training manifests stay local unless a model endpoint is configured outside the machine.")
+                    PolicyLine(systemImage: "eye.slash", text: "Exact claims still route back to source anchors before citation.")
+                }
+            }
+            .padding(16)
+        }
     }
 }
 
@@ -552,19 +876,25 @@ private struct GraphiteInspector: View {
                 LibraryInspector()
             case .chat:
                 ChatInspector()
+            case .sourceRecall:
+                SourceRecallInspector()
+            case .cortex:
+                CortexInspector()
+            case .surf:
+                SurfInspector()
+            case .importQueue:
+                ImportQueueInspector()
             case .connections:
                 ConnectionsInspector()
-            case .model:
+            case .settings:
                 ModelInspector()
-            case .map:
-                MapInspector()
             }
         }
         .background(theme.surfaces.surface1)
     }
 }
 
-private struct MapInspector: View {
+private struct SourceRecallInspector: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.memoryTheme) private var theme
 
@@ -668,6 +998,10 @@ private struct MapInspector: View {
                     if appState.inspector.sourceAnchor != nil || appState.inspector.openTarget != nil {
                         provenanceInspector(anchor: appState.inspector.sourceAnchor, target: appState.inspector.openTarget)
                             .padding(.top, 6)
+                    }
+                    if appState.inspector.openTarget != nil {
+                        GraphiteButton("Open Source", systemImage: "arrow.up.right.square", style: .ghost, action: appState.openSelectedSource)
+                            .padding(.top, 4)
                     }
                     HStack(spacing: 8) {
                         TextField("Grep or search selection", text: $appState.grepText)
@@ -980,7 +1314,7 @@ private struct LibraryInspector: View {
                     SummaryLine(title: "Chunks", value: appState.summary.chunks)
                     SummaryLine(title: "Regions", value: appState.summary.regions)
                     SummaryLine(title: "Links", value: appState.summary.links)
-                    SummaryLine(title: "Map Bytes", value: appState.summary.mapBytes)
+                    SummaryLine(title: "Cortex Bytes", value: appState.summary.mapBytes)
                 }
                 if let importResult = appState.importResult {
                     InspectorDivider()
@@ -1007,6 +1341,140 @@ private struct LibraryInspector: View {
                         EmptyHint("No trail yet.")
                     } else {
                         TrailView(labels: Array(appState.inspector.breadcrumbs.suffix(6)), color: theme.accents.human)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct CortexInspector: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                InspectorBlock {
+                    SectionLabel("Cortex Index") {
+                        Tag(appState.cortexAdapterState?.activationStatus ?? "inactive", tone: .ai)
+                    }
+                    if let index = appState.cortexIndex {
+                        DetailRow(label: "Corpus", value: shortHash(index.corpusHash))
+                        DetailRow(label: "Schema", value: "\(index.schemaVersion)")
+                        DetailRow(label: "Regions", value: "\(index.regions.count)")
+                        DetailRow(label: "Sources", value: "\(index.sourceRefs.count)")
+                        DetailRow(label: "Artifacts", value: "\(index.artifactIds.count)")
+                    } else {
+                        EmptyHint("Compile the cortex to inspect semantic-address sketches.")
+                    }
+                }
+                InspectorDivider()
+                InspectorBlock {
+                    AdapterStateSummary(
+                        state: appState.cortexAdapterState,
+                        jobs: appState.cortexAdapterJobs,
+                        retryAction: appState.retryLatestCortexAdapterJob
+                    )
+                }
+                InspectorDivider()
+                InspectorBlock {
+                    SectionLabel("Route Examples")
+                    if let examples = appState.cortexIndex?.regions.flatMap(\.routeExamples), !examples.isEmpty {
+                        ForEach(examples.prefix(8), id: \.self) { example in
+                            Text(example)
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundStyle(theme.ink.secondary)
+                                .lineLimit(2)
+                        }
+                    } else {
+                        EmptyHint("No route examples in the current cortex index.")
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct SurfInspector: View {
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                InspectorBlock {
+                    SectionLabel("Session")
+                    DetailRow(label: "Current", value: appState.session.current?.id ?? "none")
+                    SummaryLine(title: "History", value: appState.session.history.count)
+                    SummaryLine(title: "Visited", value: appState.session.visited.count)
+                    GraphiteButton("Backtrack", systemImage: "chevron.left", style: .ghost, action: appState.backtrack)
+                }
+                InspectorDivider()
+                InspectorBlock {
+                    SectionLabel("Expand Source")
+                    if let selected = appState.inspector.selectedNode, selected.kind == .chunk {
+                        HStack(spacing: 8) {
+                            GraphiteButton("Window", style: .ghost) { appState.expandSelectedChunk(mode: .window) }
+                            GraphiteButton("Page", style: .ghost) { appState.expandSelectedChunk(mode: .page) }
+                        }
+                        HStack(spacing: 8) {
+                            GraphiteButton("Section", style: .ghost) { appState.expandSelectedChunk(mode: .section) }
+                            GraphiteButton("Document", style: .ghost) { appState.expandSelectedChunk(mode: .document) }
+                        }
+                    } else {
+                        EmptyHint("Select a chunk in the map to expand exact source context.")
+                    }
+                }
+                InspectorDivider()
+                InspectorBlock {
+                    SectionLabel("Saved Trails")
+                    if let trails = appState.librarySnapshot?.savedTrails, !trails.isEmpty {
+                        ForEach(trails.prefix(8)) { trail in
+                            DetailRow(label: trail.name, value: "\(trail.steps.count) steps")
+                        }
+                    } else {
+                        EmptyHint("Saved surf trails are not present yet.")
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct ImportQueueInspector: View {
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                InspectorBlock {
+                    SectionLabel("Queue")
+                    SummaryLine(title: "Pending", value: appState.librarySnapshot?.importQueue.pending ?? 0)
+                    SummaryLine(title: "Running", value: appState.librarySnapshot?.importQueue.running ?? 0)
+                    SummaryLine(title: "Succeeded", value: appState.librarySnapshot?.importQueue.succeeded ?? 0)
+                    SummaryLine(title: "Failed", value: appState.librarySnapshot?.importQueue.failed ?? 0)
+                    SummaryLine(title: "Cancelled", value: appState.librarySnapshot?.importQueue.cancelled ?? 0)
+                }
+                InspectorDivider()
+                InspectorBlock {
+                    SectionLabel("Watch Roots")
+                    if let roots = appState.librarySnapshot?.watchRoots, !roots.isEmpty {
+                        ForEach(roots.prefix(8)) { root in
+                            DetailRow(label: root.recursive ? "Recursive" : "Folder", value: root.path)
+                        }
+                    } else {
+                        EmptyHint("No watched folders configured.")
+                    }
+                }
+                InspectorDivider()
+                InspectorBlock {
+                    SectionLabel("Updates")
+                    if let updates = appState.librarySnapshot?.updates, !updates.isEmpty {
+                        ForEach(updates.prefix(8)) { update in
+                            DetailRow(label: update.kind.rawValue, value: update.candidatePath ?? update.originalPath)
+                        }
+                    } else {
+                        EmptyHint("No changed, moved, deleted, duplicate, or replaced files detected.")
                     }
                 }
             }
@@ -1574,6 +2042,316 @@ private struct ModelInspector: View {
     }
 }
 
+private struct WorkspaceHeader<Actions: View>: View {
+    @Environment(\.memoryTheme) private var theme
+    let title: String
+    let detail: String
+    let actions: Actions
+
+    init(title: String, detail: String, @ViewBuilder actions: () -> Actions) {
+        self.title = title
+        self.detail = detail
+        self.actions = actions()
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(theme.ink.primary)
+                Text(detail)
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(theme.ink.quaternary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            actions
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 50)
+        .background(theme.surfaces.surface1)
+    }
+}
+
+private struct LibraryTableHeader: View {
+    @Environment(\.memoryTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("Document").frame(minWidth: 180, maxWidth: .infinity, alignment: .leading)
+            Text("Type").frame(width: 90, alignment: .leading)
+            Text("Imported").frame(width: 100, alignment: .leading)
+            Text("Trust").frame(width: 96, alignment: .leading)
+            Text("Freshness").frame(width: 90, alignment: .leading)
+        }
+        .font(.system(size: 10, design: .monospaced))
+        .foregroundStyle(theme.ink.tertiary)
+        .padding(.horizontal, 12)
+        .frame(height: 30)
+        .background(theme.surfaces.surface2)
+    }
+}
+
+private struct LibraryDocumentRow: View {
+    @Environment(\.memoryTheme) private var theme
+    let node: GraphNode
+    let artifact: SourceArtifact?
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(node.label)
+                        .font(.system(size: 12.5, weight: selected ? .medium : .regular))
+                        .foregroundStyle(theme.ink.primary)
+                        .lineLimit(1)
+                    Text(sourcePath)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(theme.ink.quaternary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .frame(minWidth: 180, maxWidth: .infinity, alignment: .leading)
+                Text(artifact?.sourceType ?? "document")
+                    .frame(width: 90, alignment: .leading)
+                Text(artifact.map { timeLabel($0.importedAt) } ?? "unknown")
+                    .frame(width: 100, alignment: .leading)
+                Text(artifact?.trust.label ?? "Unscored")
+                    .frame(width: 96, alignment: .leading)
+                Text(freshnessLabel)
+                    .frame(width: 90, alignment: .leading)
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(theme.ink.secondary)
+            .padding(.horizontal, 12)
+            .frame(height: 44)
+            .background(selected ? theme.surfaces.selection : theme.surfaces.surface1)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(theme.surfaces.rule).frame(height: 0.5)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var sourcePath: String {
+        artifact?.currentPath ?? artifact?.originalPath ?? node.detail
+    }
+
+    private var freshnessLabel: String {
+        switch artifact?.trust.kind {
+        case .webFinding:
+            return "verify"
+        case .compilerArtifact, .generatedSummary:
+            return "derived"
+        case .none:
+            return "unknown"
+        default:
+            return "local"
+        }
+    }
+}
+
+private struct CortexRegionCard: View {
+    @Environment(\.memoryTheme) private var theme
+    let region: CortexRegionSketch
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text(region.label)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(theme.ink.primary)
+                Spacer()
+                Tag("\(region.sourceRefs.count) refs", tone: .ai)
+            }
+            Text(region.summary)
+                .font(.system(size: 12))
+                .foregroundStyle(theme.ink.secondary)
+                .lineLimit(3)
+            if !region.routeExamples.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(region.routeExamples.prefix(3), id: \.self) { example in
+                        Text("route: \(example)")
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(theme.ink.tertiary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            if !region.sourceRefs.isEmpty {
+                Text(region.sourceRefs.prefix(3).joined(separator: " · "))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(theme.ink.quaternary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .padding(10)
+        .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
+    }
+}
+
+private struct SurfNeighborRow: View {
+    @Environment(\.memoryTheme) private var theme
+    let neighbor: SurfNeighbor
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(neighbor.label)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(theme.ink.primary)
+                    .lineLimit(1)
+                Spacer()
+                Text(String(format: "%.2f", neighbor.score))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(theme.ink.quaternary)
+            }
+            Text(neighbor.excerpt)
+                .font(.system(size: 10.5))
+                .foregroundStyle(theme.ink.tertiary)
+                .lineLimit(2)
+        }
+        .padding(8)
+        .background(theme.surfaces.surface1, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+    }
+}
+
+private struct ImportQueueItemRow: View {
+    @Environment(\.memoryTheme) private var theme
+    let item: ImportQueueItem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Tag(item.status.rawValue, tone: tone)
+                Text((item.path as NSString).lastPathComponent)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(theme.ink.primary)
+                    .lineLimit(1)
+                Spacer()
+                Text("\(item.progressCompleted)/\(item.progressTotal)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(theme.ink.quaternary)
+            }
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(theme.surfaces.rule.opacity(0.6))
+                    Capsule()
+                        .fill(progressColor)
+                        .frame(width: proxy.size.width * progressFraction)
+                }
+            }
+            .frame(height: 4)
+            Text(item.error ?? item.path)
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(item.error == nil ? theme.ink.quaternary : theme.accents.d)
+                .lineLimit(2)
+                .truncationMode(.middle)
+        }
+        .padding(10)
+        .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
+    }
+
+    private var progressFraction: CGFloat {
+        guard item.progressTotal > 0 else { return item.status == .succeeded ? 1 : 0 }
+        return CGFloat(min(Double(item.progressCompleted) / Double(item.progressTotal), 1))
+    }
+
+    private var progressColor: Color {
+        item.status == .failed ? theme.accents.d : theme.accents.ai
+    }
+
+    private var tone: ThemeTone {
+        switch item.status {
+        case .pending: return .ink
+        case .running: return .ai
+        case .succeeded: return .d
+        case .failed: return .c
+        case .cancelled: return .ink
+        }
+    }
+}
+
+private struct QueueMetric: View {
+    @Environment(\.memoryTheme) private var theme
+    let label: String
+    let value: Int
+
+    init(_ label: String, _ value: Int) {
+        self.label = label
+        self.value = value
+    }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text(label)
+            Text("\(value)")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(theme.ink.tertiary)
+        }
+        .font(.system(size: 11.5))
+        .foregroundStyle(theme.ink.secondary)
+    }
+}
+
+private struct SettingsBand<Content: View>: View {
+    @Environment(\.memoryTheme) private var theme
+    let title: String
+    let content: Content
+
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionLabel(title)
+            content
+        }
+        .padding(12)
+        .background(theme.surfaces.surface2, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(theme.surfaces.rule, lineWidth: 0.5))
+    }
+}
+
+private struct EmptyTableState: View {
+    @Environment(\.memoryTheme) private var theme
+    let message: String
+
+    init(_ message: String) {
+        self.message = message
+    }
+
+    var body: some View {
+        Text(message)
+            .font(.system(size: 12.5))
+            .lineSpacing(3)
+            .foregroundStyle(theme.ink.tertiary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private func shortHash(_ hash: String) -> String {
+    String(hash.prefix(12))
+}
+
+private func timeLabel(_ millis: UInt64) -> String {
+    let date = Date(timeIntervalSince1970: TimeInterval(millis) / 1000)
+    return date.formatted(date: .abbreviated, time: .shortened)
+}
+
+extension CortexRegionSketch: Identifiable {
+    var id: String { regionId }
+}
+
 private struct TopBarActivityStatus: View {
     @Environment(\.memoryTheme) private var theme
     let isBusy: Bool
@@ -1819,16 +2597,19 @@ private struct SidebarSectionRow: View {
         switch section {
         case .library: return "tray.full"
         case .chat: return "message"
+        case .sourceRecall: return "scope"
+        case .cortex: return "brain.head.profile"
+        case .surf: return "point.topleft.down.curvedto.point.bottomright.up"
+        case .importQueue: return "tray.and.arrow.down"
         case .connections: return "link.badge.plus"
-        case .model: return "cpu"
-        case .map: return "globe.americas"
+        case .settings: return "gearshape"
         }
     }
 }
 
-private struct RegionRow: View {
+private struct CortexRegionRow: View {
     @Environment(\.memoryTheme) private var theme
-    let entry: MapEntry
+    let entry: CortexRegionSketch
     let count: Int
     let tone: ThemeTone
 

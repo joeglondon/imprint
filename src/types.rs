@@ -232,6 +232,8 @@ pub struct LibraryManagementSnapshot {
     pub collections: Vec<Collection>,
     pub saved_views: Vec<SavedView>,
     pub saved_trails: Vec<SavedTrail>,
+    #[serde(default)]
+    pub source_artifacts: Vec<SourceArtifact>,
     pub source_type_filters: Vec<SourceTypeFilterSummary>,
 }
 
@@ -630,6 +632,12 @@ pub struct CortexIndex {
     pub artifact_ids: Vec<String>,
     pub regions: Vec<CortexRegionSketch>,
     pub compatibility_map: MemoryMap,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CortexIndexSnapshot {
+    #[serde(default)]
+    pub current: Option<CortexIndex>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

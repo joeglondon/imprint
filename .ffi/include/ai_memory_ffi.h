@@ -7,6 +7,8 @@ char *ai_memory_ingest_paths(const char *store_path, const char *paths_json);
 char *ai_memory_rebuild_memory(const char *store_path);
 char *ai_memory_get_memory_summary(const char *store_path);
 char *ai_memory_get_visualization_snapshot(const char *store_path);
+char *ai_memory_get_library_management_snapshot(const char *store_path);
+char *ai_memory_load_current_cortex_index(const char *store_path);
 char *ai_memory_run_query(const char *store_path, const char *query_json);
 char *ai_memory_grep_region(const char *store_path, const char *region_id, const char *needle);
 char *ai_memory_open_document_excerpt(const char *store_path, const char *chunk_id);

@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import SwiftUI
 
 @MainActor
@@ -6,6 +7,8 @@ final class AppState: ObservableObject {
     @Published var selectedSection: SidebarSection = .library
     @Published var summary = MemorySummary(documents: 0, chunks: 0, regions: 0, links: 0, mapBytes: 0)
     @Published var snapshot: VisualizationSnapshot?
+    @Published var librarySnapshot: LibraryManagementSnapshot?
+    @Published var cortexIndex: CortexIndex?
     @Published var importResult: ImportResult?
     @Published var modelConfig = ModelConfig(
         mode: .local,
@@ -71,6 +74,8 @@ final class AppState: ObservableObject {
             modelConfig = try RustBridge.loadModelConfig(storePath: storePath)
             summary = try RustBridge.getSummary(storePath: storePath)
             snapshot = try? RustBridge.getSnapshot(storePath: storePath)
+            librarySnapshot = try? RustBridge.getLibraryManagementSnapshot(storePath: storePath)
+            cortexIndex = try? RustBridge.loadCurrentCortexIndex(storePath: storePath)
             if let adapterSnapshot = try? RustBridge.loadCortexAdapterSnapshot(storePath: storePath) {
                 applyAdapterSnapshot(adapterSnapshot)
             }
@@ -198,13 +203,17 @@ final class AppState: ObservableObject {
             operation: {
                 let result = try RustBridge.ingestPaths(storePath: storePath, paths: paths)
                 let snapshot = try RustBridge.getSnapshot(storePath: storePath)
-                return (result, snapshot)
+                let library = try RustBridge.getLibraryManagementSnapshot(storePath: storePath)
+                let cortexIndex = try RustBridge.loadCurrentCortexIndex(storePath: storePath)
+                return (result, snapshot, library, cortexIndex)
             },
-            apply: { [weak self] result, snapshot in
+            apply: { [weak self] result, snapshot, library, cortexIndex in
                 guard let self else { return }
                 self.importResult = result
                 self.summary = snapshot.summary
                 self.snapshot = snapshot
+                self.librarySnapshot = library
+                self.cortexIndex = cortexIndex
                 self.cortexAdapterState = result.adapterState
                 self.refreshAdapterSnapshotQuietly()
                 if let adapterState = result.adapterState {
@@ -223,13 +232,17 @@ final class AppState: ObservableObject {
             operation: {
                 let result = try RustBridge.rebuildMemory(storePath: storePath)
                 let snapshot = try RustBridge.getSnapshot(storePath: storePath)
-                return (result, snapshot)
+                let library = try RustBridge.getLibraryManagementSnapshot(storePath: storePath)
+                let cortexIndex = try RustBridge.loadCurrentCortexIndex(storePath: storePath)
+                return (result, snapshot, library, cortexIndex)
             },
-            apply: { [weak self] result, snapshot in
+            apply: { [weak self] result, snapshot, library, cortexIndex in
                 guard let self else { return }
                 self.importResult = result
                 self.summary = snapshot.summary
                 self.snapshot = snapshot
+                self.librarySnapshot = library
+                self.cortexIndex = cortexIndex
                 self.cortexAdapterState = result.adapterState
                 self.refreshAdapterSnapshotQuietly()
                 if let adapterState = result.adapterState {
@@ -248,12 +261,14 @@ final class AppState: ObservableObject {
             operation: {
                 let result = try RustBridge.compileMemoryBrain(storePath: storePath)
                 let snapshot = try RustBridge.loadCortexAdapterSnapshot(storePath: storePath)
-                return (result, snapshot)
+                let cortexIndex = try RustBridge.loadCurrentCortexIndex(storePath: storePath)
+                return (result, snapshot, cortexIndex)
             },
-            apply: { [weak self] result, snapshot in
+            apply: { [weak self] result, snapshot, cortexIndex in
                 guard let self else { return }
                 self.applyAdapterSnapshot(snapshot)
                 self.cortexAdapterState = snapshot.adapterState ?? result.adapterState
+                self.cortexIndex = cortexIndex
                 if let adapterState = self.cortexAdapterState {
                     self.statusMessage = "Compiled \(result.artifactsWritten) artifacts. Adapter \(adapterState.freshness)."
                 } else {
@@ -266,18 +281,22 @@ final class AppState: ObservableObject {
     func refreshSnapshot() {
         let storePath = self.storePath
         runTask(
-            message: "Refreshing map…",
+            message: "Refreshing cortex and source recall…",
             operation: {
                 let summary = try RustBridge.getSummary(storePath: storePath)
                 let snapshot = try RustBridge.getSnapshot(storePath: storePath)
                 let adapterSnapshot = try RustBridge.loadCortexAdapterSnapshot(storePath: storePath)
-                return (summary, snapshot, adapterSnapshot)
+                let library = try RustBridge.getLibraryManagementSnapshot(storePath: storePath)
+                let cortexIndex = try RustBridge.loadCurrentCortexIndex(storePath: storePath)
+                return (summary, snapshot, adapterSnapshot, library, cortexIndex)
             },
-            apply: { [weak self] summary, snapshot, adapterSnapshot in
+            apply: { [weak self] summary, snapshot, adapterSnapshot, library, cortexIndex in
                 guard let self else { return }
                 self.summary = summary
                 self.snapshot = snapshot
                 self.applyAdapterSnapshot(adapterSnapshot)
+                self.librarySnapshot = library
+                self.cortexIndex = cortexIndex
             }
         )
     }
@@ -545,6 +564,26 @@ final class AppState: ObservableObject {
                 self.statusMessage = "Expanded \(mode.rawValue.lowercased()) context."
             }
         )
+    }
+
+    func openSelectedSource() {
+        guard let target = inspector.openTarget else {
+            statusMessage = "Select a source-backed chunk or document first."
+            return
+        }
+        if let url = target.browserUrl ?? (target.kind == .url ? target.uri : nil),
+           let parsed = URL(string: url) {
+            NSWorkspace.shared.open(parsed)
+            statusMessage = "Opened source URL."
+            return
+        }
+        let path = target.originalPath ?? target.path ?? target.managedPath
+        guard let path, !path.isEmpty else {
+            statusMessage = "No local source path available for this selection."
+            return
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        statusMessage = "Opened source file."
     }
 
     func performSearch() {
