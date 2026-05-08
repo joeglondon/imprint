@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub const DATABASE_SCHEMA_VERSION: u32 = 2;
+
 pub trait MemoryStore {
     fn load(&self) -> anyhow::Result<PersistedMemory>;
     fn save(&self, memory: &PersistedMemory) -> anyhow::Result<()>;
@@ -36,6 +38,16 @@ impl FileMemoryStore {
     pub fn list_source_artifacts(&self) -> Result<Vec<SourceArtifact>> {
         let connection = self.connection()?;
         list_source_artifacts(&connection)
+    }
+
+    pub fn schema_status(&self) -> Result<DatabaseSchemaStatus> {
+        let connection = self.connection()?;
+        schema_status(&connection)
+    }
+
+    pub fn integrity_check(&self) -> Result<StoreIntegrityReport> {
+        let connection = self.connection()?;
+        integrity_check(&connection)
     }
 
     pub fn upsert_import_queue_item(&self, item: &ImportQueueItem) -> Result<()> {
@@ -954,7 +966,7 @@ impl FileMemoryStore {
             .with_context(|| format!("creating store root {}", self.root.display()))?;
         let connection = Connection::open(self.data_path())
             .with_context(|| format!("opening store {}", self.data_path().display()))?;
-        migrate_schema(&connection)?;
+        migrate_schema(&connection, &self.root, &self.data_path())?;
         Ok(connection)
     }
 }
@@ -981,7 +993,20 @@ impl MemoryStore for FileMemoryStore {
     }
 }
 
-fn migrate_schema(connection: &Connection) -> Result<()> {
+fn migrate_schema(connection: &Connection, root: &Path, data_path: &Path) -> Result<()> {
+    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    create_schema_metadata_tables(connection)?;
+    let starting_version = current_schema_version(connection)?;
+    let existing_store = data_path.exists() && store_has_user_tables(connection)?;
+    let mut backup_path = None;
+    if existing_store && starting_version < DATABASE_SCHEMA_VERSION {
+        backup_path = Some(backup_database_before_migration(
+            root,
+            data_path,
+            starting_version,
+            DATABASE_SCHEMA_VERSION,
+        )?);
+    }
     connection.execute_batch(
         r#"
         PRAGMA foreign_keys = ON;
@@ -1340,6 +1365,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_chat_context_traces_session ON chat_context_traces(session_id, created_at);
         "#,
     )?;
+    ensure_schema_migration(connection, 1, "baseline memory sqlite schema")?;
     if !table_has_column(connection, "chat_context_traces", "cortex_trace_json")? {
         connection.execute(
             "ALTER TABLE chat_context_traces ADD COLUMN cortex_trace_json TEXT",
@@ -1396,7 +1422,240 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             )?;
         }
     }
+    for name in [
+        "source artifacts compatibility",
+        "cortex index version compatibility",
+        "adapter state version compatibility",
+        "attention and access history compatibility",
+        "managed storage compatibility",
+    ] {
+        ensure_schema_migration(connection, 2, name)?;
+    }
+    set_schema_version(connection, DATABASE_SCHEMA_VERSION)?;
+    if let Some(path) = backup_path {
+        set_metadata_value(
+            connection,
+            "last_pre_migration_backup",
+            &path.display().to_string(),
+        )?;
+    }
     Ok(())
+}
+
+fn create_schema_metadata_tables(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS store_metadata (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            applied_at INTEGER NOT NULL,
+            PRIMARY KEY (version, name)
+        );
+        "#,
+    )?;
+    Ok(())
+}
+
+fn current_schema_version(connection: &Connection) -> Result<u32> {
+    if let Some(raw) = metadata_value(connection, "database_schema_version")? {
+        return Ok(serde_json::from_str::<u32>(&raw)?);
+    }
+    Ok(0)
+}
+
+fn set_schema_version(connection: &Connection, version: u32) -> Result<()> {
+    set_metadata_value(connection, "database_schema_version", &version)
+}
+
+fn metadata_value(connection: &Connection, key: &str) -> Result<Option<String>> {
+    connection
+        .query_row(
+            "SELECT value_json FROM store_metadata WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn set_metadata_value<T: serde::Serialize>(
+    connection: &Connection,
+    key: &str,
+    value: &T,
+) -> Result<()> {
+    connection.execute(
+        "INSERT OR REPLACE INTO store_metadata (key, value_json) VALUES (?1, ?2)",
+        params![key, to_json(value)?],
+    )?;
+    Ok(())
+}
+
+fn ensure_schema_migration(connection: &Connection, version: u32, name: &str) -> Result<()> {
+    connection.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
+         VALUES (?1, ?2, ?3)",
+        params![version as i64, name, now_millis() as i64],
+    )?;
+    Ok(())
+}
+
+fn store_has_user_tables(connection: &Connection) -> Result<bool> {
+    let count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table'
+           AND name NOT LIKE 'sqlite_%'
+           AND name NOT IN ('store_metadata', 'schema_migrations')",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn backup_database_before_migration(
+    root: &Path,
+    data_path: &Path,
+    from_version: u32,
+    to_version: u32,
+) -> Result<PathBuf> {
+    let backup_dir = root.join("backups").join("migrations");
+    fs::create_dir_all(&backup_dir)
+        .with_context(|| format!("creating migration backup dir {}", backup_dir.display()))?;
+    let backup_path = backup_dir.join(format!(
+        "memory-v{from_version}-to-v{to_version}-{}.sqlite",
+        now_millis()
+    ));
+    fs::copy(data_path, &backup_path).with_context(|| {
+        format!(
+            "backing up store {} to {}",
+            data_path.display(),
+            backup_path.display()
+        )
+    })?;
+    Ok(backup_path)
+}
+
+fn schema_status(connection: &Connection) -> Result<DatabaseSchemaStatus> {
+    let current_version = current_schema_version(connection)?;
+    let migrations = list_schema_migrations(connection)?;
+    let last_backup_path = metadata_value(connection, "last_pre_migration_backup")?
+        .map(|raw| serde_json::from_str::<String>(&raw))
+        .transpose()?;
+    Ok(DatabaseSchemaStatus {
+        current_version,
+        latest_version: DATABASE_SCHEMA_VERSION,
+        migrations,
+        last_backup_path,
+    })
+}
+
+fn list_schema_migrations(connection: &Connection) -> Result<Vec<DatabaseMigrationRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT version, name, applied_at FROM schema_migrations ORDER BY version, name",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(DatabaseMigrationRecord {
+            version: row.get::<_, i64>(0)? as u32,
+            name: row.get(1)?,
+            applied_at: row.get::<_, i64>(2)? as u64,
+        })
+    })?;
+    collect_rows(rows)
+}
+
+fn integrity_check(connection: &Connection) -> Result<StoreIntegrityReport> {
+    let schema = schema_status(connection)?;
+    let sqlite_integrity: String =
+        connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    let foreign_key_violations = count_foreign_key_violations(connection)?;
+    let documents = table_count(connection, "documents")?;
+    let chunks = table_count(connection, "chunks")?;
+    let source_artifacts = table_count(connection, "source_artifacts")?;
+    let cortex_indexes = table_count(connection, "cortex_indexes")?;
+    let attention_marks = table_count(connection, "attention_marks")?;
+    let memory_accesses = table_count(connection, "memory_accesses")?;
+    let missing_managed_files = missing_managed_files(connection)?;
+    let mut warnings = Vec::new();
+    if schema.current_version != DATABASE_SCHEMA_VERSION {
+        warnings.push(format!(
+            "database schema is {}, latest is {}",
+            schema.current_version, DATABASE_SCHEMA_VERSION
+        ));
+    }
+    if sqlite_integrity != "ok" {
+        warnings.push(format!(
+            "sqlite integrity_check returned {sqlite_integrity}"
+        ));
+    }
+    if foreign_key_violations > 0 {
+        warnings.push(format!(
+            "{foreign_key_violations} foreign key violation(s) reported"
+        ));
+    }
+    if !missing_managed_files.is_empty() {
+        warnings.push(format!(
+            "{} managed source file(s) are missing",
+            missing_managed_files.len()
+        ));
+    }
+    Ok(StoreIntegrityReport {
+        ok: warnings.is_empty(),
+        schema,
+        sqlite_integrity,
+        foreign_key_violations,
+        documents,
+        chunks,
+        source_artifacts,
+        cortex_indexes,
+        attention_marks,
+        memory_accesses,
+        missing_managed_files,
+        warnings,
+    })
+}
+
+fn count_foreign_key_violations(connection: &Connection) -> Result<usize> {
+    let mut statement = connection.prepare("PRAGMA foreign_key_check")?;
+    let mut rows = statement.query([])?;
+    let mut count = 0;
+    while rows.next()?.is_some() {
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn table_count(connection: &Connection, table: &str) -> Result<usize> {
+    let count: i64 = connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+        row.get(0)
+    })?;
+    Ok(count as usize)
+}
+
+fn missing_managed_files(connection: &Connection) -> Result<Vec<String>> {
+    let mut statement = connection.prepare(
+        "SELECT managed_path FROM source_artifacts
+         WHERE managed_path IS NOT NULL AND managed_path != ''
+         ORDER BY managed_path",
+    )?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let mut missing = Vec::new();
+    for row in rows {
+        let path = row?;
+        if !Path::new(&path).is_file() {
+            missing.push(path);
+        }
+    }
+    Ok(missing)
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
@@ -2214,4 +2473,129 @@ fn from_optional_json<T: serde::de::DeserializeOwned>(
     raw: Option<String>,
 ) -> rusqlite::Result<Option<T>> {
     raw.map(from_json).transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn temp_store_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("ai-memory-store-{name}"));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create temp root");
+        root
+    }
+
+    #[test]
+    fn migration_versions_legacy_store_and_writes_backup() {
+        let root = temp_store_root("legacy-migration");
+        let db = root.join("memory.sqlite");
+        let connection = Connection::open(&db).expect("open legacy db");
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE documents (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    source_anchor_json TEXT,
+                    content_hash TEXT,
+                    parser_version INTEGER
+                );
+                CREATE TABLE source_artifacts (
+                    id TEXT PRIMARY KEY,
+                    source_type TEXT NOT NULL,
+                    storage_mode_json TEXT NOT NULL,
+                    original_path TEXT NOT NULL,
+                    current_path TEXT,
+                    file_hash TEXT NOT NULL,
+                    parser_version INTEGER NOT NULL,
+                    imported_at INTEGER NOT NULL,
+                    provenance_json TEXT NOT NULL
+                );
+                CREATE TABLE web_findings (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT,
+                    query TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    retrieved_at INTEGER NOT NULL,
+                    confidence REAL NOT NULL,
+                    actor TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    provenance_json TEXT NOT NULL
+                );
+                CREATE TABLE source_anchors (
+                    id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL,
+                    chunk_id TEXT,
+                    path TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    start_offset INTEGER NOT NULL,
+                    end_offset INTEGER NOT NULL,
+                    page INTEGER,
+                    section TEXT,
+                    parser_version INTEGER NOT NULL
+                );
+                "#,
+            )
+            .expect("create legacy tables");
+        drop(connection);
+
+        let store = FileMemoryStore::new(&root);
+        let status = store.schema_status().expect("migrate schema");
+        assert_eq!(status.current_version, DATABASE_SCHEMA_VERSION);
+        assert!(status
+            .migrations
+            .iter()
+            .any(|record| record.name == "source artifacts compatibility"));
+        let backup = status.last_backup_path.expect("backup path");
+        assert!(Path::new(&backup).is_file());
+
+        let migrated = Connection::open(&db).expect("open migrated db");
+        assert!(table_has_column(&migrated, "source_artifacts", "managed_path").expect("column"));
+        assert!(table_has_column(&migrated, "source_artifacts", "trust_json").expect("column"));
+        assert!(table_has_column(&migrated, "web_findings", "source_trust_json").expect("column"));
+        assert!(
+            table_has_column(&migrated, "source_anchors", "source_artifact_id").expect("column")
+        );
+    }
+
+    #[test]
+    fn integrity_check_reports_managed_storage_gaps() {
+        let root = temp_store_root("integrity");
+        let store = FileMemoryStore::new(&root);
+        let missing = root.join("managed").join("missing.txt");
+        let artifact = SourceArtifact {
+            id: "source-artifact:test".into(),
+            source_type: "local_file".into(),
+            trust: SourceTrustPolicy::default(),
+            storage_mode: SourceStorageMode::ReferenceWithManagedCopy,
+            original_path: "/tmp/original.txt".into(),
+            current_path: Some(missing.display().to_string()),
+            managed_path: Some(missing.display().to_string()),
+            file_hash: "hash".into(),
+            parser_version: 1,
+            imported_at: 1,
+            provenance: ProvenanceRecord {
+                actor: "test".into(),
+                reason: "integrity fixture".into(),
+                created_at: 1,
+                source_refs: vec!["/tmp/original.txt".into()],
+            },
+        };
+        let connection = store.connection().expect("connection");
+        insert_source_artifact(&connection, &artifact).expect("insert artifact");
+
+        let report = store.integrity_check().expect("integrity");
+        assert!(!report.ok);
+        assert_eq!(report.sqlite_integrity, "ok");
+        assert_eq!(
+            report.missing_managed_files,
+            vec![missing.display().to_string()]
+        );
+    }
 }

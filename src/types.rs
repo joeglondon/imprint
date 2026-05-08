@@ -255,6 +255,38 @@ pub struct LibraryBackupManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DatabaseSchemaStatus {
+    pub current_version: u32,
+    pub latest_version: u32,
+    pub migrations: Vec<DatabaseMigrationRecord>,
+    #[serde(default)]
+    pub last_backup_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DatabaseMigrationRecord {
+    pub version: u32,
+    pub name: String,
+    pub applied_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoreIntegrityReport {
+    pub ok: bool,
+    pub schema: DatabaseSchemaStatus,
+    pub sqlite_integrity: String,
+    pub foreign_key_violations: usize,
+    pub documents: usize,
+    pub chunks: usize,
+    pub source_artifacts: usize,
+    pub cortex_indexes: usize,
+    pub attention_marks: usize,
+    pub memory_accesses: usize,
+    pub missing_managed_files: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SourceTrustKind {
     LocalSource,
     UserAuthoredNote,

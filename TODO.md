@@ -537,20 +537,20 @@ Goal: preserve local-first behavior while preparing for a cloud-backed memory li
 
 Goal: evolve schemas without breaking existing memory stores.
 
-- [ ] Add explicit database schema version.
-- [ ] Add migrations for:
-  - [ ] source artifacts
-  - [ ] cortex index versions
-  - [ ] adapter state versions
-  - [ ] attention/access history
-  - [ ] managed storage
-- [ ] Keep compatibility aliases:
-  - [ ] `map`
-  - [ ] `memory_compile`
-  - [ ] old FFI payloads where practical
-- [ ] Add migration tests from older stores.
-- [ ] Add backup-before-migration behavior.
-- [ ] Add store integrity check command.
+- [x] Add explicit database schema version.
+- [x] Add migrations for:
+  - [x] source artifacts
+  - [x] cortex index versions
+  - [x] adapter state versions
+  - [x] attention/access history
+  - [x] managed storage
+- [x] Keep compatibility aliases:
+  - [x] `map`
+  - [x] `memory_compile`
+  - [x] old FFI payloads where practical
+- [x] Add migration tests from older stores.
+- [x] Add backup-before-migration behavior.
+- [x] Add store integrity check command.
 
 ## Phase 16: Definition Of Done For The Complete Vision
 

@@ -33,6 +33,10 @@ enum Command {
         #[command(subcommand)]
         command: LibraryCommand,
     },
+    Store {
+        #[command(subcommand)]
+        command: StoreCommand,
+    },
     Cortex {
         #[command(subcommand)]
         command: CortexCommand,
@@ -245,6 +249,13 @@ enum LibraryCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum StoreCommand {
+    Status,
+    Migrate,
+    Integrity,
+}
+
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let store = FileMemoryStore::new(cli.store);
@@ -349,6 +360,16 @@ pub fn run() -> anyhow::Result<()> {
             LibraryCommand::Restore { source } => {
                 let manifest = crate::app::import_library_backup(&source, store.root())?;
                 println!("{}", serde_json::to_string_pretty(&manifest)?);
+            }
+        },
+        Command::Store { command } => match command {
+            StoreCommand::Status | StoreCommand::Migrate => {
+                let status = store.schema_status()?;
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            }
+            StoreCommand::Integrity => {
+                let report = store.integrity_check()?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
             }
         },
         Command::Cortex { command } => match command {
