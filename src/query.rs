@@ -302,13 +302,18 @@ impl MemoryQueryEngine {
         let query_embedding = embedder.embed(&request.text)?;
         let mut attention_scores = attention_scores(attention_marks);
         merge_access_scores(&mut attention_scores, memory_accesses, now);
-        let region_attention_scores = attention_scores
+        let mut region_attention_scores = attention_scores
             .iter()
             .filter_map(|(key, score)| {
                 key.strip_prefix("region:")
                     .map(|region_id| (region_id.to_string(), *score))
             })
             .collect::<HashMap<_, _>>();
+        merge_active_context_region_scores(
+            &mut region_attention_scores,
+            &memory.regions,
+            &attention_scores,
+        );
         let semantic_scores = memory
             .regions
             .iter()
@@ -490,13 +495,18 @@ impl MemoryQueryEngine {
         let query_embedding = embedder.embed(query)?;
         let mut attention_scores = attention_scores(attention_marks);
         merge_access_scores(&mut attention_scores, memory_accesses, now);
-        let region_attention_scores = attention_scores
+        let mut region_attention_scores = attention_scores
             .iter()
             .filter_map(|(key, score)| {
                 key.strip_prefix("region:")
                     .map(|region_id| (region_id.to_string(), *score))
             })
             .collect::<HashMap<_, _>>();
+        merge_active_context_region_scores(
+            &mut region_attention_scores,
+            &memory.regions,
+            &attention_scores,
+        );
         let semantic_scores = memory
             .regions
             .iter()
@@ -570,9 +580,69 @@ fn apply_recall_score(
             ))
             .copied()
             .unwrap_or_default()
-        + chat_session_attention_score(document, chunk, attention_scores);
+        + chat_session_attention_score(document, chunk, attention_scores)
+        + active_context_attention_score(document, chunk, attention_scores);
     let source_signal = source_recall_signal(document, chunk, now);
     (base_score + boost.clamp(-0.45, 0.55) + source_signal).max(0.001)
+}
+
+fn merge_active_context_region_scores(
+    region_attention_scores: &mut HashMap<RegionId, f32>,
+    regions: &[Region],
+    attention_scores: &HashMap<String, f32>,
+) {
+    for region in regions {
+        let score = active_context_filter_score(&region.filters, attention_scores);
+        if score != 0.0 {
+            *region_attention_scores
+                .entry(region.id.clone())
+                .or_default() += score;
+        }
+    }
+}
+
+fn active_context_filter_score(
+    filters: &BTreeMap<String, String>,
+    attention_scores: &HashMap<String, f32>,
+) -> f32 {
+    let mut score = 0.0;
+    score += metadata_map_context_score(
+        filters,
+        &["chat_session_id"],
+        &AttentionTargetKind::ChatSession,
+        attention_scores,
+    );
+    score += metadata_map_context_score(
+        filters,
+        &["session_id"],
+        &AttentionTargetKind::Session,
+        attention_scores,
+    );
+    score += metadata_map_context_score(
+        filters,
+        &["project_id"],
+        &AttentionTargetKind::Project,
+        attention_scores,
+    );
+    score += metadata_map_context_score(
+        filters,
+        &["workspace_id", "workspace_folder"],
+        &AttentionTargetKind::Workspace,
+        attention_scores,
+    );
+    score += metadata_map_context_score(
+        filters,
+        &["collection_id"],
+        &AttentionTargetKind::Collection,
+        attention_scores,
+    );
+    score += metadata_map_context_score(
+        filters,
+        &["task_id"],
+        &AttentionTargetKind::Task,
+        attention_scores,
+    );
+    score.clamp(-0.35, 0.45)
 }
 
 fn chat_session_attention_score(
@@ -590,6 +660,130 @@ fn chat_session_attention_score(
                 .copied()
         })
         .unwrap_or_default()
+}
+
+fn active_context_attention_score(
+    document: &Document,
+    chunk: &Chunk,
+    attention_scores: &HashMap<String, f32>,
+) -> f32 {
+    let mut score = 0.0;
+    score += metadata_context_score(
+        document,
+        chunk,
+        &["session_id"],
+        &AttentionTargetKind::Session,
+        attention_scores,
+    );
+    score += metadata_context_score(
+        document,
+        chunk,
+        &["project_id"],
+        &AttentionTargetKind::Project,
+        attention_scores,
+    );
+    score += metadata_context_score(
+        document,
+        chunk,
+        &["workspace_id", "workspace_folder"],
+        &AttentionTargetKind::Workspace,
+        attention_scores,
+    );
+    score += metadata_context_score(
+        document,
+        chunk,
+        &["collection_id"],
+        &AttentionTargetKind::Collection,
+        attention_scores,
+    );
+    score += metadata_context_score(
+        document,
+        chunk,
+        &["task_id"],
+        &AttentionTargetKind::Task,
+        attention_scores,
+    );
+    score.clamp(-0.28, 0.34)
+}
+
+fn metadata_context_score(
+    document: &Document,
+    chunk: &Chunk,
+    keys: &[&str],
+    target_kind: &AttentionTargetKind,
+    attention_scores: &HashMap<String, f32>,
+) -> f32 {
+    let mut score = 0.0;
+    for value in metadata_context_values(document, chunk, keys) {
+        score += attention_scores
+            .get(&attention_key(target_kind, &value))
+            .copied()
+            .unwrap_or_default();
+    }
+    score
+}
+
+fn metadata_map_context_score(
+    metadata: &BTreeMap<String, String>,
+    keys: &[&str],
+    target_kind: &AttentionTargetKind,
+    attention_scores: &HashMap<String, f32>,
+) -> f32 {
+    let mut score = 0.0;
+    for key in keys {
+        if let Some(value) = metadata.get(*key) {
+            for value in split_context_values(value) {
+                score += attention_scores
+                    .get(&attention_key(target_kind, &value))
+                    .copied()
+                    .unwrap_or_default();
+            }
+        }
+    }
+    score
+}
+
+fn metadata_context_values(document: &Document, chunk: &Chunk, keys: &[&str]) -> Vec<String> {
+    let mut values = Vec::new();
+    for key in keys {
+        if let Some(value) = metadata_value(document, chunk, key) {
+            values.extend(split_context_values(&value));
+        }
+    }
+    if keys.contains(&"workspace_folder") {
+        for key in ["path", "current_path", "managed_path", "managed_copy_path"] {
+            if let Some(path) = metadata_value(document, chunk, key) {
+                if let Some(folder) = workspace_folder_from_path(&path) {
+                    values.push(folder);
+                }
+            }
+        }
+    }
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn split_context_values(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn workspace_folder_from_path(path: &str) -> Option<String> {
+    if path.starts_with("imprint://") || path.starts_with("http://") || path.starts_with("https://")
+    {
+        return None;
+    }
+    std::path::Path::new(path)
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn source_recall_signal(document: &Document, chunk: &Chunk, now: u64) -> f32 {
@@ -718,6 +912,11 @@ fn merge_access_scores(scores: &mut HashMap<String, f32>, accesses: &[MemoryAcce
 fn attention_key(kind: &AttentionTargetKind, target_id: &str) -> String {
     let kind = match kind {
         AttentionTargetKind::ChatSession => "chat_session",
+        AttentionTargetKind::Session => "session",
+        AttentionTargetKind::Project => "project",
+        AttentionTargetKind::Workspace => "workspace",
+        AttentionTargetKind::Collection => "collection",
+        AttentionTargetKind::Task => "task",
         AttentionTargetKind::ChatMessage => "chat_message",
         AttentionTargetKind::TranscriptChunk => "transcript_chunk",
         AttentionTargetKind::DerivedMemory => "derived_memory",
@@ -1290,6 +1489,222 @@ mod tests {
             Some("chunk-active-session")
         );
         assert!(result.hits[0].score > result.hits[1].score);
+    }
+
+    #[test]
+    fn execute_uses_active_project_attention_as_context() {
+        let embedder = crate::index::HashEmbedder::default();
+        let text = "shared release planning memory";
+        let embedding = embedder.embed(text).expect("embedding");
+        let document = |id: &str, project_id: &str| {
+            let mut metadata = BTreeMap::new();
+            metadata.insert("project_id".into(), project_id.into());
+            Document {
+                id: id.into(),
+                title: id.into(),
+                text: text.into(),
+                metadata,
+                source_anchor: None,
+                content_hash: None,
+                parser_version: None,
+            }
+        };
+        let chunk = |id: &str, document_id: &str, ordinal: usize| Chunk {
+            id: id.into(),
+            document_id: document_id.into(),
+            region_id: "region".into(),
+            ordinal,
+            start: 0,
+            end: text.chars().count(),
+            text: text.into(),
+            metadata: BTreeMap::new(),
+            source_anchor: None,
+            embedding: embedding.clone(),
+            embedding_text_hash: None,
+            embedding_provider: None,
+            embedding_model: None,
+            embedding_endpoint: None,
+            embedding_dimension: None,
+            chunking_version: None,
+        };
+        let memory = PersistedMemory {
+            documents: vec![
+                document("doc-other-project", "project-old"),
+                document("doc-active-project", "project-active"),
+            ],
+            chunks: vec![
+                chunk("chunk-other-project", "doc-other-project", 0),
+                chunk("chunk-active-project", "doc-active-project", 1),
+            ],
+            regions: vec![Region {
+                id: "region".into(),
+                label: "Region".into(),
+                summary: text.into(),
+                filters: BTreeMap::new(),
+                chunk_ids: vec!["chunk-other-project".into(), "chunk-active-project".into()],
+                centroid: embedding,
+                neighbors: Vec::new(),
+            }],
+            links: Vec::new(),
+            memory_map: Some(MemoryMap {
+                budget_bytes: 2048,
+                serialized: String::new(),
+                entries: vec![entry("region", "Region", text)],
+            }),
+        };
+        let ann = crate::index::RegionIndexer.rebuild(&memory.chunks, &memory.regions);
+        let marks = vec![AttentionMark {
+            id: "attention-active-project".into(),
+            target_id: "project-active".into(),
+            target_kind: AttentionTargetKind::Project,
+            action: AttentionAction::Active,
+            reason: "Current project should shape source recall.".into(),
+            actor: "test".into(),
+            created_at: 1,
+            reverted_at: None,
+        }];
+
+        let result = MemoryQueryEngine
+            .execute_with_attention(
+                &embedder,
+                &memory,
+                &ann,
+                QueryRequest {
+                    text: text.into(),
+                    filters: BTreeMap::new(),
+                    max_regions: 1,
+                    max_chunks: 2,
+                },
+                &marks,
+            )
+            .expect("query");
+
+        assert_eq!(
+            result.hits.first().map(|hit| hit.chunk_id.as_str()),
+            Some("chunk-active-project")
+        );
+        assert!(result.hits[0].score > result.hits[1].score);
+    }
+
+    #[test]
+    fn route_uses_active_workspace_attention_as_context() {
+        let embedder = crate::index::HashEmbedder::default();
+        let text = "shared operating note";
+        let embedding = embedder.embed(text).expect("embedding");
+        let document = |id: &str, workspace_id: &str| {
+            let mut metadata = BTreeMap::new();
+            metadata.insert("workspace_id".into(), workspace_id.into());
+            Document {
+                id: id.into(),
+                title: id.into(),
+                text: text.into(),
+                metadata,
+                source_anchor: None,
+                content_hash: None,
+                parser_version: None,
+            }
+        };
+        let chunk = |id: &str, document_id: &str, region_id: &str, ordinal: usize| Chunk {
+            id: id.into(),
+            document_id: document_id.into(),
+            region_id: region_id.into(),
+            ordinal,
+            start: 0,
+            end: text.chars().count(),
+            text: text.into(),
+            metadata: BTreeMap::new(),
+            source_anchor: None,
+            embedding: embedding.clone(),
+            embedding_text_hash: None,
+            embedding_provider: None,
+            embedding_model: None,
+            embedding_endpoint: None,
+            embedding_dimension: None,
+            chunking_version: None,
+        };
+        let mut old_filters = BTreeMap::new();
+        old_filters.insert("workspace_id".into(), "workspace-old".into());
+        let mut active_filters = BTreeMap::new();
+        active_filters.insert("workspace_id".into(), "workspace-active".into());
+        let memory = PersistedMemory {
+            documents: vec![
+                document("doc-old-workspace", "workspace-old"),
+                document("doc-active-workspace", "workspace-active"),
+            ],
+            chunks: vec![
+                chunk("chunk-old-workspace", "doc-old-workspace", "region-old", 0),
+                chunk(
+                    "chunk-active-workspace",
+                    "doc-active-workspace",
+                    "region-active",
+                    1,
+                ),
+            ],
+            regions: vec![
+                Region {
+                    id: "region-old".into(),
+                    label: "Old Workspace".into(),
+                    summary: text.into(),
+                    filters: old_filters,
+                    chunk_ids: vec!["chunk-old-workspace".into()],
+                    centroid: embedding.clone(),
+                    neighbors: Vec::new(),
+                },
+                Region {
+                    id: "region-active".into(),
+                    label: "Active Workspace".into(),
+                    summary: text.into(),
+                    filters: active_filters,
+                    chunk_ids: vec!["chunk-active-workspace".into()],
+                    centroid: embedding.clone(),
+                    neighbors: Vec::new(),
+                },
+            ],
+            links: Vec::new(),
+            memory_map: Some(MemoryMap {
+                budget_bytes: 2048,
+                serialized: String::new(),
+                entries: vec![
+                    entry("region-old", "Old Workspace", text),
+                    entry("region-active", "Active Workspace", text),
+                ],
+            }),
+        };
+        let ann = crate::index::RegionIndexer.rebuild(&memory.chunks, &memory.regions);
+        let marks = vec![AttentionMark {
+            id: "attention-active-workspace".into(),
+            target_id: "workspace-active".into(),
+            target_kind: AttentionTargetKind::Workspace,
+            action: AttentionAction::Active,
+            reason: "Current workspace should shape route selection.".into(),
+            actor: "test".into(),
+            created_at: 1,
+            reverted_at: None,
+        }];
+
+        let result = MemoryQueryEngine
+            .execute_with_attention(
+                &embedder,
+                &memory,
+                &ann,
+                QueryRequest {
+                    text: text.into(),
+                    filters: BTreeMap::new(),
+                    max_regions: 1,
+                    max_chunks: 2,
+                },
+                &marks,
+            )
+            .expect("query");
+
+        assert_eq!(
+            result.routed.region_ids.first().map(String::as_str),
+            Some("region-active")
+        );
+        assert_eq!(
+            result.hits.first().map(|hit| hit.chunk_id.as_str()),
+            Some("chunk-active-workspace")
+        );
     }
 
     #[test]

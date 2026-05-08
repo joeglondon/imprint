@@ -2190,6 +2190,11 @@ fn path_tail(path: &str) -> String {
 fn attention_kind_label(kind: &AttentionTargetKind) -> &'static str {
     match kind {
         AttentionTargetKind::ChatSession => "chat_session",
+        AttentionTargetKind::Session => "session",
+        AttentionTargetKind::Project => "project",
+        AttentionTargetKind::Workspace => "workspace",
+        AttentionTargetKind::Collection => "collection",
+        AttentionTargetKind::Task => "task",
         AttentionTargetKind::ChatMessage => "chat_message",
         AttentionTargetKind::TranscriptChunk => "transcript_chunk",
         AttentionTargetKind::DerivedMemory => "derived_memory",

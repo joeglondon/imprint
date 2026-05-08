@@ -576,6 +576,11 @@ pub struct AgentLinkWrite {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AttentionTargetKind {
     ChatSession,
+    Session,
+    Project,
+    Workspace,
+    Collection,
+    Task,
     ChatMessage,
     TranscriptChunk,
     DerivedMemory,

@@ -4796,6 +4796,11 @@ fn attention_target_session_id(
 ) -> anyhow::Result<Option<String>> {
     match target_kind {
         AttentionTargetKind::ChatSession => Ok(Some(target_id.into())),
+        AttentionTargetKind::Session
+        | AttentionTargetKind::Project
+        | AttentionTargetKind::Workspace
+        | AttentionTargetKind::Collection
+        | AttentionTargetKind::Task => Ok(None),
         AttentionTargetKind::ChatMessage => {
             Ok(store.list_chat_sessions()?.into_iter().find_map(|session| {
                 store

@@ -371,7 +371,7 @@ fn tools() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "target_id": { "type": "string" },
-                    "target_kind": { "type": "string", "enum": ["chat_session", "chat_message", "transcript_chunk", "derived_memory", "web_finding", "document", "chunk", "region", "link"] },
+                    "target_kind": { "type": "string", "enum": ["chat_session", "session", "project", "workspace", "collection", "task", "chat_message", "transcript_chunk", "derived_memory", "web_finding", "document", "chunk", "region", "link"] },
                     "action": { "type": "string", "enum": ["active", "hot", "warm", "cold", "promote", "decay", "pin", "suppress"] },
                     "reason": { "type": "string" },
                     "actor": { "type": "string" }
@@ -477,6 +477,11 @@ fn attention_target_kind_arg(args: &Value) -> anyhow::Result<AttentionTargetKind
         .as_str()
     {
         "chat_session" => Ok(AttentionTargetKind::ChatSession),
+        "session" => Ok(AttentionTargetKind::Session),
+        "project" => Ok(AttentionTargetKind::Project),
+        "workspace" => Ok(AttentionTargetKind::Workspace),
+        "collection" => Ok(AttentionTargetKind::Collection),
+        "task" => Ok(AttentionTargetKind::Task),
         "chat_message" => Ok(AttentionTargetKind::ChatMessage),
         "transcript_chunk" => Ok(AttentionTargetKind::TranscriptChunk),
         "derived_memory" => Ok(AttentionTargetKind::DerivedMemory),

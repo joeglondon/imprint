@@ -425,6 +425,11 @@ struct AgentLinkMemory: Codable, Equatable, Identifiable {
 
 enum AttentionTargetKind: String, Codable, Equatable {
     case chatSession = "ChatSession"
+    case session = "Session"
+    case project = "Project"
+    case workspace = "Workspace"
+    case collection = "Collection"
+    case task = "Task"
     case chatMessage = "ChatMessage"
     case transcriptChunk = "TranscriptChunk"
     case derivedMemory = "DerivedMemory"

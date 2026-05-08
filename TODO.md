@@ -28,7 +28,7 @@ Already implemented or partially implemented:
 - [x] Import/rebuild triggers cortex compile and adapter dataset preparation.
 - [x] MLX-compatible prepared dataset manifest with source dataset hash.
 - [x] Adapter state exposes separate data freshness, training status, and activation status.
-- [x] Attention marks, access history, source metadata, and active chat sessions influence recall ranking.
+- [x] Attention marks, access history, source metadata, and active chat/project/workspace/collection/task context influence recall ranking.
 - [x] Source artifacts are persisted as first-class provenance records with stable file-hash IDs for local imports.
 - [x] Local imports keep a hidden managed source copy and reconcile moves/renames by content hash.
 - [x] Surf/open/expand results carry durable source open targets for local offsets, Markdown headings, PDF pages, and web URLs.
@@ -313,12 +313,12 @@ Goal: make attention inspectable, reversible, and useful instead of hidden scori
   - [x] when
   - [x] source target
   - [x] revert action
-- [ ] Add active context models:
-  - [ ] active chat
-  - [ ] active project
-  - [ ] active workspace/folder
-  - [ ] active collection
-  - [ ] current task/session
+- [x] Add active context models:
+  - [x] active chat
+  - [x] active project
+  - [x] active workspace/folder
+  - [x] active collection
+  - [x] current task/session
 - [ ] Add source freshness policy:
   - [ ] retrieved_at
   - [ ] freshness_expires_at
