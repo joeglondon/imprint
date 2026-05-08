@@ -459,26 +459,26 @@ Goal: make web search a memory expansion path, not disposable prompt context.
 
 Goal: make personal latent memory controllable and reversible enough to trust.
 
-- [ ] Add privacy levels:
-  - [ ] private user memory
-  - [ ] shared project memory
-  - [ ] global/reference memory
-  - [ ] excluded from adapter training
-- [ ] Add per-source training opt-out.
-- [ ] Add secret detection before training export.
-- [ ] Add "forget this" workflow:
-  - [ ] remove from search
-  - [ ] remove from cortex index
-  - [ ] exclude from future datasets
-  - [ ] mark existing adapter stale/contaminated
-  - [ ] retrain replacement adapter
-- [ ] Add adapter provenance:
-  - [ ] which corpus hash
-  - [ ] which sources included
-  - [ ] which sources excluded
-  - [ ] train/eval files
-- [ ] Add local-only guarantees for private adapters.
-- [ ] Add export controls and warnings when training data leaves local machine.
+- [x] Add privacy levels:
+  - [x] private user memory
+  - [x] shared project memory
+  - [x] global/reference memory
+  - [x] excluded from adapter training
+- [x] Add per-source training opt-out.
+- [x] Add secret detection before training export.
+- [x] Add "forget this" workflow:
+  - [x] remove from search
+  - [x] remove from cortex index
+  - [x] exclude from future datasets
+  - [x] mark existing adapter stale/contaminated
+  - [x] retrain replacement adapter
+- [x] Add adapter provenance:
+  - [x] which corpus hash
+  - [x] which sources included
+  - [x] which sources excluded
+  - [x] train/eval files
+- [x] Add local-only guarantees for private adapters.
+- [x] Add export controls and warnings when training data leaves local machine.
 
 ## Phase 13: Evaluation Harness
 

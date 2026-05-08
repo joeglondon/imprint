@@ -843,10 +843,17 @@ pub fn delete_library_items(
         if let Some(mut state) = store.load_cortex_adapter_state()? {
             state.freshness = "stale".into();
             state.data_freshness = "stale".into();
-            state.reason = Some("Library deletion changed the source corpus.".into());
+            state.reason = Some(
+                "Forgotten source changed the source corpus; existing adapter may be contaminated."
+                    .into(),
+            );
             state.checked_at = now_millis();
             store.save_cortex_adapter_state(&state)?;
             adapter_marked_stale = true;
+        }
+        let refreshed = compile_memory_brain(store_root)?;
+        if let Some(state) = refreshed.adapter_state.as_ref() {
+            let _ = maybe_start_cortex_adapter_training_after_refresh(store_root, &config, state);
         }
     }
     Ok(LibraryDeleteResult {
@@ -2152,6 +2159,12 @@ pub fn compile_memory_brain(store_root: &Path) -> anyhow::Result<BrainCompileRes
         attention_marks: store.list_attention_marks(None).unwrap_or_default(),
         memory_accesses: store.list_memory_accesses(None, None).unwrap_or_default(),
         chat_context_traces: store.list_all_chat_context_traces().unwrap_or_default(),
+        privacy_excluded_sources: memory
+            .documents
+            .iter()
+            .filter(|document| document_excluded_from_cortex_training(document))
+            .map(|document| document.id.clone())
+            .collect(),
     };
     let export_files = crate::training::write_training_exports(store_root, &export_context)?;
     let source_dataset_hash = crate::training::training_source_hash(&store_root.join("training"))?;
@@ -2452,6 +2465,7 @@ fn memory_for_brain_compile(
         .documents
         .iter()
         .filter(|document| !is_compiler_generated_document(document))
+        .filter(|document| !document_excluded_from_cortex_training(document))
         .cloned()
         .collect::<Vec<_>>();
     if source_documents.len() == memory.documents.len() {
@@ -2460,6 +2474,56 @@ fn memory_for_brain_compile(
     let (source_memory, _) =
         rebuild_from_documents(store_root, source_documents, &memory.chunks, config)?;
     Ok(source_memory)
+}
+
+fn document_excluded_from_cortex_training(document: &Document) -> bool {
+    metadata_truthy(&document.metadata, "adapter_training_opt_out")
+        || metadata_truthy(&document.metadata, "training_opt_out")
+        || metadata_truthy(&document.metadata, "exclude_from_adapter_training")
+        || document
+            .metadata
+            .get("privacy_level")
+            .or_else(|| document.metadata.get("visibility"))
+            .is_some_and(|value| privacy_level_excludes_training(value))
+        || metadata_truthy(&document.metadata, "contains_secret")
+        || text_looks_secret(&document.text)
+}
+
+fn privacy_level_excludes_training(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "excluded" | "excluded_from_adapter_training" | "training_excluded"
+    )
+}
+
+fn metadata_truthy(metadata: &BTreeMap<String, String>, key: &str) -> bool {
+    metadata
+        .get(key)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn text_looks_secret(text: &str) -> bool {
+    text.split_whitespace().any(|word| {
+        let word = word.trim_matches(|character: char| {
+            matches!(
+                character,
+                '"' | '\'' | '`' | ',' | ';' | ':' | ')' | ']' | '}'
+            )
+        });
+        let lower = word.to_ascii_lowercase();
+        word.starts_with("sk-")
+            || lower.contains("api_key")
+            || lower.contains("apikey")
+            || lower.contains("password=")
+            || lower.contains("secret=")
+            || lower.contains("token=")
+    })
 }
 
 fn is_compiler_generated_document(document: &Document) -> bool {
@@ -7177,6 +7241,101 @@ mod tests {
             .source_anchor
             .as_ref()
             .is_some_and(|anchor| anchor.path.starts_with("imprint://derived/"))));
+    }
+
+    #[test]
+    fn privacy_exclusions_stay_out_of_cortex_training_and_manifest_provenance() {
+        let root = temp_store_root("privacy-phase-12");
+        let public = root.join("public.txt");
+        let private = root.join("private.txt");
+        fs::write(
+            &public,
+            "Public routing memory explains library provenance and source recall.",
+        )
+        .expect("write public");
+        fs::write(
+            &private,
+            "Private OptoutSecretTerm contains token=should-never-train.",
+        )
+        .expect("write private");
+        ingest_paths(&root, &[public, private]).expect("ingest");
+
+        let store = FileMemoryStore::new(&root);
+        let mut memory = store.load().expect("load memory");
+        let excluded_document_id = memory
+            .documents
+            .iter_mut()
+            .find(|document| document.text.contains("OptoutSecretTerm"))
+            .map(|document| {
+                document.metadata.insert(
+                    "privacy_level".into(),
+                    "excluded_from_adapter_training".into(),
+                );
+                document
+                    .metadata
+                    .insert("adapter_training_opt_out".into(), "true".into());
+                document.id.clone()
+            })
+            .expect("excluded document");
+        store.save(&memory).expect("save privacy metadata");
+
+        let compiled = compile_memory_brain(&root).expect("compile private");
+        let training_dir = root.join("training");
+        let all_training = ["train", "eval", "test"]
+            .into_iter()
+            .flat_map(|split| {
+                compiled
+                    .export_files
+                    .iter()
+                    .filter(move |file| file.ends_with(&format!(".{split}.jsonl")))
+            })
+            .map(|file| fs::read_to_string(file).expect("read training file"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!all_training.contains("OptoutSecretTerm"));
+        assert!(!all_training.contains("should-never-train"));
+        assert!(all_training.contains("source_excluded_from_adapter_training"));
+
+        let summary: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(training_dir.join("summary.json")).expect("read summary"),
+        )
+        .expect("parse summary");
+        assert_eq!(
+            summary
+                .get("visibility_counts")
+                .and_then(|counts| counts.get("excluded_from_adapter_training"))
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+
+        let adapter_state = compiled.adapter_state.as_ref().expect("adapter state");
+        let manifest_path = adapter_state.manifest_path.as_ref().expect("manifest path");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(manifest_path).expect("read manifest"))
+                .expect("parse manifest");
+        let provenance = manifest
+            .get("adapter_provenance")
+            .expect("adapter provenance");
+        assert_eq!(
+            provenance
+                .get("corpus_hash")
+                .and_then(|value| value.as_str()),
+            Some(adapter_state.current_source_dataset_hash.as_str())
+        );
+        assert!(provenance
+            .get("excluded_sources")
+            .and_then(|value| value.as_array())
+            .is_some_and(|sources| sources
+                .iter()
+                .any(|source| source.as_str() == Some(excluded_document_id.as_str()))));
+        assert_eq!(
+            manifest.get("local_only").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert!(manifest
+            .get("export_warning")
+            .and_then(|value| value.as_str())
+            .is_some_and(|warning| warning.contains("non-local trainer")));
     }
 
     #[test]

@@ -110,6 +110,7 @@ pub struct CortexTrainingExportContext {
     pub attention_marks: Vec<AttentionMark>,
     pub memory_accesses: Vec<MemoryAccess>,
     pub chat_context_traces: Vec<ChatContextTrace>,
+    pub privacy_excluded_sources: Vec<String>,
 }
 
 pub fn write_training_exports(
@@ -210,6 +211,7 @@ pub fn prepare_cortex_adapter_dataset(
     write_jsonl(&data_dir.join("valid.jsonl"), &valid_records)?;
     write_jsonl(&data_dir.join("test.jsonl"), &valid_records)?;
     let prepared_dataset_hash = training_source_hash(&data_dir)?;
+    let provenance = adapter_training_provenance(&training_dir)?;
     let manifest_path = adapter_dir.join("adapter_manifest.json");
     let manifest = json!({
         "status": "prepared",
@@ -224,6 +226,9 @@ pub fn prepare_cortex_adapter_dataset(
         "train_records": train_records.len(),
         "valid_records": valid_records.len(),
         "test_records": valid_records.len(),
+        "adapter_provenance": provenance,
+        "local_only": provenance.local_only,
+        "export_warning": provenance.export_warning,
     });
     fs::write(
         &manifest_path,
@@ -380,7 +385,8 @@ pub fn run_queued_cortex_adapter_training_job(
             stderr: _,
         } => {
             let manifest_path = output_dir.join("adapter_manifest.json");
-            let manifest = read_manifest(&manifest_path)?;
+            let mut manifest = read_manifest(&manifest_path)?;
+            ensure_adapter_manifest_provenance(store_root, &manifest_path, &mut manifest)?;
             job.status = string_field(&manifest, "status").unwrap_or_else(|| "trained".into());
             job.manifest_path = Some(manifest_path.display().to_string());
             job.prepared_dataset_hash = string_field(&manifest, "dataset_hash");
@@ -1197,6 +1203,31 @@ fn read_manifest(path: &Path) -> anyhow::Result<serde_json::Value> {
         .with_context(|| format!("parsing adapter manifest {}", path.display()))
 }
 
+fn ensure_adapter_manifest_provenance(
+    store_root: &Path,
+    manifest_path: &Path,
+    manifest: &mut serde_json::Value,
+) -> anyhow::Result<()> {
+    if manifest.get("adapter_provenance").is_some() {
+        return Ok(());
+    }
+    let provenance = adapter_training_provenance(&store_root.join("training"))?;
+    if let Some(object) = manifest.as_object_mut() {
+        object.insert(
+            "adapter_provenance".into(),
+            serde_json::to_value(&provenance)?,
+        );
+        object.insert("local_only".into(), json!(provenance.local_only));
+        object.insert("export_warning".into(), json!(provenance.export_warning));
+    }
+    fs::write(
+        manifest_path,
+        serde_json::to_string_pretty(manifest).context("serializing adapter manifest")?,
+    )
+    .with_context(|| format!("writing {}", manifest_path.display()))?;
+    Ok(())
+}
+
 fn adapter_manifests_by_modified(
     adapters_dir: &Path,
 ) -> anyhow::Result<Vec<(PathBuf, serde_json::Value)>> {
@@ -1656,6 +1687,23 @@ fn build_training_records(context: &CortexTrainingExportContext) -> Vec<serde_js
         }
     }
 
+    for source_id in &context.privacy_excluded_sources {
+        let split = split_for_source(source_id);
+        records.push(training_example(
+            "deleted_or_stale_memory_to_caution",
+            split,
+            source_id,
+            format!("Source {source_id} is private, opted out, forgotten, or secret-bearing."),
+            "caution:source_excluded_from_adapter_training;do_not_route_or_memorize;use_source_recall_only_if_user_readds_source".into(),
+            &[],
+            vec![format!("imprint://document/{source_id}")],
+            Vec::new(),
+            "privacy_exclusion",
+            "excluded_from_adapter_training",
+            true,
+        ));
+    }
+
     for memory in &context.derived_memories {
         if !matches!(
             memory.kind,
@@ -1918,6 +1966,7 @@ fn training_example(
 ) -> serde_json::Value {
     let (input, input_redacted) = redact_sensitive(&input);
     let (target, target_redacted) = redact_sensitive(&target);
+    let secret_detected = input_redacted || target_redacted;
     json!({
         "schema_version": TRAINING_SCHEMA_VERSION,
         "task": task,
@@ -1931,9 +1980,10 @@ fn training_example(
         "source_refs": source_refs,
         "anchor_ids": anchor_ids,
         "source_type": source_type,
-        "visibility": visibility,
-        "redacted": input_redacted || target_redacted,
-        "excluded_or_stale": excluded_or_stale,
+        "visibility": normalize_privacy_level(visibility),
+        "redacted": secret_detected,
+        "secret_detected": secret_detected,
+        "excluded_or_stale": excluded_or_stale || privacy_excludes_training(visibility),
     })
 }
 
@@ -2007,12 +2057,38 @@ fn source_chunk_is_trainable(
         source_type(document).as_str(),
         "derived_memory" | "brain_artifact"
     ) && !source_is_deleted(document)
+        && !source_training_opted_out(document, Some(chunk))
+        && !source_has_training_secret(document, Some(chunk))
 }
 
 fn source_is_deleted(document: &Document) -> bool {
     document.metadata.contains_key("deleted_at")
         || document.metadata.contains_key("source_deleted_at")
         || document.metadata.get("deletion_state").map(String::as_str) == Some("deleted")
+}
+
+fn source_training_opted_out(document: &Document, chunk: Option<&Chunk>) -> bool {
+    metadata_truthy(&document.metadata, "adapter_training_opt_out")
+        || metadata_truthy(&document.metadata, "training_opt_out")
+        || metadata_truthy(&document.metadata, "exclude_from_adapter_training")
+        || privacy_excludes_training(&visibility(document))
+        || chunk.is_some_and(|chunk| {
+            metadata_truthy(&chunk.metadata, "adapter_training_opt_out")
+                || metadata_truthy(&chunk.metadata, "training_opt_out")
+                || metadata_truthy(&chunk.metadata, "exclude_from_adapter_training")
+                || chunk
+                    .metadata
+                    .get("privacy_level")
+                    .is_some_and(|value| privacy_excludes_training(value))
+        })
+}
+
+fn source_has_training_secret(document: &Document, chunk: Option<&Chunk>) -> bool {
+    metadata_truthy(&document.metadata, "contains_secret")
+        || contains_secret(&document.text)
+        || chunk.is_some_and(|chunk| {
+            metadata_truthy(&chunk.metadata, "contains_secret") || contains_secret(&chunk.text)
+        })
 }
 
 fn route_hints(document: &Document, chunk: &Chunk, region_examples: &[String]) -> Vec<String> {
@@ -2122,11 +2198,14 @@ fn misleading_source_family(actual: &str) -> &'static str {
 }
 
 fn visibility(document: &Document) -> String {
-    document
-        .metadata
-        .get("visibility")
-        .cloned()
-        .unwrap_or_else(|| "private".into())
+    normalize_privacy_level(
+        document
+            .metadata
+            .get("privacy_level")
+            .or_else(|| document.metadata.get("visibility"))
+            .map(String::as_str)
+            .unwrap_or("private_user_memory"),
+    )
 }
 
 fn bounded_text(text: &str) -> String {
@@ -2145,14 +2224,7 @@ fn redact_sensitive(text: &str) -> (String, bool) {
     let words = text
         .split_whitespace()
         .map(|word| {
-            let lower = word.to_lowercase();
-            if word.starts_with("sk-")
-                || lower.contains("api_key")
-                || lower.contains("apikey")
-                || lower.contains("password=")
-                || lower.contains("secret=")
-                || lower.contains("token=")
-            {
+            if word_looks_secret(word) {
                 redacted = true;
                 "[REDACTED]".to_string()
             } else {
@@ -2161,6 +2233,117 @@ fn redact_sensitive(text: &str) -> (String, bool) {
         })
         .collect::<Vec<_>>();
     (words.join(" "), redacted)
+}
+
+fn contains_secret(text: &str) -> bool {
+    text.split_whitespace().any(word_looks_secret)
+}
+
+fn word_looks_secret(word: &str) -> bool {
+    let trimmed = word.trim_matches(|character: char| {
+        matches!(
+            character,
+            '"' | '\'' | '`' | ',' | ';' | ':' | ')' | ']' | '}'
+        )
+    });
+    let lower = trimmed.to_lowercase();
+    trimmed.starts_with("sk-")
+        || lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("password=")
+        || lower.contains("secret=")
+        || lower.contains("token=")
+        || lower.contains("bearer ")
+}
+
+fn metadata_truthy(metadata: &BTreeMap<String, String>, key: &str) -> bool {
+    metadata
+        .get(key)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn normalize_privacy_level(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "private" | "private_user" | "private_user_memory" | "user_private" => {
+            "private_user_memory"
+        }
+        "shared" | "project" | "shared_project" | "shared_project_memory" => {
+            "shared_project_memory"
+        }
+        "global" | "reference" | "global_reference" | "global_reference_memory" => {
+            "global_reference_memory"
+        }
+        "excluded" | "excluded_from_adapter_training" | "training_excluded" => {
+            "excluded_from_adapter_training"
+        }
+        _ => "private_user_memory",
+    }
+    .into()
+}
+
+fn privacy_excludes_training(value: &str) -> bool {
+    normalize_privacy_level(value) == "excluded_from_adapter_training"
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AdapterTrainingProvenance {
+    corpus_hash: String,
+    included_sources: Vec<String>,
+    excluded_sources: Vec<String>,
+    train_eval_files: Vec<String>,
+    local_only: bool,
+    export_warning: String,
+}
+
+fn adapter_training_provenance(training_dir: &Path) -> anyhow::Result<AdapterTrainingProvenance> {
+    let mut included_sources = BTreeSet::new();
+    let mut excluded_sources = BTreeSet::new();
+    let mut train_eval_files = Vec::new();
+    let mut local_only = false;
+    for path in jsonl_files(training_dir)? {
+        let file = path.display().to_string();
+        train_eval_files.push(file.clone());
+        for line in fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+        {
+            let record: serde_json::Value = serde_json::from_str(line)
+                .with_context(|| format!("parsing {}", path.display()))?;
+            let source_id = json_str(&record, "source_id");
+            let excluded = record
+                .get("excluded_or_stale")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            if excluded {
+                excluded_sources.insert(source_id);
+            } else {
+                included_sources.insert(source_id);
+            }
+            if record
+                .get("visibility")
+                .and_then(|value| value.as_str())
+                .is_some_and(|visibility| visibility == "private_user_memory")
+            {
+                local_only = true;
+            }
+        }
+    }
+    train_eval_files.sort();
+    Ok(AdapterTrainingProvenance {
+        corpus_hash: training_source_hash(training_dir)?,
+        included_sources: included_sources.into_iter().collect(),
+        excluded_sources: excluded_sources.into_iter().collect(),
+        train_eval_files,
+        local_only,
+        export_warning: "Training exports may contain private semantic addresses; do not send them to a non-local trainer without explicit user approval.".into(),
+    })
 }
 
 fn web_finding_is_stale(finding: &WebFinding) -> bool {
